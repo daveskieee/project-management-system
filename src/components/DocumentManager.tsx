@@ -112,8 +112,8 @@ export const DEFAULT_SEED_DOCUMENTS: ProjectDocument[] = [
 export const MAX_UPLOAD_SIZE_BYTES = 50 * 1024 * 1024; // 50 MB
 export const MAX_UPLOAD_SIZE_LABEL = '50 MB';
 
-// Enterprise Database & Cloud Archive Total Storage Capacity (10 GB Standard Enterprise Quota)
-export const TOTAL_STORAGE_QUOTA_MB = 10240; // 10 GB
+// Enterprise Database & Cloud Archive Total Storage Capacity (40 GB Enterprise Quota)
+export const TOTAL_STORAGE_QUOTA_MB = 40960; // 40 GB
 export const TOTAL_STORAGE_QUOTA_BYTES = TOTAL_STORAGE_QUOTA_MB * 1024 * 1024;
 
 // Helper to format bytes into readable KB, MB, or GB string
