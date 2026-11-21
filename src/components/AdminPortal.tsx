@@ -4445,7 +4445,14 @@ export default function AdminPortal({
                           </button>
                           <button
                             type="button"
-                            onClick={() => { setShowAddStaff(v => !v); setStaffError(''); fetchStaff(); }}
+                            onClick={() => {
+                              setShowAddStaff(v => !v);
+                              setNewStaffName('');
+                              setNewStaffEmail('');
+                              setNewStaffPassword('');
+                              setStaffError('');
+                              fetchStaff();
+                            }}
                             className="text-[10px] font-bold px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white border border-violet-500/50 transition-colors cursor-pointer flex items-center gap-1.5"
                           >
                             <UserPlus className="w-3 h-3" />
@@ -4460,13 +4467,13 @@ export default function AdminPortal({
 
                       {/* Add Staff Form */}
                       {showAddStaff && (
-                        <form onSubmit={handleAddStaff} className="bg-slate-900/80 border border-violet-800/40 rounded-xl p-4 space-y-3">
+                        <form onSubmit={handleAddStaff} autoComplete="off" className="bg-slate-900/80 border border-violet-800/40 rounded-xl p-4 space-y-3">
                           <div className="text-xs font-bold text-violet-300 mb-2">New Staff Account</div>
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                             <div>
                               <label className="block text-[10px] text-slate-400 font-semibold mb-1">Full Name</label>
                               <input
-                                type="text" required value={newStaffName}
+                                type="text" name="new-staff-name" autoComplete="off" required value={newStaffName}
                                 onChange={e => setNewStaffName(e.target.value)}
                                 placeholder="e.g. Engr. Juan Dela Cruz"
                                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-violet-500"
@@ -4475,7 +4482,7 @@ export default function AdminPortal({
                             <div>
                               <label className="block text-[10px] text-slate-400 font-semibold mb-1">Email Address</label>
                               <input
-                                type="email" required value={newStaffEmail}
+                                type="email" name="new-staff-email" autoComplete="off" required value={newStaffEmail}
                                 onChange={e => setNewStaffEmail(e.target.value)}
                                 placeholder="e.g. engineer@ldmconstruction.ph"
                                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-violet-500"
@@ -4484,7 +4491,7 @@ export default function AdminPortal({
                             <div>
                               <label className="block text-[10px] text-slate-400 font-semibold mb-1">Password</label>
                               <input
-                                type="password" required minLength={6} value={newStaffPassword}
+                                type="password" name="new-staff-password" autoComplete="new-password" required minLength={6} value={newStaffPassword}
                                 onChange={e => setNewStaffPassword(e.target.value)}
                                 placeholder="Min. 6 characters"
                                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-violet-500"
@@ -4509,7 +4516,7 @@ export default function AdminPortal({
                             >
                               {staffSaving ? 'Creating...' : 'Create Account'}
                             </button>
-                            <button type="button" onClick={() => setShowAddStaff(false)}
+                            <button type="button" onClick={() => { setShowAddStaff(false); setNewStaffName(''); setNewStaffEmail(''); setNewStaffPassword(''); setStaffError(''); }}
                               className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold rounded-lg text-xs transition-colors cursor-pointer"
                             >
                               Cancel
