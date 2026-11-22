@@ -3,13 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   X, DollarSign, Banknote, TrendingUp, Flame, Printer,
   Users, Package, HardHat, Building2, CheckCircle2, AlertTriangle
 } from 'lucide-react';
-import { ProjectProfile } from '../types';
+import { Client, ProjectProfile, ProjectTask } from '../types';
 import { getProjectMaterialSpend, getStoredMaterialDirectory } from '../utils/bomProfitSync';
+import { GANTT_TASKS_UPDATED_EVENT, getCanonicalProjectProgress } from '../utils/ganttProgress';
+import { getCanonicalProjectFundsCollected } from '../utils/projectFundsSync';
 import { openEnterprisePrintWindow, escapePrintHtml } from '../utils/printEngine';
 import { useTheme } from '../context/ThemeContext';
 
@@ -33,6 +35,8 @@ interface BudgetsExpensesModalProps {
   isOpen: boolean;
   onClose: () => void;
   projects: ProjectProfile[];
+  tasks?: ProjectTask[];
+  clients?: Client[];
   /** Optional precomputed per-project labor & subcon disbursals from parent */
   projectDisbursals?: Record<string, { labor: number; subcon: number }>;
   /** Optional total labor / subcon overrides when per-project breakdown isn't granular */
@@ -45,12 +49,21 @@ export default function BudgetsExpensesModal({
   isOpen,
   onClose,
   projects,
+  tasks = [],
+  clients = [],
   projectDisbursals = {},
   totalLaborFallback = 0,
   totalSubconFallback = 0,
   initialFocus = 'all',
 }: BudgetsExpensesModalProps) {
   const { isDark } = useTheme();
+  const [ganttSyncTick, setGanttSyncTick] = useState(0);
+
+  useEffect(() => {
+    const onGanttUpdated = () => setGanttSyncTick((t) => t + 1);
+    window.addEventListener(GANTT_TASKS_UPDATED_EVENT, onGanttUpdated);
+    return () => window.removeEventListener(GANTT_TASKS_UPDATED_EVENT, onGanttUpdated);
+  }, []);
 
   const rows: ProjectBudgetBreakdownRow[] = useMemo(() => {
     const allMaterials = getStoredMaterialDirectory();
@@ -58,14 +71,8 @@ export default function BudgetsExpensesModal({
 
     return projects.map((p) => {
       const budget = Number(p.budget) || 0;
-      const collected = Number(p.fundsCollected) || 0;
-      const rawProg =
-        (p as any).cpmProgress ??
-        (p as any).overallProgress ??
-        (p as any).progress ??
-        p.progressPercentage ??
-        0;
-      const progress = Math.round(Number(rawProg) || 0);
+      const collected = getCanonicalProjectFundsCollected(p, clients);
+      const progress = getCanonicalProjectProgress(p, tasks);
 
       const disb = projectDisbursals[p.id];
       const weight = totalBudgetSum > 0 ? budget / totalBudgetSum : 1 / (projects.length || 1);
@@ -98,7 +105,7 @@ export default function BudgetsExpensesModal({
         burnRatePct,
       };
     });
-  }, [projects, projectDisbursals, totalLaborFallback, totalSubconFallback]);
+  }, [projects, tasks, clients, projectDisbursals, totalLaborFallback, totalSubconFallback, ganttSyncTick]);
 
   const totals = useMemo(() => {
     const allocatedBudget = rows.reduce((s, r) => s + r.budget, 0);
@@ -289,7 +296,7 @@ export default function BudgetsExpensesModal({
                 ₱{totals.allocatedBudget.toLocaleString()}
               </div>
               <div className="text-[11px] text-slate-400 mt-1">
-                Across {rows.length} active project{rows.length === 1 ? '' : 's'}
+                Across {rows.length} portfolio project{rows.length === 1 ? '' : 's'}
               </div>
             </div>
 
@@ -341,43 +348,43 @@ export default function BudgetsExpensesModal({
               }`}
             >
               <div className="flex items-center justify-between text-[11px] font-mono uppercase tracking-wider text-slate-400">
-                <span>Burn Rate &amp; Progress</span>
+                <span>Avg. Progress &amp; Burn Rate</span>
                 <Flame
                   className={`w-4 h-4 ${
                     totals.burnRatePct > 100
                       ? 'text-rose-400'
-                      : totals.burnRatePct >= 80
-                      ? 'text-amber-400'
-                      : 'text-emerald-400'
+                      : totals.avgProgress >= 75
+                      ? 'text-emerald-400'
+                      : 'text-sky-400'
                   }`}
                 />
               </div>
               <div className="flex items-baseline gap-2 mt-1.5">
                 <span
                   className={`text-xl font-bold font-mono ${
-                    totals.burnRatePct > 100
-                      ? 'text-rose-400'
-                      : totals.burnRatePct >= 80
-                      ? 'text-amber-400'
-                      : 'text-emerald-400'
+                    totals.avgProgress >= 75
+                      ? 'text-emerald-400'
+                      : totals.avgProgress > 0
+                      ? 'text-sky-400'
+                      : isDark ? 'text-white' : 'text-slate-900'
                   }`}
                 >
-                  {totals.burnRatePct.toFixed(1)}%
+                  {totals.avgProgress}%
                 </span>
                 <span className="text-xs text-slate-400 font-mono">
-                  • {totals.avgProgress}% Avg. Progress
+                  • {totals.burnRatePct.toFixed(1)}% Burn Rate
                 </span>
               </div>
               <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden mt-2">
                 <div
                   className={`h-full rounded-full ${
-                    totals.burnRatePct > 100
-                      ? 'bg-rose-500'
-                      : totals.burnRatePct >= 80
-                      ? 'bg-amber-400'
-                      : 'bg-emerald-400'
+                    totals.avgProgress >= 75
+                      ? 'bg-emerald-400'
+                      : totals.avgProgress > 0
+                      ? 'bg-sky-400'
+                      : 'bg-slate-600'
                   }`}
-                  style={{ width: `${Math.min(100, Math.max(totals.burnRatePct > 0 ? 2 : 0, totals.burnRatePct))}%` }}
+                  style={{ width: `${Math.min(100, Math.max(totals.avgProgress > 0 ? 2 : 0, totals.avgProgress))}%` }}
                 />
               </div>
             </div>

@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useMemo, useEffect } from 'react';
+import { useConfirm } from '../context/ConfirmDialogContext';
 import {
   FileCheck, AlertTriangle, Clock, ShieldCheck, Plus,
   Building2, Calendar, Search, Filter, ExternalLink,
@@ -37,6 +38,7 @@ export default function GovernmentPermitsTracker({
   userRole,
   user
 }: GovernmentPermitsTrackerProps) {
+  const { confirm: confirmDialog } = useConfirm();
   const isEffectiveReadOnly = Boolean(readOnly || userRole === 'FINANCE' || user?.role === 'FINANCE');
   const [projectFilter, setProjectFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
@@ -305,7 +307,13 @@ export default function GovernmentPermitsTracker({
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this government permit record?')) return;
+    const ok = await confirmDialog({
+      title: 'Delete Government Permit',
+      message: 'Are you sure you want to delete this government permit record?',
+      confirmLabel: 'Delete Permit',
+      variant: 'danger',
+    });
+    if (!ok) return;
     try {
       if (onDeletePermit) {
         await onDeletePermit(id);

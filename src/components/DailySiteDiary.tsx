@@ -413,6 +413,21 @@ export default function DailySiteDiary({ logs, projects = [], contractors = [], 
     setPickerLon(prev => parseFloat((prev + deltaLon).toFixed(6)));
   };
 
+  // Transmit Worker Emergency Stoppage Dispatch (triggers styled confirmation modal)
+  const handleDispatchWorkerBroadcast = () => {
+    setPendingEmergencyAction('broadcast');
+  };
+
+  const handleConfirmEmergencyAction = async () => {
+    const action = pendingEmergencyAction;
+    setPendingEmergencyAction(null);
+    if (action === 'toggle') {
+      await executeToggleForceMajeure();
+    } else if (action === 'broadcast') {
+      await executeDispatchWorkerBroadcast();
+    }
+  };
+
   const handleSavePinpointCoordinates = () => {
     const cleanLat = parseFloat(Number(pickerLat).toFixed(6));
     const cleanLon = parseFloat(Number(pickerLon).toFixed(6));
@@ -474,6 +489,24 @@ export default function DailySiteDiary({ logs, projects = [], contractors = [], 
 
   // Live Weather Telemetry State
   const [liveWeather, setLiveWeather] = useState<LiveWeatherData | null>(null);
+
+  // Sync live weather snapshot to shared storage + event so Dashboard KPI always matches Site Safety & Weather
+  useEffect(() => {
+    if (!liveWeather || typeof window === 'undefined') return;
+    const snapshot = {
+      temperature: Math.round(Number(liveWeather.temperature)),
+      weatherCode: Number(liveWeather.weatherCode),
+      windSpeed: Math.round(Number(liveWeather.windSpeed || 0)),
+      locationName: selectedLocation.name,
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      localStorage.setItem('ldm_live_weather_snapshot', JSON.stringify(snapshot));
+      window.dispatchEvent(new CustomEvent('ldm-live-weather-updated', { detail: snapshot }));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [liveWeather, selectedLocation.name]);
   const [forecast, setForecast] = useState<DailyForecastItem[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [lastFetched, setLastFetched] = useState<Date | null>(null);
@@ -626,15 +659,10 @@ export default function DailySiteDiary({ logs, projects = [], contractors = [], 
     setTimeout(() => setNotification(null), 3500);
   };
 
-  // Force Majeure Weather Suspension Toggle
-  const handleToggleForceMajeure = async () => {
-    if (!isForceMajeureSuspended) {
-      const confirmed = window.confirm(
-        "Confirm Emergency Site Suspension: This will pause all active CPM Gantt milestones and notify site supervisors. Proceed?"
-      );
-      if (!confirmed) return;
-    }
+  // Styled In-App Confirmation Modal for Emergency Site Suspension (replaces native window.confirm)
+  const [pendingEmergencyAction, setPendingEmergencyAction] = useState<'toggle' | 'broadcast' | null>(null);
 
+  const executeToggleForceMajeure = async () => {
     const nextState = !isForceMajeureSuspended;
     setIsForceMajeureSuspended(nextState);
 
@@ -672,13 +700,16 @@ export default function DailySiteDiary({ logs, projects = [], contractors = [], 
     setTimeout(() => setNotification(null), 4000);
   };
 
-  // Transmit Worker Emergency Stoppage Dispatch
-  const handleDispatchWorkerBroadcast = async () => {
-    const confirmed = window.confirm(
-      "Confirm Emergency Site Suspension: This will pause all active CPM Gantt milestones and notify site supervisors. Proceed?"
-    );
-    if (!confirmed) return;
+  // Force Majeure Weather Suspension Toggle
+  const handleToggleForceMajeure = async () => {
+    if (!isForceMajeureSuspended) {
+      setPendingEmergencyAction('toggle');
+      return;
+    }
+    await executeToggleForceMajeure();
+  };
 
+  const executeDispatchWorkerBroadcast = async () => {
     setIsBroadcasting(true);
     // Simulate real-time GSM/LTE multi-channel broadcast
     await new Promise(r => setTimeout(r, 1000));
@@ -2817,6 +2848,49 @@ export default function DailySiteDiary({ logs, projects = [], contractors = [], 
                   <span>Save Coordinates &amp; Refresh Telemetry</span>
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Styled In-App Emergency Site Suspension Confirmation Modal */}
+      {pendingEmergencyAction && (
+        <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-rose-500/50 rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-400 shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Confirm Emergency Site Suspension</h3>
+                <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                  {pendingEmergencyAction === 'broadcast'
+                    ? 'This will transmit an emergency Force Majeure stoppage broadcast, pause active CPM Gantt milestones, and notify site supervisors.'
+                    : 'This will activate Force Majeure Weather Suspension, pause all active CPM Gantt milestones, and notify site supervisors.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-950/90 border border-slate-800 text-[11px] text-slate-400 space-y-1">
+              <div>Site: <span className="text-white font-semibold">{selectedLocation.name}</span></div>
+              <div>Reason: <span className="text-amber-300">{suspensionReason}</span></div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setPendingEmergencyAction(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmEmergencyAction}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold cursor-pointer transition-colors shadow-md shadow-rose-600/20"
+              >
+                {pendingEmergencyAction === 'broadcast' ? 'Confirm & Broadcast Stoppage' : 'Confirm Site Suspension'}
+              </button>
             </div>
           </div>
         </div>

@@ -384,22 +384,24 @@ export function createGanttRouter(prisma: PrismaClient) {
             const totalDuration = targetTasks.reduce((acc, curr) => acc + Math.max(1, curr.duration || 1), 0);
             const weightedProgress = targetTasks.reduce((acc, curr) => {
               let p = 0;
-              if (curr.status === 'COMPLETED' || (typeof curr.progress === 'number' && curr.progress >= 1.0)) {
+              if (curr.status === 'COMPLETED') {
                 p = 1.0;
               } else {
                 const raw = typeof curr.progress === 'number' ? curr.progress : 0;
-                p = raw > 1.0 ? raw / 100 : raw;
+                p = raw > 1.0 ? Math.min(1.0, raw / 100) : Math.max(0, Math.min(1.0, raw));
               }
               return acc + (p * Math.max(1, curr.duration || 1));
             }, 0);
             avgProgress = totalDuration > 0 ? Math.round((weightedProgress / totalDuration) * 100) : 0;
           }
           const existingProj = await tx.commercialProject.findUnique({ where: { id: projectId } });
-          const shouldAdvanceStatus = avgProgress > 0 && (!existingProj?.status || existingProj.status === 'PLANNING');
+          const isCompletedProj = existingProj?.status === 'COMPLETED' || existingProj?.status === 'HANDED_OVER';
+          const finalProgress = isCompletedProj ? 100 : avgProgress;
+          const shouldAdvanceStatus = finalProgress > 0 && (!existingProj?.status || existingProj.status === 'PLANNING');
           await tx.commercialProject.update({
             where: { id: projectId },
             data: {
-              progressPercentage: avgProgress,
+              progressPercentage: finalProgress,
               tasksCount: allTasks.length,
               ...(shouldAdvanceStatus ? { status: 'IN_PROGRESS' } : {})
             }
@@ -531,6 +533,15 @@ export function createGanttRouter(prisma: PrismaClient) {
               : (t.status || (progress > 0 ? 'IN_PROGRESS' : 'TODO'));
           const type = (duration === 0 || t.type === 'milestone') ? 'milestone' : (t.type || 'task');
 
+          const existingOwner = await tx.projectTask.findUnique({
+            where: { id: String(t.id) },
+            select: { projectId: true },
+          });
+          // Never overwrite a task belonging to a different project
+          if (existingOwner && existingOwner.projectId !== projectId) {
+            continue;
+          }
+
           await tx.projectTask.upsert({
             where: { id: String(t.id) },
             update: {
@@ -637,17 +648,31 @@ export function createGanttRouter(prisma: PrismaClient) {
           const leafTasks = freshTasks.filter(t => !parentIds.has(t.id));
           const targetTasks = leafTasks.length > 0 ? leafTasks : freshTasks;
           const totalDuration = targetTasks.reduce((acc, curr) => acc + Math.max(1, curr.duration || 1), 0);
-          const weightedProgress = targetTasks.reduce((acc, curr) => acc + (curr.progress || 0) * Math.max(1, curr.duration || 1), 0);
-          avgProgress = totalDuration > 0 ? Math.round((weightedProgress / totalDuration) * 100) : 0;
-
-          await tx.commercialProject.update({
-            where: { id: projectId },
-            data: {
-              progressPercentage: avgProgress,
-              tasksCount: freshTasks.length
+          const weightedProgress = targetTasks.reduce((acc, curr) => {
+            let p = 0;
+            if (curr.status === 'COMPLETED') {
+              p = 1.0;
+            } else {
+              const raw = typeof curr.progress === 'number' ? curr.progress : 0;
+              p = raw > 1.0 ? Math.min(1.0, raw / 100) : Math.max(0, Math.min(1.0, raw));
             }
-          }).catch(() => { });
+            return acc + p * Math.max(1, curr.duration || 1);
+          }, 0);
+          avgProgress = totalDuration > 0 ? Math.round((weightedProgress / totalDuration) * 100) : 0;
         }
+
+        const existingProj = await tx.commercialProject.findUnique({ where: { id: projectId } });
+        const isCompletedProj = existingProj?.status === 'COMPLETED' || existingProj?.status === 'HANDED_OVER';
+        const finalProgress = isCompletedProj ? 100 : avgProgress;
+
+        // Always persist computed progress & task count (including 0 when all tasks are cleared)
+        await tx.commercialProject.update({
+          where: { id: projectId },
+          data: {
+            progressPercentage: finalProgress,
+            tasksCount: freshTasks.length
+          }
+        }).catch(() => { });
 
         return {
           tasksCount: freshTasks.length,

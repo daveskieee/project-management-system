@@ -85,6 +85,7 @@ export const ROLE_NAVIGATION_CONFIG: Record<UserRole, NavSectionConfig[]> = {
       id: 'pm-projects',
       title: 'Projects & Planning',
       items: [
+        { id: 'dashboard', label: 'Dashboard', icon: TrendingUp },
         { id: 'projects', label: 'Commercial Sites Hub', icon: Building2 },
         { id: 'project-history', label: 'Project History Archive', icon: Archive },
         { id: 'gantt', label: 'Master Gantt & Timeline', icon: BarChart3 },
@@ -132,6 +133,7 @@ export const ROLE_NAVIGATION_CONFIG: Record<UserRole, NavSectionConfig[]> = {
       id: 'fin-planning',
       title: 'Schedule & Workforce Records',
       items: [
+        { id: 'dashboard', label: 'Finance Dashboard', icon: TrendingUp },
         { id: 'schedule', label: 'Company Schedule Calendar', icon: CalendarDays },
         { id: 'timekeeper-attendance', label: 'In-House Artisan Roll-Call', icon: ClipboardCheck },
       ]
@@ -190,6 +192,7 @@ export const ROLE_NAVIGATION_CONFIG: Record<UserRole, NavSectionConfig[]> = {
       id: 'cli-project',
       title: 'Commercial Fit-Out',
       items: [
+        { id: 'dashboard', label: 'My Dashboard', icon: TrendingUp },
         { id: 'projects', label: 'My Fit-Out Project', icon: Building2 },
         { id: 'documents', label: 'Blueprints & Handover Docs', icon: FolderKanban },
         { id: 'quotation-leads', label: 'My Project Estimates', icon: Briefcase },

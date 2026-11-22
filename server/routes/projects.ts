@@ -42,42 +42,76 @@ projectsRouter.get('/projects', async (req: Request, res: Response) => {
     const selectProjectsSql = `
       SELECT 
         p.*,
+        CASE
+          WHEN UPPER(COALESCE(p.status, '')) IN ('COMPLETED', 'HANDED_OVER') THEN 100
+          ELSE COALESCE(
+            (
+              SELECT ROUND(
+                SUM(
+                  (CASE 
+                    WHEN t.status = 'COMPLETED' THEN 100.0
+                    WHEN t.progress > 1.0 THEN LEAST(100.0, t.progress)
+                    WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
+                    ELSE 0.0 
+                  END) * GREATEST(COALESCE(t.duration, 1), 1)
+                ) 
+                / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
+              )
+              FROM project_tasks t 
+              WHERE t."projectId" = p.id
+                AND NOT EXISTS (SELECT 1 FROM project_tasks c WHERE c."parentTaskId" = t.id)
+            ), 
+            0
+          )
+        END AS progress,
+        CASE
+          WHEN UPPER(COALESCE(p.status, '')) IN ('COMPLETED', 'HANDED_OVER') THEN 100
+          ELSE COALESCE(
+            (
+              SELECT ROUND(
+                SUM(
+                  (CASE 
+                    WHEN t.status = 'COMPLETED' THEN 100.0
+                    WHEN t.progress > 1.0 THEN LEAST(100.0, t.progress)
+                    WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
+                    ELSE 0.0 
+                  END) * GREATEST(COALESCE(t.duration, 1), 1)
+                ) 
+                / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
+              )
+              FROM project_tasks t 
+              WHERE t."projectId" = p.id
+                AND NOT EXISTS (SELECT 1 FROM project_tasks c WHERE c."parentTaskId" = t.id)
+            ), 
+            0
+          )
+        END AS "cpmProgress",
         COALESCE(
           (
-            SELECT ROUND(
-              SUM(
-                (CASE 
-                  WHEN t.status = 'COMPLETED' OR t.progress >= 1.0 THEN 100.0 
-                  WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
-                  ELSE COALESCE(t.progress, 0.0) 
-                END) * GREATEST(COALESCE(t.duration, 1), 1)
-              ) 
-              / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
-            )
-            FROM project_tasks t 
-            WHERE t."projectId" = p.id
-          ), 
-          p.progress_percentage, 
+            SELECT ROUND(SUM(COALESCE(il."amountPaid", il."amountDue", 0))::numeric, 2)
+            FROM installment_ledgers il
+            INNER JOIN client_packages cp ON cp.id = il."clientPackageId"
+            INNER JOIN users u ON u.id = cp."userId"
+            WHERE il.status::text = 'PAID'
+              AND (
+                LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.name))
+                OR LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.id))
+                OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.id))
+                OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.name))
+                OR (
+                  COALESCE(TRIM(p.client_name), '') <> ''
+                  AND LOWER(TRIM(u.name)) = LOWER(TRIM(p.client_name))
+                )
+                OR (
+                  COALESCE(TRIM(u.email), '') <> ''
+                  AND LENGTH(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) >= 4
+                  AND LOWER(u.email) LIKE '%' || LOWER(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) || '%'
+                )
+                OR p.id = ANY(COALESCE(u.project_ids, ARRAY[]::text[]))
+              )
+          ),
           0
-        ) AS progress,
-        COALESCE(
-          (
-            SELECT ROUND(
-              SUM(
-                (CASE 
-                  WHEN t.status = 'COMPLETED' OR t.progress >= 1.0 THEN 100.0 
-                  WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
-                  ELSE COALESCE(t.progress, 0.0) 
-                END) * GREATEST(COALESCE(t.duration, 1), 1)
-              ) 
-              / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
-            )
-            FROM project_tasks t 
-            WHERE t."projectId" = p.id
-          ), 
-          p.progress_percentage, 
-          0
-        ) AS "cpmProgress"
+        ) AS ledger_funds_collected
       FROM commercial_projects p
     `;
     let dbProjectsQuery = `${selectProjectsSql} ORDER BY p.created_at ASC`;
@@ -187,7 +221,9 @@ projectsRouter.get('/projects', async (req: Request, res: Response) => {
           description: p.description || '',
           location: p.location || '',
           budget: Number(p.budget || 0),
-          fundsCollected: Number(p.funds_collected || 0),
+          fundsCollected: Number(p.ledger_funds_collected ?? 0),
+          collected: Number(p.ledger_funds_collected ?? 0),
+          amountPaid: Number(p.ledger_funds_collected ?? 0),
           laborExpenses: laborInfo.total,
           paidLaborExpenses: laborInfo.paid,
           approvedLaborExpenses: laborInfo.approved,
@@ -344,7 +380,7 @@ projectsRouter.post('/projects', requireRole(['ADMIN', 'ENGINEER']), async (req:
       description: p.description || '',
       location: p.location || '',
       budget: Number(p.budget || 0),
-      fundsCollected: Number(p.funds_collected || 0),
+      fundsCollected: Number(p.ledger_funds_collected ?? 0),
       progressPercentage: Number(p.progress_percentage || 0),
       status: p.status || 'PLANNING',
       targetHandoverDate: p.target_handover_date ? (p.target_handover_date instanceof Date ? p.target_handover_date.toISOString().split('T')[0] : String(p.target_handover_date).split('T')[0]) : '2026-12-31',
@@ -424,7 +460,7 @@ projectsRouter.patch('/projects/:id', requireRole(['ADMIN', 'OPERATIONS_MANAGER'
       }
     }
     if (budget !== undefined) { updates.push(`budget = $${idx++}`); values.push(Number(budget) || 0); }
-    if (fundsCollected !== undefined) { updates.push(`funds_collected = $${idx++}`); values.push(Number(fundsCollected) || 0); }
+    // Note: funds_collected is strictly ledger-driven (Finance -> Progress Billing & Receipts) and locked from manual overwrites
     // Note: progress_percentage is strictly driven by CPM Gantt task completion and locked from manual modification
     if (status !== undefined) { updates.push(`status = $${idx++}`); values.push(status); }
     if (targetHandoverDate !== undefined) { updates.push(`target_handover_date = $${idx++}`); values.push(targetHandoverDate || null); }
@@ -452,24 +488,54 @@ projectsRouter.patch('/projects/:id', requireRole(['ADMIN', 'OPERATIONS_MANAGER'
     const pRes = await pool.query(`
       SELECT 
         p.*,
+        CASE
+          WHEN UPPER(COALESCE(p.status, '')) IN ('COMPLETED', 'HANDED_OVER') THEN 100
+          ELSE COALESCE(
+            (
+              SELECT ROUND(
+                SUM(
+                  (CASE 
+                    WHEN t.status = 'COMPLETED' THEN 100.0
+                    WHEN t.progress > 1.0 THEN LEAST(100.0, t.progress)
+                    WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
+                    ELSE 0.0 
+                  END) * GREATEST(COALESCE(t.duration, 1), 1)
+                ) 
+                / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
+              )
+              FROM project_tasks t 
+              WHERE t."projectId" = p.id
+                AND NOT EXISTS (SELECT 1 FROM project_tasks c WHERE c."parentTaskId" = t.id)
+            ), 
+            0
+          )
+        END AS cpm_progress,
         COALESCE(
           (
-            SELECT ROUND(
-              SUM(
-                (CASE 
-                  WHEN t.status = 'COMPLETED' OR t.progress >= 1.0 THEN 100.0 
-                  WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
-                  ELSE COALESCE(t.progress, 0.0) 
-                END) * GREATEST(COALESCE(t.duration, 1), 1)
-              ) 
-              / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
-            )
-            FROM project_tasks t 
-            WHERE t."projectId" = p.id
-          ), 
-          p.progress_percentage, 
+            SELECT ROUND(SUM(COALESCE(il."amountPaid", il."amountDue", 0))::numeric, 2)
+            FROM installment_ledgers il
+            INNER JOIN client_packages cp ON cp.id = il."clientPackageId"
+            INNER JOIN users u ON u.id = cp."userId"
+            WHERE il.status::text = 'PAID'
+              AND (
+                LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.name))
+                OR LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.id))
+                OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.id))
+                OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.name))
+                OR (
+                  COALESCE(TRIM(p.client_name), '') <> ''
+                  AND LOWER(TRIM(u.name)) = LOWER(TRIM(p.client_name))
+                )
+                OR (
+                  COALESCE(TRIM(u.email), '') <> ''
+                  AND LENGTH(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) >= 4
+                  AND LOWER(u.email) LIKE '%' || LOWER(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) || '%'
+                )
+                OR p.id = ANY(COALESCE(u.project_ids, ARRAY[]::text[]))
+              )
+          ),
           0
-        ) AS cpm_progress
+        ) AS ledger_funds_collected
       FROM commercial_projects p
       WHERE p.id = $1
     `, [id]);
@@ -518,7 +584,7 @@ projectsRouter.patch('/projects/:id', requireRole(['ADMIN', 'OPERATIONS_MANAGER'
       description: p.description || '',
       location: p.location || '',
       budget: Number(p.budget || 0),
-      fundsCollected: Number(p.funds_collected || 0),
+      fundsCollected: Number(p.ledger_funds_collected ?? 0),
       laborExpenses: totalLabor,
       paidLaborExpenses: paidLabor,
       approvedLaborExpenses: approvedLabor,

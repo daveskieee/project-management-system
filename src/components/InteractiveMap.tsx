@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { useConfirm } from '../context/ConfirmDialogContext';
 import { 
   Upload, CheckCircle2, FileImage, Layers, Eye, RefreshCw, 
   UserPlus, FileText, Check, ShieldCheck, ArrowRight, Activity,
@@ -44,6 +45,7 @@ export default function InteractiveMap({
   onClearAllLots,
   onApplyAIPricing
 }: InteractiveMapProps) {
+  const { confirm: confirmDialog, toast } = useConfirm();
   const [selectedSlot, setSelectedSlot] = useState<Slot | null>(null);
   const [assignmentClientId, setAssignmentClientId] = useState<string>('');
   const [filterStatus, setFilterStatus] = useState<string>('ALL');
@@ -144,7 +146,7 @@ export default function InteractiveMap({
       setTimeout(() => setPricingNotice(null), 5000);
     } catch (e) {
       console.error(e);
-      setPricingNotice('⚠️ Failed to commit pricing updates to database.');
+      setPricingNotice('⚠️ Unable to save pricing updates. Please try again.');
     } finally {
       setIsApplyingPricing(false);
     }
@@ -179,7 +181,7 @@ export default function InteractiveMap({
       }
     } catch (err: any) {
       console.error('Failed to parse CAD file:', err);
-      alert(`Error parsing CAD file: ${err.message || 'Unknown format'}`);
+      toast(`Error parsing CAD file: ${err.message || 'Unknown format'}`, 'error');
     } finally {
       setIsParsing(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -448,8 +450,14 @@ export default function InteractiveMap({
 
           {slots.length > 0 && onClearAllLots && (
             <button
-              onClick={() => {
-                if (window.confirm('Are you sure you want to clear all lots from the masterplan? This will reset the parcel grid to an empty slate.')) {
+              onClick={async () => {
+                const ok = await confirmDialog({
+                  title: 'Clear Masterplan Lots',
+                  message: 'Are you sure you want to clear all lots from the masterplan? This will reset the parcel grid to an empty slate.',
+                  confirmLabel: 'Clear All Lots',
+                  variant: 'danger',
+                });
+                if (ok) {
                   onClearAllLots();
                   setSelectedSlot(null);
                 }
@@ -865,7 +873,7 @@ export default function InteractiveMap({
                             })
                           });
                           selectedSlot.basePrice = selectedSlotValuation.suggestedBasePrice;
-                          alert(`Updated Lot ${selectedSlot.slotNumber} price to ₱${selectedSlotValuation.suggestedBasePrice.toLocaleString()}`);
+                          toast(`Updated Lot ${selectedSlot.slotNumber} price to ₱${selectedSlotValuation.suggestedBasePrice.toLocaleString()}`, 'success');
                         } catch (e) {
                           console.error(e);
                         }
@@ -1338,7 +1346,7 @@ export default function InteractiveMap({
                   {isApplyingPricing ? (
                     <>
                       <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>Applying Pricing to Database...</span>
+                      <span>Saving Pricing Updates...</span>
                     </>
                   ) : (
                     <>

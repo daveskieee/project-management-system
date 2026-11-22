@@ -579,6 +579,59 @@ authRouter.post('/auth/change-password', requireAuth, sensitiveActionRateLimiter
 // STAFF MANAGEMENT ENDPOINTS (Strictly ADMIN only)
 // ============================================================================
 
+function parseStaffRoleInput(rawRole: unknown): Role | null {
+  if (typeof rawRole !== 'string') return null;
+  const normalized = rawRole.trim().toUpperCase().replace(/[\s-]+/g, '_');
+  switch (normalized) {
+    case 'ADMIN':
+    case 'OPERATIONS_MANAGER':
+    case 'OM':
+      return Role.ADMIN;
+    case 'PROJECTMANAGER':
+    case 'PROJECT_MANAGER':
+    case 'PM':
+      return Role.PROJECT_MANAGER;
+    case 'ENGINEER':
+    case 'SITE_ENGINEER':
+      return Role.ENGINEER;
+    case 'FINANCE':
+    case 'FINANCE_CONTROLLER':
+    case 'FINANCE_OFFICER':
+      return Role.FINANCE;
+    case 'TIMEKEEPER':
+    case 'SITE_TIMEKEEPER':
+      return Role.TIMEKEEPER;
+    default:
+      return null;
+  }
+}
+
+function formatStaffRoleResponse(role: Role): string {
+  switch (role) {
+    case Role.ADMIN:
+      return 'Admin';
+    case Role.PROJECT_MANAGER:
+      return 'ProjectManager';
+    case Role.ENGINEER:
+      return 'Engineer';
+    case Role.FINANCE:
+      return 'Finance';
+    case Role.TIMEKEEPER:
+      return 'Timekeeper';
+    default:
+      return 'Client';
+  }
+}
+
+async function isAuthorizedTopLevelAdmin(req: Request): Promise<boolean> {
+  if (!req.user?.id || req.user.role !== Role.ADMIN) return false;
+  const actor = await prisma.user.findUnique({
+    where: { id: req.user.id },
+    select: { role: true, accountStatus: true },
+  });
+  return Boolean(actor && actor.role === Role.ADMIN && actor.accountStatus === AccountStatus.ACTIVE);
+}
+
 // GET /api/staff — List all staff accounts
 authRouter.get('/staff', requireAuth, requireRole(['ADMIN']), async (_req: Request, res: Response) => {
   try {
@@ -591,11 +644,7 @@ authRouter.get('/staff', requireAuth, requireRole(['ADMIN']), async (_req: Reque
       id: u.id,
       email: String(u.email || '').replace(/@[^@]+$/, '@ldmconstruction.ph'),
       name: u.name,
-      role: u.role === Role.ADMIN ? 'Admin'
-        : (u.role === Role.ENGINEER || u.role === Role.PROJECT_MANAGER) ? 'Engineer'
-          : u.role === Role.TIMEKEEPER ? 'Timekeeper'
-            : u.role === Role.FINANCE ? 'Finance'
-              : 'Client',
+      role: formatStaffRoleResponse(u.role),
       accountStatus: u.accountStatus,
       contact: u.contact || '',
       createdAt: u.createdAt.toISOString(),
@@ -619,16 +668,28 @@ authRouter.post('/staff', requireAuth, requireRole(['ADMIN']), sensitiveActionRa
       return res.status(400).json({ error: strength.reason });
     }
 
+    const role = parseStaffRoleInput(rawRole);
+    if (!role) {
+      return res.status(400).json({
+        error: 'Invalid staff role specified. Allowed roles: ProjectManager, Engineer, Finance, Timekeeper, Admin.',
+      });
+    }
+
+    // Explicitly verify top-level ADMIN privilege before allowing Admin (Full Access) account creation
+    if (role === Role.ADMIN) {
+      const canGrantAdmin = await isAuthorizedTopLevelAdmin(req);
+      if (!canGrantAdmin) {
+        return res.status(403).json({
+          error: 'Only authorized top-level Administrators can create Admin (Full Access) accounts.',
+        });
+      }
+    }
+
     const normalizedEmail = String(email).trim().toLowerCase();
     const existing = await prisma.user.findFirst({ where: { email: { equals: normalizedEmail, mode: 'insensitive' } } });
     if (existing) {
       return res.status(409).json({ error: 'An account with this email already exists.' });
     }
-
-    const role = rawRole === 'Admin' ? Role.ADMIN
-      : rawRole === 'Finance' ? Role.FINANCE
-        : rawRole === 'Timekeeper' ? Role.TIMEKEEPER
-          : Role.ENGINEER;
 
     const passwordHash = hashPassword(String(password));
     const newUser = await prisma.user.create({
@@ -658,11 +719,7 @@ authRouter.post('/staff', requireAuth, requireRole(['ADMIN']), sensitiveActionRa
       id: newUser.id,
       email: newUser.email,
       name: newUser.name,
-      role: role === Role.ADMIN ? 'Admin'
-        : role === Role.ENGINEER ? 'Engineer'
-          : role === Role.TIMEKEEPER ? 'Timekeeper'
-            : role === Role.FINANCE ? 'Finance'
-              : 'Client',
+      role: formatStaffRoleResponse(role),
       accountStatus: newUser.accountStatus,
       createdAt: newUser.createdAt.toISOString(),
     });
@@ -728,11 +785,21 @@ authRouter.patch('/staff/:id', requireAuth, requireRole(['ADMIN']), async (req: 
 
     let mappedRole: Role | undefined;
     if (role) {
-      if (role === 'ADMIN' || role === Role.ADMIN) mappedRole = Role.ADMIN;
-      else if (role === 'ENGINEER' || role === Role.ENGINEER) mappedRole = Role.ENGINEER;
-      else if (role === 'TIMEKEEPER' || role === Role.TIMEKEEPER) mappedRole = Role.TIMEKEEPER;
-      else if (role === 'FINANCE' || role === Role.FINANCE) mappedRole = Role.FINANCE;
-      else return res.status(400).json({ error: 'Invalid role specified.' });
+      const parsed = parseStaffRoleInput(role);
+      if (!parsed) {
+        return res.status(400).json({
+          error: 'Invalid role specified. Allowed roles: ProjectManager, Engineer, Finance, Timekeeper, Admin.',
+        });
+      }
+      if (parsed === Role.ADMIN && target.role !== Role.ADMIN) {
+        const canGrantAdmin = await isAuthorizedTopLevelAdmin(req);
+        if (!canGrantAdmin) {
+          return res.status(403).json({
+            error: 'Only authorized top-level Administrators can assign Admin (Full Access) privileges.',
+          });
+        }
+      }
+      mappedRole = parsed;
     }
 
     let mappedStatus: AccountStatus | undefined;
@@ -775,11 +842,7 @@ authRouter.patch('/staff/:id', requireAuth, requireRole(['ADMIN']), async (req: 
       id: updated.id,
       email: updated.email,
       name: updated.name,
-      role: updated.role === Role.ADMIN ? 'Admin'
-        : (updated.role === Role.ENGINEER || updated.role === Role.PROJECT_MANAGER) ? 'Engineer'
-          : updated.role === Role.TIMEKEEPER ? 'Timekeeper'
-            : updated.role === Role.FINANCE ? 'Finance'
-              : 'Client',
+      role: formatStaffRoleResponse(updated.role),
       rawRole: updated.role,
       accountStatus: updated.accountStatus,
       contact: updated.contact || '',

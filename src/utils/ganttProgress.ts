@@ -41,6 +41,26 @@ export const GANTT_TASKS_STORAGE_PREFIX = 'ctvill_gantt_tasks_';
 export const GANTT_TASKS_UPDATED_EVENT = 'ctvill-gantt-tasks-updated';
 export const GANTT_SELECT_PROJECT_EVENT = 'ctvill-gantt-select-project';
 
+// In-memory authoritative Gantt task snapshots per project (synced from Master Gantt / DB fetches)
+const liveGanttTasksSnapshotMap = new Map<string, UnifiedGanttTaskLike[]>();
+
+export function setLiveGanttTasksSnapshot(projectId: string, tasks: UnifiedGanttTaskLike[]): void {
+  if (!projectId) return;
+  liveGanttTasksSnapshotMap.set(projectId, Array.isArray(tasks) ? tasks : []);
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent(GANTT_TASKS_UPDATED_EVENT, {
+        detail: { projectId, tasks: Array.isArray(tasks) ? tasks : [] },
+      })
+    );
+  }
+}
+
+export function getLiveGanttTasksSnapshot(projectId: string): UnifiedGanttTaskLike[] | null {
+  if (!projectId || !liveGanttTasksSnapshotMap.has(projectId)) return null;
+  return liveGanttTasksSnapshotMap.get(projectId) || [];
+}
+
 export interface UnifiedGanttTaskLike {
   id: string;
   projectId?: string;
@@ -448,7 +468,7 @@ export function createDefaultWbsTasksForProject(projectId: string): UnifiedGantt
   });
 }
 
-export function loadProjectGanttTasksFromStorage(projectId: string, autoSeed = true): UnifiedGanttTaskLike[] | null {
+export function loadProjectGanttTasksFromStorage(projectId: string, autoSeed = false): UnifiedGanttTaskLike[] | null {
   if (!projectId || typeof window === 'undefined') return null;
   try {
     const raw = window.localStorage.getItem(getGanttStorageKey(projectId));
@@ -491,5 +511,57 @@ export function saveProjectGanttTasks(projectId: string, tasks: UnifiedGanttTask
   } catch {
     // Ignore storage quota errors
   }
+}
+
+/**
+ * Single Source of Truth for live project completion percentage across
+ * Dashboard, Projects Profile Hub, and Budgets & Expenses Overview.
+ * - Returns 100% for COMPLETED / HANDED_OVER projects.
+ * - Otherwise computes weighted progress from live DB Gantt tasks, falling back to
+ *   project-scoped Gantt storage, and finally the project's persisted progress field.
+ */
+export function getCanonicalProjectProgress(
+  project: {
+    id: string;
+    status?: string | null;
+    cpmProgress?: number | null;
+    overallProgress?: number | null;
+    progress?: number | null;
+    progressPercentage?: number | null;
+  } | null | undefined,
+  dbTasks: UnifiedGanttTaskLike[] = []
+): number {
+  if (!project) return 0;
+
+  const statusUpper = String(project.status || '').toUpperCase().trim();
+  if (statusUpper === 'COMPLETED' || statusUpper === 'HANDED_OVER') {
+    return 100;
+  }
+
+  // 1. Live in-memory authoritative Gantt snapshot (from Master Gantt DB load/save).
+  // Even if all tasks are 0% or the project explicitly has 0 tasks, trust this over stale project.progress.
+  const liveSnapshot = getLiveGanttTasksSnapshot(project.id);
+  if (liveSnapshot !== null) {
+    return liveSnapshot.length > 0 ? computeUnifiedProjectProgress(liveSnapshot) : 0;
+  }
+
+  // 2. Live DB tasks passed via /api/all-data or parent state.
+  // When a project has live Gantt tasks (even if all are 0%), ALWAYS return the computed % and NEVER fall back to stale project.progress.
+  const projectDbTasks = (dbTasks || []).filter(
+    t => t.projectId === project.id || (t as any).project_id === project.id
+  );
+  if (projectDbTasks.length > 0) {
+    return computeUnifiedProjectProgress(projectDbTasks);
+  }
+
+  // 3. Opt-in stored Gantt tasks (never auto-seed).
+  const storedGantt = loadProjectGanttTasksFromStorage(project.id, false);
+  if (storedGantt !== null && storedGantt.length > 0) {
+    return computeUnifiedProjectProgress(storedGantt);
+  }
+
+  // Project is not COMPLETED/HANDED_OVER and has 0 live Gantt tasks — always return 0%
+  // rather than falling back to a stale persisted project.progress value.
+  return 0;
 }
 

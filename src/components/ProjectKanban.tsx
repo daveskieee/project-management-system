@@ -24,6 +24,7 @@ import { OptimizedLdmImage } from './OptimizedLdmImage';
 import {
   UnifiedGanttTaskLike,
   computePhaseProgressSummary,
+  getCanonicalProjectProgress,
   loadProjectGanttTasksFromStorage,
   resolveTaskConstructionPhase,
   GANTT_TASKS_UPDATED_EVENT,
@@ -267,7 +268,7 @@ export default function ProjectKanban({
     }
 
     // Fallback order: 1) cached localStorage 2) strict project-matched prop tasks 3) default demo project only 4) []
-    const latestCached = loadProjectGanttTasksFromStorage(projectId);
+    const latestCached = loadProjectGanttTasksFromStorage(projectId, false);
     if (latestCached !== null) {
       setLiveGanttTasks(latestCached);
     } else {
@@ -316,8 +317,19 @@ export default function ProjectKanban({
   // SUB-TAB 1: SUMMARY PROGRESS REPORT (100% LIVE GANTT PHASE MATH)
   // ---------------------------------------------------------------------------
   const { rows: phaseProgressRows, totals: summaryTotals } = useMemo(() => {
-    return computePhaseProgressSummary(liveGanttTasks);
-  }, [liveGanttTasks]);
+    const computed = computePhaseProgressSummary(liveGanttTasks);
+    const canonicalOverallPct = selectedProject
+      ? getCanonicalProjectProgress(selectedProject, liveGanttTasks.length > 0 ? liveGanttTasks : tasks)
+      : computed.totals.overallActualPct;
+    return {
+      rows: computed.rows,
+      totals: {
+        ...computed.totals,
+        overallActualPct: canonicalOverallPct,
+        overallVariancePct: canonicalOverallPct - computed.totals.overallPlannedPct,
+      },
+    };
+  }, [liveGanttTasks, selectedProject, tasks]);
 
   const handleJumpToMasterGantt = (phaseName?: string) => {
     if (!activeProjectId) return;
@@ -469,7 +481,7 @@ export default function ProjectKanban({
       const updated = [newReport, ...prev];
       try {
         localStorage.setItem(WEEKLY_REPORTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      } catch { }
       return updated;
     });
     setIsComposerOpen(false);
@@ -482,7 +494,7 @@ export default function ProjectKanban({
       const updated = prev.filter(r => r.id !== reportId);
       try {
         localStorage.setItem(WEEKLY_REPORTS_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      } catch { }
       return updated;
     });
   };
@@ -527,7 +539,7 @@ export default function ProjectKanban({
       const updated = [item, ...prev];
       try {
         localStorage.setItem(SAFETY_QA_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      } catch { }
       return updated;
     });
     setNewCompTitle('');
@@ -539,19 +551,19 @@ export default function ProjectKanban({
       const updated = prev.map(c =>
         c.id === itemId
           ? {
-              ...c,
-              status:
-                c.status === 'OPEN_DEFECT'
-                  ? ('RECTIFIED' as const)
-                  : c.status === 'RECTIFIED'
+            ...c,
+            status:
+              c.status === 'OPEN_DEFECT'
+                ? ('RECTIFIED' as const)
+                : c.status === 'RECTIFIED'
                   ? ('COMPLIANT' as const)
                   : c.status,
-            }
+          }
           : c
       );
       try {
         localStorage.setItem(SAFETY_QA_STORAGE_KEY, JSON.stringify(updated));
-      } catch {}
+      } catch { }
       return updated;
     });
   };
@@ -580,20 +592,19 @@ export default function ProjectKanban({
         const varBadge = !row.isScheduled
           ? 'badge-slate'
           : row.variancePct >= 0
-          ? 'badge-emerald'
-          : row.variancePct < -10
-          ? 'badge-rose'
-          : 'badge-amber';
+            ? 'badge-emerald'
+            : row.variancePct < -10
+              ? 'badge-rose'
+              : 'badge-amber';
         return `
           <tr>
             <td class="mono font-bold">${escapePrintHtml(row.wbs)}</td>
             <td><strong>${escapePrintHtml(row.phaseName)}</strong></td>
             <td class="text-center mono">
-              ${
-                row.matchedCount === 0
-                  ? '<span class="badge badge-slate">0 Tasks (Unscheduled)</span>'
-                  : `<span class="badge badge-emerald">${row.matchedCount} Task${row.matchedCount === 1 ? '' : 's'}</span>`
-              }
+              ${row.matchedCount === 0
+            ? '<span class="badge badge-slate">0 Tasks (Unscheduled)</span>'
+            : `<span class="badge badge-emerald">${row.matchedCount} Task${row.matchedCount === 1 ? '' : 's'}</span>`
+          }
             </td>
             <td class="text-right mono">${row.weight.toFixed(1)}%</td>
             <td class="text-right mono">${row.plannedPct}%</td>
@@ -714,8 +725,8 @@ export default function ProjectKanban({
       srcEquip.length === 0
         ? `<tr><td colspan="4" class="text-center" style="color: #64748b;">No equipment entries logged for this period.</td></tr>`
         : srcEquip
-            .map(
-              (eq, i) => `
+          .map(
+            (eq, i) => `
         <tr>
           <td class="mono">${i + 1}</td>
           <td><strong>${escapePrintHtml(eq.name)}</strong></td>
@@ -726,8 +737,8 @@ export default function ProjectKanban({
             </span>
           </td>
         </tr>`
-            )
-            .join('');
+          )
+          .join('');
 
     const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
     const weatherCellsHtml = days
@@ -876,7 +887,7 @@ export default function ProjectKanban({
               ) : (
                 projects.map(p => (
                   <option key={p.id} value={p.id} className="bg-slate-900 text-white">
-                    {p.name}
+                    {p.name} ({getCanonicalProjectProgress(p, p.id === activeProjectId && liveGanttTasks.length > 0 ? liveGanttTasks : tasks)}%)
                   </option>
                 ))
               )}
@@ -888,11 +899,10 @@ export default function ProjectKanban({
             <button
               type="button"
               onClick={() => setActiveSubTab('summary-excel')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === 'summary-excel'
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ${activeSubTab === 'summary-excel'
                   ? 'bg-emerald-500 text-slate-950 font-bold shadow-xs'
                   : 'text-slate-400 hover:text-white'
-              }`}
+                }`}
             >
               <FileSpreadsheet className="w-3.5 h-3.5" />
               <span>1. Summary Progress (Excel)</span>
@@ -900,11 +910,10 @@ export default function ProjectKanban({
             <button
               type="button"
               onClick={() => setActiveSubTab('weekly-pdf')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === 'weekly-pdf'
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ${activeSubTab === 'weekly-pdf'
                   ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
                   : 'text-slate-400 hover:text-white'
-              }`}
+                }`}
             >
               <FileText className="w-3.5 h-3.5" />
               <span>2. Weekly & Daily Activity (PDF)</span>
@@ -912,11 +921,10 @@ export default function ProjectKanban({
             <button
               type="button"
               onClick={() => setActiveSubTab('safety-qa')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ${
-                activeSubTab === 'safety-qa'
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 ${activeSubTab === 'safety-qa'
                   ? 'bg-sky-500 text-slate-950 font-bold shadow-xs'
                   : 'text-slate-400 hover:text-white'
-              }`}
+                }`}
             >
               <ShieldCheck className="w-3.5 h-3.5" />
               <span>3. Safety, PPE, QA & Punch List</span>
@@ -1044,18 +1052,16 @@ export default function ProjectKanban({
                       <td className="py-2.5 px-4">
                         <div className="w-full bg-slate-950 rounded-md h-4 overflow-hidden border border-slate-800 relative flex items-center">
                           <div
-                            className={`h-full transition-all duration-300 ${
-                              !row.isScheduled
+                            className={`h-full transition-all duration-300 ${!row.isScheduled
                                 ? 'bg-slate-800'
                                 : isCompleted
-                                ? 'bg-emerald-500'
-                                : 'bg-emerald-600'
-                            }`}
+                                  ? 'bg-emerald-500'
+                                  : 'bg-emerald-600'
+                              }`}
                             style={{ width: `${Math.min(100, Math.max(0, row.actualPct))}%` }}
                           />
-                          <span className={`absolute inset-0 flex items-center justify-center text-[10px] font-mono font-bold drop-shadow ${
-                            row.isScheduled ? 'text-white' : 'text-slate-500'
-                          }`}>
+                          <span className={`absolute inset-0 flex items-center justify-center text-[10px] font-mono font-bold drop-shadow ${row.isScheduled ? 'text-white' : 'text-slate-500'
+                            }`}>
                             {row.actualPct}%
                           </span>
                         </div>
@@ -1066,10 +1072,10 @@ export default function ProjectKanban({
                             !row.isScheduled
                               ? 'text-slate-500'
                               : row.variancePct >= 0
-                              ? 'text-emerald-400'
-                              : isDelayed
-                              ? 'text-rose-400 font-semibold'
-                              : 'text-amber-400'
+                                ? 'text-emerald-400'
+                                : isDelayed
+                                  ? 'text-rose-400 font-semibold'
+                                  : 'text-amber-400'
                           }
                         >
                           {row.variancePct > 0 ? `+${row.variancePct}%` : `${row.variancePct}%`}
@@ -1339,11 +1345,10 @@ export default function ProjectKanban({
                               [day]: prev[day] === 'Sunny' ? 'Rainy' : 'Sunny'
                             }))
                           }
-                          className={`p-2 rounded-lg border text-center transition cursor-pointer flex flex-col items-center gap-1 ${
-                            isSunny
+                          className={`p-2 rounded-lg border text-center transition cursor-pointer flex flex-col items-center gap-1 ${isSunny
                               ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
                               : 'bg-sky-500/15 border-sky-500/40 text-sky-300'
-                          }`}
+                            }`}
                         >
                           <span className="text-[10px] font-mono font-bold">{day}</span>
                           {isSunny ? <CloudSun className="w-4 h-4 text-amber-400" /> : <CloudRain className="w-4 h-4 text-sky-400" />}
@@ -1411,11 +1416,10 @@ export default function ProjectKanban({
                               )
                             )
                           }
-                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold shrink-0 cursor-pointer border ${
-                            eq.status === 'Operational'
+                          className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold shrink-0 cursor-pointer border ${eq.status === 'Operational'
                               ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
                               : 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-                          }`}
+                            }`}
                         >
                           {eq.status}
                         </button>
@@ -1691,15 +1695,14 @@ export default function ProjectKanban({
                         {item.id}
                       </span>
                       <span
-                        className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold uppercase ${
-                          item.category === 'PPE_ISSUANCE'
+                        className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold uppercase ${item.category === 'PPE_ISSUANCE'
                             ? 'bg-teal-500/15 text-teal-300 border border-teal-500/30'
                             : item.category === 'TOOLBOX_MEETING'
-                            ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
-                            : item.category === 'QUALITY_INSPECTION'
-                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                            : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
-                        }`}
+                              ? 'bg-sky-500/15 text-sky-300 border border-sky-500/30'
+                              : item.category === 'QUALITY_INSPECTION'
+                                ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                          }`}
                       >
                         {item.category.replace('_', ' ')}
                       </span>
@@ -1715,11 +1718,10 @@ export default function ProjectKanban({
                   <div className="flex items-center gap-2 shrink-0">
                     {isOM ? (
                       <span
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border ${
-                          item.status === 'OPEN_DEFECT'
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border ${item.status === 'OPEN_DEFECT'
                             ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
                             : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                        }`}
+                          }`}
                       >
                         {item.status === 'OPEN_DEFECT' ? '⚠️ Open Defect' : `✓ ${item.status}`}
                       </span>
@@ -1727,11 +1729,10 @@ export default function ProjectKanban({
                       <button
                         type="button"
                         onClick={() => handleToggleComplianceStatus(item.id)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border cursor-pointer ${
-                          item.status === 'OPEN_DEFECT'
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border cursor-pointer ${item.status === 'OPEN_DEFECT'
                             ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
                             : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                        }`}
+                          }`}
                       >
                         {item.status === 'OPEN_DEFECT' ? '⚠️ Open Punch-List (Click to Rectify)' : `✓ ${item.status}`}
                       </button>

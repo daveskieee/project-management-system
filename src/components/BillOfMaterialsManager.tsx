@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Calculator, Building2, User, MapPin, Plus, Trash2, ChevronDown, ChevronRight,
   Printer, RefreshCw, Check, Sparkles, Layers, FileSpreadsheet, ArrowRight,
@@ -13,8 +13,10 @@ import { ProjectProfile } from '../types';
 import { openEnterprisePrintWindow, escapePrintHtml } from '../utils/printEngine';
 import { exportToCsv } from '../utils/exportUtils';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 import { GANTT_TASKS_STORAGE_PREFIX, GANTT_TASKS_UPDATED_EVENT } from '../utils/ganttProgress';
 import { logAuditEvent } from '../utils/auditLogger';
+import { secureFetch } from '../utils/apiClient';
 import {
   calculateProjectBomProfitSync,
   BOM_PROFIT_SYNC_EVENT,
@@ -343,6 +345,7 @@ export default function BillOfMaterialsManager({
   onNavigateToGantt
 }: BillOfMaterialsManagerProps) {
   const { isDark } = useTheme();
+  const { prompt: promptDialog, toast } = useConfirm();
 
   // Available projects from props or local storage
   const activeProjectsList: ProjectProfile[] = useMemo(() => {
@@ -350,7 +353,7 @@ export default function BillOfMaterialsManager({
     try {
       const raw = localStorage.getItem('ctvill_projects') || localStorage.getItem('ctvill_cached_projects');
       if (raw) return JSON.parse(raw);
-    } catch {}
+    } catch { }
     return [];
   }, [projects]);
 
@@ -364,10 +367,18 @@ export default function BillOfMaterialsManager({
   }, [activeProjectsList, selectedProjectId]);
 
   // Project Header Meta
-  const [projectTitle, setProjectTitle] = useState<string>('2-Storey Modern Residential Villa');
-  const [ownerName, setOwnerName] = useState<string>('Mr. & Mrs. Alexander Santos');
-  const [siteLocation, setSiteLocation] = useState<string>('Brgy. Banlic, Cabuyao, Laguna');
-  const [projectType, setProjectType] = useState<ProjectTypology>('2-Storey Residential Unit');
+  const [projectTitle, setProjectTitle] = useState<string>(() => activeProjectsList[0]?.name || 'Untitled Project');
+  const [ownerName, setOwnerName] = useState<string>(() => activeProjectsList[0]?.clientName || '');
+  const [siteLocation, setSiteLocation] = useState<string>(() => activeProjectsList[0]?.location || '');
+  const [projectType, setProjectType] = useState<'' | ProjectTypology>('');
+  const [pendingTemplateApply, setPendingTemplateApply] = useState<ProjectTypology | null>(null);
+  const [showTemplatePickerModal, setShowTemplatePickerModal] = useState<boolean>(false);
+  const [pendingDeleteTarget, setPendingDeleteTarget] = useState<
+    | { type: 'phase'; phaseId: string; title: string }
+    | { type: 'subphase'; phaseId: string; subPhaseId: string; title: string }
+    | null
+  >(null);
+  const templateSelectRef = useRef<HTMLSelectElement>(null);
   const [floorAreaSqm, setFloorAreaSqm] = useState<number>(155);
   const [estimateRefNo, setEstimateRefNo] = useState<string>(() => `EST-LDM-${new Date().getFullYear()}-001`);
   const [estimateDate, setEstimateDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
@@ -379,41 +390,43 @@ export default function BillOfMaterialsManager({
   // Sync Project Meta when active project changes
   useEffect(() => {
     if (activeProject) {
-      setProjectTitle(activeProject.name || '2-Storey Modern Residential Villa');
+      setProjectTitle(activeProject.name || 'Untitled Project');
       setOwnerName(activeProject.clientName || 'Private Client');
-      setSiteLocation(activeProject.location || 'Brgy. Banlic, Cabuyao, Laguna');
+      setSiteLocation(activeProject.location || '');
       if ((activeProject as any).floorAreaSqm) {
         setFloorAreaSqm(Number((activeProject as any).floorAreaSqm) || 155);
       }
     }
   }, [activeProject]);
 
-  // BOM Phases State
+  // BOM Phases State — strictly start blank ([]) when no saved BOM exists for the project
   const storageKey = `ldm_bom_${selectedProjectId}`;
   const [phases, setPhases] = useState<BomPhase[]>(() => {
     try {
       const saved = localStorage.getItem(storageKey);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed)) return parsed;
       }
-    } catch {}
-    return generateDefaultBomPhases('2-Storey Residential Unit');
+    } catch { }
+    return [];
   });
 
-  // Re-load BOM when switching project
+  // Re-load BOM when switching project (never auto-seed sample preset for blank projects)
   useEffect(() => {
     try {
       const saved = localStorage.getItem(`ldm_bom_${selectedProjectId}`);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           setPhases(parsed);
+          if (parsed.length === 0) setProjectType('');
           return;
         }
       }
-    } catch {}
-    setPhases(generateDefaultBomPhases(projectType));
+    } catch { }
+    setPhases([]);
+    setProjectType('');
   }, [selectedProjectId]);
 
   const [materialSyncTick, setMaterialSyncTick] = useState(0);
@@ -430,7 +443,7 @@ export default function BillOfMaterialsManager({
     try {
       localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(newPhases));
       notifyBomProfitSync();
-    } catch {}
+    } catch { }
   }, [selectedProjectId]);
 
   const bomProfitSync = useMemo(() => {
@@ -442,14 +455,58 @@ export default function BillOfMaterialsManager({
     });
   }, [selectedProjectId, activeProject?.name, projectTitle, phases, materialSyncTick]);
 
-  // Reset to default typology template
-  const handleApplyTypology = (newType: ProjectTypology) => {
-    setProjectType(newType);
-    if (confirm(`Reset and generate standard Bill of Materials template for "${newType}"? Existing custom items for this project will be overwritten.`)) {
-      const freshPhases = generateDefaultBomPhases(newType);
-      saveBomToStorage(freshPhases);
-      onNotify?.(`Applied "${newType}" Bill of Materials template with 15 WBS phases.`);
+  // Opt-in template application (confirms via in-app modal if phases already exist)
+  const executeApplyTemplate = (templateType: ProjectTypology) => {
+    const freshPhases = generateDefaultBomPhases(templateType);
+    saveBomToStorage(freshPhases);
+    setPendingTemplateApply(null);
+    onNotify?.(`Applied "${templateType}" Bill of Materials template with ${freshPhases.length} WBS phases.`);
+  };
+
+  const handleApplySelectedTemplate = () => {
+    if (!projectType) {
+      onNotify?.('Please choose a template preset from the dropdown first.');
+      templateSelectRef.current?.focus();
+      return;
     }
+    if (phases.length > 0) {
+      setPendingTemplateApply(projectType);
+      return;
+    }
+    executeApplyTemplate(projectType);
+  };
+
+  // Add a new blank WBS Phase from scratch
+  const handleAddPhase = () => {
+    const nextCodeChar = String.fromCharCode(65 + (phases.length % 26));
+    const newPhase: BomPhase = {
+      id: `phase-custom-${Date.now()}`,
+      code: nextCodeChar,
+      title: phases.length === 0 ? 'General Requirements & Mobilization' : `Custom Phase ${nextCodeChar}`,
+      defaultProfitPct: 20,
+      defaultOverheadPct: 5,
+      isExpanded: true,
+      subPhases: [
+        {
+          id: `sub-custom-${Date.now()}`,
+          title: 'Initial Scope of Work',
+          items: [
+            {
+              id: `item-custom-${Date.now()}`,
+              scopeOfWork: 'Enter material or labor scope description',
+              noOfUnits: 1,
+              unit: 'lot',
+              unitCost: 0,
+              profitPct: 20,
+              overheadPct: 5,
+              designCost: 0,
+            },
+          ],
+        },
+      ],
+    };
+    saveBomToStorage([...phases, newPhase]);
+    onNotify?.(`Added Phase ${nextCodeChar} to "${projectTitle}".`);
   };
 
   // Phase collapse/expand toggle
@@ -517,8 +574,13 @@ export default function BillOfMaterialsManager({
   };
 
   // Add Sub-Phase inside Phase
-  const handleAddSubPhase = (phaseId: string) => {
-    const subTitle = prompt('Enter Sub-Phase title (e.g., "Site Clearing" or "Masonry Wall Laying"):');
+  const handleAddSubPhase = async (phaseId: string) => {
+    const subTitle = await promptDialog({
+      title: 'Add Sub-Phase',
+      message: 'Enter a descriptive title for the new BOM sub-phase.',
+      placeholder: 'e.g., Site Clearing or Masonry Wall Laying',
+      confirmLabel: 'Add Sub-Phase',
+    });
     if (!subTitle || !subTitle.trim()) return;
 
     saveBomToStorage(phases.map(p => {
@@ -564,16 +626,48 @@ export default function BillOfMaterialsManager({
     }));
   };
 
-  // Delete Sub-Phase
+  // Delete Sub-Phase (triggers styled in-app confirmation modal)
   const handleDeleteSubPhase = (phaseId: string, subPhaseId: string) => {
-    if (!confirm('Delete this sub-phase and all its line items?')) return;
-    saveBomToStorage(phases.map(p => {
-      if (p.id !== phaseId) return p;
-      return {
-        ...p,
-        subPhases: p.subPhases.filter(sp => sp.id !== subPhaseId)
-      };
-    }));
+    const targetPhase = phases.find(p => p.id === phaseId);
+    const targetSub = targetPhase?.subPhases.find(sp => sp.id === subPhaseId);
+    setPendingDeleteTarget({
+      type: 'subphase',
+      phaseId,
+      subPhaseId,
+      title: targetSub?.title || 'this sub-phase',
+    });
+  };
+
+  // Delete Entire Phase (triggers styled in-app confirmation modal)
+  const handleDeletePhase = (phaseId: string) => {
+    const targetPhase = phases.find(p => p.id === phaseId);
+    setPendingDeleteTarget({
+      type: 'phase',
+      phaseId,
+      title: targetPhase ? `Phase ${targetPhase.code}: ${targetPhase.title}` : 'this phase',
+    });
+  };
+
+  const handleConfirmDeleteTarget = () => {
+    if (!pendingDeleteTarget) return;
+    if (pendingDeleteTarget.type === 'phase') {
+      const nextPhases = phases.filter(p => p.id !== pendingDeleteTarget.phaseId);
+      saveBomToStorage(nextPhases);
+      if (nextPhases.length === 0) setProjectType('');
+      onNotify?.(`Removed ${pendingDeleteTarget.title} from BOM.`);
+    } else {
+      saveBomToStorage(
+        phases.map(p => {
+          if (p.id !== pendingDeleteTarget.phaseId) return p;
+          return {
+            ...p,
+            subPhases: p.subPhases.filter(sp => sp.id !== pendingDeleteTarget.subPhaseId),
+          };
+        })
+      );
+      onNotify?.(`Removed sub-phase "${pendingDeleteTarget.title}".`);
+    }
+    setPendingDeleteTarget(null);
   };
 
   // Update Line Item Field
@@ -608,7 +702,7 @@ export default function BillOfMaterialsManager({
   // Add an Optional Phase (Garage, Balcony, Office Area)
   const handleAddOptionalPhase = (tpl: typeof OPTIONAL_BOM_PHASES[0]) => {
     if (phases.some(p => p.code === tpl.code)) {
-      alert(`Phase ${tpl.code}. ${tpl.title} already exists in this estimate.`);
+      toast(`Phase ${tpl.code}. ${tpl.title} already exists in this estimate.`, 'warning');
       return;
     }
     const newPhase: BomPhase = {
@@ -857,75 +951,164 @@ export default function BillOfMaterialsManager({
   };
 
   // ---------------------------------------------------------------------------
-  // SYNC BOM PHASES TO MASTER GANTT CHART
+  // SYNC BOM PHASES TO MASTER GANTT CHART (Strictly Scoped to Target projectId)
   // ---------------------------------------------------------------------------
-  const handleSyncToMasterGantt = () => {
-    if (!selectedProjectId) {
-      alert('Please select an active project first.');
-      return;
-    }
+  const [syncConfirmModal, setSyncConfirmModal] = useState<{
+    existingTasks: any[];
+    tasksWithProgressCount: number;
+  } | null>(null);
+  const [syncCompletedModal, setSyncCompletedModal] = useState<{
+    phasesCount: number;
+    tasksCount: number;
+    preservedCount: number;
+  } | null>(null);
 
+  const normalizeMatchKey = (val: string | undefined | null) =>
+    String(val || '')
+      .toLowerCase()
+      .replace(/^phase\s+[a-z0-9]+[:\s-]*/i, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+
+  const fetchExistingProjectGanttTasks = async (targetProjectId: string): Promise<any[]> => {
+    try {
+      const res = await secureFetch(`/api/projects/${encodeURIComponent(targetProjectId)}/gantt`);
+      if (res.ok) {
+        const json = await res.json();
+        if (Array.isArray(json?.data) && json.data.length > 0) {
+          return json.data.map((t: any) => ({
+            ...t,
+            projectId: targetProjectId,
+            startDate: t.startDate || (t.start_date ? String(t.start_date).split(' ')[0] : undefined),
+            endDate: t.endDate || (t.end_date ? String(t.end_date).split(' ')[0] : undefined),
+            parentTaskId: t.parentTaskId ?? (t.parent && t.parent !== 0 && t.parent !== '0' ? String(t.parent) : null),
+            contractorName: t.contractorName || t.contractor || undefined,
+          }));
+        }
+      }
+    } catch {
+      // Fallback to project-scoped localStorage cache below
+    }
+    try {
+      const storageKey = `${GANTT_TASKS_STORAGE_PREFIX}${targetProjectId}`;
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((t: any) => !t.projectId || t.projectId === targetProjectId);
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+    return [];
+  };
+
+  const executeSyncToMasterGantt = async (existingTasks: any[]) => {
+    if (!selectedProjectId) return;
+    const targetProjectId = selectedProjectId;
+    setSyncConfirmModal(null);
     setSyncGanttLoading(true);
     try {
-      const storageKey = `${GANTT_TASKS_STORAGE_PREFIX}${selectedProjectId}`;
+      const storageKey = `${GANTT_TASKS_STORAGE_PREFIX}${targetProjectId}`;
       const now = new Date();
       let cumulativeStart = new Date(now);
+
+      // Index existing tasks strictly belonging to targetProjectId so we preserve progress, status, assignee & dates
+      const scopedExisting = existingTasks.filter((t) => !t.projectId || t.projectId === targetProjectId);
+      const matchedExistingIds = new Set<string>();
+      let preservedCount = 0;
+
+      const findMatchingExisting = (wbsCode: string, text: string, type: 'project' | 'task') => {
+        const normText = normalizeMatchKey(text);
+        const match = scopedExisting.find((et) => {
+          if (matchedExistingIds.has(String(et.id))) return false;
+          const etNorm = normalizeMatchKey(et.text || et.title);
+          const sameWbs = wbsCode && et.wbsCode && String(et.wbsCode).trim() === String(wbsCode).trim();
+          const sameName = normText && etNorm && (etNorm === normText || etNorm.includes(normText) || normText.includes(etNorm));
+          if (sameName) return true;
+          if (sameWbs && (et.type === type || (!et.parentTaskId && type === 'project'))) return true;
+          return false;
+        });
+        if (match) matchedExistingIds.add(String(match.id));
+        return match;
+      };
 
       const newGanttTasks: any[] = [];
       let sortCounter = 1;
 
       phases.forEach((phase, pIdx) => {
-        const phaseParentId = `gantt-phase-${phase.code.toLowerCase()}-${Date.now()}-${pIdx}`;
+        const phaseWbs = `${pIdx + 1}.0`;
+        const phaseTitleText = `Phase ${phase.code}: ${phase.title}`;
+        const existingParent = findMatchingExisting(phaseWbs, phaseTitleText, 'project');
+
+        const phaseParentId = existingParent?.id
+          ? String(existingParent.id)
+          : `gantt-phase-${targetProjectId}-${phase.code.toLowerCase()}-${pIdx + 1}`;
         const phaseSummary = summaryCalculations.phaseSummaries.find(ps => ps.phaseId === phase.id);
         const phaseDurationDays = Math.max(3, Math.min(30, Math.round((phaseSummary?.phaseDirect || 50000) / 15000)));
 
-        const phaseStartStr = cumulativeStart.toISOString().split('T')[0];
+        const phaseStartStr = existingParent?.startDate || cumulativeStart.toISOString().split('T')[0];
         const phaseEnd = new Date(cumulativeStart);
         phaseEnd.setDate(phaseEnd.getDate() + phaseDurationDays);
-        const phaseEndStr = phaseEnd.toISOString().split('T')[0];
+        const phaseEndStr = existingParent?.endDate || phaseEnd.toISOString().split('T')[0];
 
-        // Parent WBS Task (type = 'project')
+        const existingParentProgress = typeof existingParent?.progress === 'number' ? existingParent.progress : 0;
+        if (existingParent && existingParentProgress > 0) preservedCount++;
+
+        // Parent WBS Task (type = 'project') — preserves existing progress, status, assignee & dates
         newGanttTasks.push({
           id: phaseParentId,
-          projectId: selectedProjectId,
-          wbsCode: `${pIdx + 1}.0`,
-          text: `Phase ${phase.code}: ${phase.title}`,
+          projectId: targetProjectId,
+          wbsCode: phaseWbs,
+          text: phaseTitleText,
           startDate: phaseStartStr,
           endDate: phaseEndStr,
-          duration: phaseDurationDays,
-          progress: 0,
+          duration: Number(existingParent?.duration) > 0 ? Number(existingParent.duration) : phaseDurationDays,
+          progress: existingParentProgress,
+          status: existingParent?.status || (existingParentProgress >= 1 ? 'COMPLETED' : existingParentProgress > 0 ? 'IN_PROGRESS' : 'TODO'),
           weight: Math.max(1, Math.round(((phaseSummary?.phaseTotal || 1) / (summaryCalculations.grandTotalCost || 1)) * 100)),
           constructionPhase: phase.title,
           type: 'project',
           parentTaskId: null,
           sortOrder: sortCounter++,
-          contractorName: 'LDM Construction Crew',
+          assignedContractorId: existingParent?.assignedContractorId || '',
+          contractorName: existingParent?.contractorName || existingParent?.contractor || 'LDM Construction Crew',
           predecessorIds: pIdx > 0 ? [`${pIdx}.0`] : []
         });
 
         // Child Tasks for each Sub-Phase
         let subCounter = 1;
         phase.subPhases.forEach((sp) => {
+          const childWbs = `${pIdx + 1}.${subCounter}`;
+          const existingChild = findMatchingExisting(childWbs, sp.title, 'task');
           const childDuration = Math.max(2, Math.round(phaseDurationDays / Math.max(1, phase.subPhases.length)));
           const childStart = new Date(cumulativeStart);
           const childEnd = new Date(childStart);
           childEnd.setDate(childEnd.getDate() + childDuration);
 
+          const existingChildProgress = typeof existingChild?.progress === 'number' ? existingChild.progress : 0;
+          if (existingChild && existingChildProgress > 0) preservedCount++;
+
           newGanttTasks.push({
-            id: `gantt-sub-${phase.code}-${subCounter}-${Date.now()}`,
-            projectId: selectedProjectId,
-            wbsCode: `${pIdx + 1}.${subCounter}`,
+            id: existingChild?.id
+              ? String(existingChild.id)
+              : `gantt-sub-${targetProjectId}-${phase.code.toLowerCase()}-${subCounter}`,
+            projectId: targetProjectId,
+            wbsCode: childWbs,
             text: sp.title,
-            startDate: childStart.toISOString().split('T')[0],
-            endDate: childEnd.toISOString().split('T')[0],
-            duration: childDuration,
-            progress: 0,
+            startDate: existingChild?.startDate || childStart.toISOString().split('T')[0],
+            endDate: existingChild?.endDate || childEnd.toISOString().split('T')[0],
+            duration: Number(existingChild?.duration) > 0 ? Number(existingChild.duration) : childDuration,
+            progress: existingChildProgress,
+            status: existingChild?.status || (existingChildProgress >= 1 ? 'COMPLETED' : existingChildProgress > 0 ? 'IN_PROGRESS' : 'TODO'),
             weight: Math.max(1, Math.round(100 / Math.max(1, phase.subPhases.length))),
             constructionPhase: phase.title,
             type: 'task',
             parentTaskId: phaseParentId,
             sortOrder: sortCounter++,
-            contractorName: 'LDM In-House Trade Gang',
+            assignedContractorId: existingChild?.assignedContractorId || '',
+            contractorName: existingChild?.contractorName || existingChild?.contractor || 'LDM In-House Trade Gang',
             predecessorIds: []
           });
           subCounter++;
@@ -935,29 +1118,80 @@ export default function BillOfMaterialsManager({
         cumulativeStart.setDate(cumulativeStart.getDate() + Math.max(2, Math.round(phaseDurationDays * 0.75)));
       });
 
-      // Save into project's Gantt storage
+      // Keep any unmatched existing tasks in THIS project that already have recorded progress (> 0%)
+      scopedExisting.forEach((et) => {
+        if (!matchedExistingIds.has(String(et.id)) && typeof et.progress === 'number' && et.progress > 0) {
+          preservedCount++;
+          newGanttTasks.push({
+            ...et,
+            projectId: targetProjectId,
+            sortOrder: sortCounter++,
+          });
+        }
+      });
+
+      // Persist strictly to Neon PostgreSQL for targetProjectId only (never touches other projects)
+      try {
+        await secureFetch(`/api/projects/${encodeURIComponent(targetProjectId)}/gantt/sync`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tasks: newGanttTasks,
+            links: [],
+            deletedTaskIds: [],
+            deletedLinkIds: [],
+          }),
+        });
+      } catch (apiErr) {
+        console.warn('Background Gantt DB sync fallback to local cache:', apiErr);
+      }
+
+      // Save strictly into targetProjectId's Gantt storage key (never touches global projects list or other project keys)
       localStorage.setItem(storageKey, JSON.stringify(newGanttTasks));
-      window.dispatchEvent(new CustomEvent(GANTT_TASKS_UPDATED_EVENT, { detail: { projectId: selectedProjectId, tasks: newGanttTasks } }));
+      window.dispatchEvent(new CustomEvent(GANTT_TASKS_UPDATED_EVENT, { detail: { projectId: targetProjectId, tasks: newGanttTasks } }));
 
       logAuditEvent({
         entityType: 'CIVIL_WORKS',
-        entityId: selectedProjectId,
+        entityId: targetProjectId,
         action: 'BOM_GANTT_SYNC',
         actorName: 'Engr. Dan Ramos',
         actorRole: 'Operations Manager',
-        details: `Synchronized ${phases.length} WBS phases (${newGanttTasks.length} tasks) from BOM Quotation Builder to Master Gantt Chart for ${projectTitle}.`
+        details: `Synchronized ${phases.length} WBS phases (${newGanttTasks.length} tasks, preserved ${preservedCount} in-progress items) from BOM Quotation Builder to Master Gantt Chart for ${projectTitle}.`
       });
 
-      onNotify?.(`⚡ Successfully pushed ${newGanttTasks.length} BOM phases & tasks into Master Gantt Chart!`);
-      if (confirm(`Successfully pushed ${phases.length} WBS phases (${newGanttTasks.length} tasks) into Master Gantt Chart. Navigate to Master Gantt now?`)) {
-        onNavigateToGantt?.(selectedProjectId);
-      }
+      onNotify?.(`⚡ Synced ${newGanttTasks.length} BOM tasks for "${projectTitle}" (${preservedCount} existing progress item(s) preserved).`);
+      setSyncCompletedModal({
+        phasesCount: phases.length,
+        tasksCount: newGanttTasks.length,
+        preservedCount,
+      });
     } catch (err) {
       console.error(err);
-      alert('Error syncing to Gantt storage.');
+      onNotify?.('❌ Error syncing BOM phases to Master Gantt.');
     } finally {
       setSyncGanttLoading(false);
     }
+  };
+
+  const handleSyncToMasterGantt = async () => {
+    if (!selectedProjectId) {
+      onNotify?.('⚠️ Please select an active project first before syncing to Master Gantt.');
+      return;
+    }
+
+    setSyncGanttLoading(true);
+    const existingTasks = await fetchExistingProjectGanttTasks(selectedProjectId);
+    setSyncGanttLoading(false);
+
+    if (existingTasks.length > 0) {
+      const tasksWithProgressCount = existingTasks.filter(
+        (t) => typeof t.progress === 'number' && t.progress > 0
+      ).length;
+      setSyncConfirmModal({ existingTasks, tasksWithProgressCount });
+      return;
+    }
+
+    await executeSyncToMasterGantt([]);
   };
 
   // Export CSV
@@ -994,11 +1228,10 @@ export default function BillOfMaterialsManager({
 
   return (
     <div className="space-y-5 font-sans">
-      
+
       {/* 1. TOP HEADER & PROJECT SELECTOR BANNER */}
-      <div className={`p-4 sm:p-5 rounded-2xl border shadow-sm transition-colors ${
-        isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'
-      }`}>
+      <div className={`p-4 sm:p-5 rounded-2xl border shadow-sm transition-colors ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'
+        }`}>
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 border-b pb-4 mb-4 border-slate-800/60">
           <div>
             <div className="flex items-center gap-2 mb-1">
@@ -1021,11 +1254,10 @@ export default function BillOfMaterialsManager({
             <button
               type="button"
               onClick={() => setIsClientMode(!isClientMode)}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${
-                isClientMode
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${isClientMode
                   ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
                   : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
-              }`}
+                }`}
               title="Toggle client-friendly view (hides profit, overhead, and markup breakdown columns)"
             >
               {isClientMode ? <EyeOff className="w-3.5 h-3.5 text-amber-400" /> : <Eye className="w-3.5 h-3.5" />}
@@ -1095,19 +1327,37 @@ export default function BillOfMaterialsManager({
 
           <div>
             <label className="block text-[10px] font-mono text-slate-400 uppercase font-bold mb-1">
-              Project Typology Template
+              Project Template Preset
             </label>
-            <select
-              value={projectType}
-              onChange={(e) => handleApplyTypology(e.target.value as ProjectTypology)}
-              className="w-full bg-slate-950 border border-amber-500/40 text-amber-300 font-bold rounded-xl px-3 py-2 focus:border-amber-500 focus:outline-none"
-            >
-              <option value="2-Storey Residential Unit">2-Storey Residential Unit</option>
-              <option value="1-Storey / Bungalow">1-Storey / Bungalow</option>
-              <option value="Renovation / Fit-Out">Renovation / Fit-Out</option>
-              <option value="Demolition / Excavation">Demolition / Excavation</option>
-              <option value="Commercial Building">Commercial Building</option>
-            </select>
+            <div className="flex items-center gap-1.5">
+              <select
+                ref={templateSelectRef}
+                value={projectType}
+                onChange={(e) => setProjectType(e.target.value as '' | ProjectTypology)}
+                className="flex-1 min-w-0 bg-slate-950 border border-amber-500/40 text-amber-300 font-bold rounded-xl px-2.5 py-2 focus:border-amber-500 focus:outline-none cursor-pointer"
+              >
+                <option value="">Blank / Custom (No Template)</option>
+                <option value="2-Storey Residential Unit">2-Storey Residential Unit</option>
+                <option value="1-Storey / Bungalow">1-Storey / Bungalow</option>
+                <option value="Renovation / Fit-Out">Renovation / Fit-Out</option>
+                <option value="Demolition / Excavation">Demolition / Excavation</option>
+                <option value="Commercial Building">Commercial Building</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => {
+                  if (projectType) {
+                    handleApplySelectedTemplate();
+                  } else {
+                    setShowTemplatePickerModal(true);
+                  }
+                }}
+                className="px-2.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-[11px] shrink-0 transition-colors cursor-pointer"
+                title={projectType ? 'Apply selected template preset to this project' : 'Browse available template presets'}
+              >
+                {projectType ? 'Apply' : 'Browse'}
+              </button>
+            </div>
           </div>
 
           <div>
@@ -1224,11 +1474,10 @@ export default function BillOfMaterialsManager({
           <div className={`bg-slate-900/80 border p-3 rounded-xl ${bomProfitSync.isIntact ? 'border-emerald-500/30' : 'border-rose-500/40'}`}>
             <div className="flex items-center justify-between gap-1">
               <span className="text-[10px] font-mono text-amber-400 uppercase block font-bold">Total Profit Pool</span>
-              <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border font-bold ${
-                bomProfitSync.isIntact
+              <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border font-bold ${bomProfitSync.isIntact
                   ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                   : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
-              }`}>
+                }`}>
                 {bomProfitSync.profitMarginPct}% {bomProfitSync.isIntact ? 'Intact' : 'Impacted'}
               </span>
             </div>
@@ -1284,11 +1533,10 @@ export default function BillOfMaterialsManager({
               type="button"
               disabled={exists}
               onClick={() => handleAddOptionalPhase(tpl)}
-              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1 transition ${
-                exists
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1 transition ${exists
                   ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
                   : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 cursor-pointer'
-              }`}
+                }`}
             >
               <span>+ Phase {tpl.code}: {tpl.title}</span>
               {exists && <Check className="w-3 h-3 text-emerald-400" />}
@@ -1299,15 +1547,53 @@ export default function BillOfMaterialsManager({
 
       {/* 4. EXPANDABLE WBS PHASES & MATERIAL LINE ITEMS ACCORDION */}
       <div className="space-y-4">
-        {phases.map((phase, pIdx) => {
+        {phases.length === 0 ? (
+          <div className={`rounded-2xl border p-10 text-center space-y-4 ${
+            isDark ? 'bg-slate-900/70 border-slate-800' : 'bg-white border-slate-200'
+          }`}>
+            <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto">
+              <FileSpreadsheet className="w-6 h-6" />
+            </div>
+            <div className="space-y-1">
+              <h3 className={`text-base font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                No Bill of Materials Phases Yet
+              </h3>
+              <p className="text-xs text-slate-400 max-w-md mx-auto leading-relaxed">
+                <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>{projectTitle}</strong> starts with a blank BOM (₱0.00). Build your custom WBS phases from scratch or apply a standard template preset above.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={handleAddPhase}
+                className="px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20 cursor-pointer transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                <span>+ Add First Phase</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowTemplatePickerModal(true)}
+                className={`px-4 py-2.5 rounded-xl border font-semibold text-xs flex items-center gap-1.5 cursor-pointer transition-colors ${
+                  isDark
+                    ? 'bg-slate-950 hover:bg-slate-800 border-slate-700 text-slate-200'
+                    : 'bg-slate-50 hover:bg-slate-100 border-slate-300 text-slate-700'
+                }`}
+              >
+                <Layers className="w-4 h-4 text-amber-400" />
+                <span>Apply a Template Preset</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+        phases.map((phase, pIdx) => {
           const phaseSummary = summaryCalculations.phaseSummaries.find(ps => ps.phaseId === phase.id);
 
           return (
             <div
               key={phase.id}
-              className={`rounded-2xl border overflow-hidden shadow-md transition-colors ${
-                isDark ? 'bg-slate-900/90 border-slate-800' : 'bg-white border-slate-200'
-              }`}
+              className={`rounded-2xl border overflow-hidden shadow-md transition-colors ${isDark ? 'bg-slate-900/90 border-slate-800' : 'bg-white border-slate-200'
+                }`}
             >
               {/* Phase Header Bar */}
               <div className="p-3.5 sm:p-4 bg-slate-950/80 border-b border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3">
@@ -1374,6 +1660,17 @@ export default function BillOfMaterialsManager({
                     <Plus className="w-3.5 h-3.5" />
                     <span>+ Add Sub-Phase</span>
                   </button>
+
+                  {!isClientMode && (
+                    <button
+                      type="button"
+                      onClick={() => handleDeletePhase(phase.id)}
+                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/70 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-500/40 transition-colors cursor-pointer"
+                      title={`Delete Phase ${phase.code}`}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
 
@@ -1382,7 +1679,7 @@ export default function BillOfMaterialsManager({
                 <div className="p-3 sm:p-4 space-y-4">
                   {phase.subPhases.map((sp) => (
                     <div key={sp.id} className="bg-slate-950/40 border border-slate-800 rounded-xl overflow-hidden">
-                      
+
                       {/* Sub-Phase Title Row */}
                       <div className="px-3.5 py-2 bg-slate-900/60 border-b border-slate-800 flex items-center justify-between">
                         <div className="flex items-center gap-2">
@@ -1594,8 +1891,256 @@ export default function BillOfMaterialsManager({
               )}
             </div>
           );
-        })}
+        })
+        )}
       </div>
+
+      {/* Styled In-App Template Preset Picker Modal */}
+      {showTemplatePickerModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-lg bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
+                  <Layers className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Choose a BOM Template Preset</h3>
+                  <p className="text-[11px] text-slate-400 mt-0.5">
+                    Pre-populate <strong className="text-slate-200">{projectTitle}</strong> with standard WBS construction phases.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTemplatePickerModal(false)}
+                className="text-slate-400 hover:text-white px-2 py-1 rounded-lg hover:bg-slate-800 text-xs font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1 custom-scrollbar">
+              {(
+                [
+                  { type: '2-Storey Residential Unit' as ProjectTypology, phasesCount: STANDARD_BOM_PHASES_TEMPLATE.length, desc: 'Full ground-up residential build including structural, MEP, roofing & architectural finishes.' },
+                  { type: '1-Storey / Bungalow' as ProjectTypology, phasesCount: STANDARD_BOM_PHASES_TEMPLATE.length, desc: 'Single-level residential build with scaled foundation, framing, and finishing scope.' },
+                  { type: 'Renovation / Fit-Out' as ProjectTypology, phasesCount: STANDARD_BOM_PHASES_TEMPLATE.length, desc: 'Interior commercial or residential fit-out with partitions, ceilings, electrical & painting.' },
+                  { type: 'Demolition / Excavation' as ProjectTypology, phasesCount: STANDARD_BOM_PHASES_TEMPLATE.length, desc: 'Site clearing, structural demolition, hauling, shoring, and earthwork preparation.' },
+                  { type: 'Commercial Building' as ProjectTypology, phasesCount: STANDARD_BOM_PHASES_TEMPLATE.length, desc: 'Multi-trade commercial construction template with heavy structural and MEP allocations.' },
+                ]
+              ).map((tpl) => (
+                <div
+                  key={tpl.type}
+                  className="bg-slate-950/80 border border-slate-800 hover:border-amber-500/50 rounded-xl p-3.5 flex items-center justify-between gap-3 transition-colors"
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-bold text-white">{tpl.type}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 text-[9px] font-mono font-bold">
+                        {tpl.phasesCount} PHASES
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1">{tpl.desc}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProjectType(tpl.type);
+                      setShowTemplatePickerModal(false);
+                      if (phases.length > 0) {
+                        setPendingTemplateApply(tpl.type);
+                      } else {
+                        executeApplyTemplate(tpl.type);
+                      }
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold shrink-0 cursor-pointer transition-colors"
+                  >
+                    Apply Template
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => setShowTemplatePickerModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Styled In-App Confirmation Modal for Deleting a Phase or Sub-Phase */}
+      {pendingDeleteTarget && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-rose-500/50 rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-400 shrink-0">
+                <Trash2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  {pendingDeleteTarget.type === 'phase' ? 'Delete BOM Phase?' : 'Delete Sub-Phase?'}
+                </h3>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  Are you sure you want to delete <strong className="text-white">{pendingDeleteTarget.title}</strong> and all of its line items? This action cannot be undone.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setPendingDeleteTarget(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteTarget}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold cursor-pointer transition-colors"
+              >
+                Delete {pendingDeleteTarget.type === 'phase' ? 'Phase' : 'Sub-Phase'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Styled In-App Confirmation Modal Before Overwriting Existing BOM With a Template Preset */}
+      {pendingTemplateApply && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Apply Template Preset?</h3>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  Replace the existing <strong className="text-white">{phases.length} BOM phase(s)</strong> for{' '}
+                  <span className="text-amber-400 font-semibold">{projectTitle}</span> with the{' '}
+                  <strong className="text-white">&ldquo;{pendingTemplateApply}&rdquo;</strong> template?
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setPendingTemplateApply(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeApplyTemplate(pendingTemplateApply)}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold cursor-pointer transition-colors"
+              >
+                Apply Template
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Styled In-App Confirmation Modal Before Syncing Into Project With Existing Gantt Tasks */}
+      {syncConfirmModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400 shrink-0">
+                <AlertCircle className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Confirm BOM → Master Gantt WBS Sync</h3>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  <strong className="text-white">{projectTitle}</strong> already has{' '}
+                  <span className="text-amber-400 font-semibold">{syncConfirmModal.existingTasks.length} existing Gantt task(s)</span>
+                  {syncConfirmModal.tasksWithProgressCount > 0 && (
+                    <> ({syncConfirmModal.tasksWithProgressCount} with active progress &gt; 0%)</>
+                  )}.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 text-[11px] text-slate-300 space-y-1">
+              <div className="font-semibold text-emerald-400">Safe Merge Guarantees:</div>
+              <ul className="list-disc list-inside space-y-0.5 text-slate-400">
+                <li>Scoped strictly to <span className="font-mono text-slate-200">{selectedProjectId}</span> (other projects are untouched).</li>
+                <li>Existing <strong>progress %</strong>, <strong>status</strong>, <strong>assigned crew</strong>, and <strong>dates</strong> are preserved for matching phases/tasks.</li>
+              </ul>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setSyncConfirmModal(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => executeSyncToMasterGantt(syncConfirmModal.existingTasks)}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold cursor-pointer transition-colors"
+              >
+                Confirm &amp; Sync WBS
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Styled Post-Sync Navigation Modal */}
+      {syncCompletedModal && (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-emerald-500/40 rounded-2xl shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="p-2.5 rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 shrink-0">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">BOM WBS Synced to Master Gantt</h3>
+                <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                  Synced <strong className="text-white">{syncCompletedModal.phasesCount} WBS phases</strong> ({syncCompletedModal.tasksCount} tasks) for{' '}
+                  <span className="text-emerald-400 font-semibold">{projectTitle}</span>
+                  {syncCompletedModal.preservedCount > 0 && (
+                    <> while preserving <strong>{syncCompletedModal.preservedCount}</strong> existing progress record(s)</>
+                  )}.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setSyncCompletedModal(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                Stay in BOM
+              </button>
+              {onNavigateToGantt && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSyncCompletedModal(null);
+                    onNavigateToGantt(selectedProjectId);
+                  }}
+                  className="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-bold cursor-pointer transition-colors flex items-center gap-1.5"
+                >
+                  <span>Open Master Gantt</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

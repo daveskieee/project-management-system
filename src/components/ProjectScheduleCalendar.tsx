@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { ScheduleEvent, ScheduleEventType, ProjectProfile } from '../types';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 
 interface ProjectScheduleCalendarProps {
   events?: ScheduleEvent[];
@@ -29,6 +30,7 @@ export default function ProjectScheduleCalendar({
   onDeleteEvent
 }: ProjectScheduleCalendarProps) {
   const { isDark } = useTheme();
+  const { confirm: confirmDialog } = useConfirm();
   const [currentDate, setCurrentDate] = useState<Date>(new Date());
   const [selectedDateStr, setSelectedDateStr] = useState<string>(new Date().toISOString().split('T')[0]);
   const [filterType, setFilterType] = useState<string>('ALL');
@@ -360,7 +362,13 @@ export default function ProjectScheduleCalendar({
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to remove this scheduled event?')) return;
+    const ok = await confirmDialog({
+      title: 'Remove Scheduled Event',
+      message: 'Are you sure you want to remove this scheduled event?',
+      confirmLabel: 'Remove Event',
+      variant: 'danger',
+    });
+    if (!ok) return;
     try {
       if (onDeleteEvent) {
         await onDeleteEvent(id);

@@ -1192,7 +1192,7 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                               <div className="min-w-0 flex-1 space-y-1.5">
                                 <div className="flex items-center justify-between gap-2 flex-wrap">
                                   <div className="flex items-center gap-2 flex-wrap min-w-0">
-                                    <span className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
+                                    <span title={worker.name} className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
                                       {worker.name}
                                     </span>
                                     <span
@@ -1355,7 +1355,7 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                           >
                             <div className="min-w-0 flex-1 space-y-1">
                               <div className="flex items-center gap-2 flex-wrap">
-                                <span className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
+                                <span title={worker.name} className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
                                   {worker.name}
                                 </span>
                                 <span
@@ -1544,9 +1544,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                         .filter(c => !crewSelectedWorkerIds.includes(c.id))
                         .map(c => {
                           const avail = getWorkerAvailabilityAdvisory(c, targetAllocationProject);
+                          const displayName = c.name.length > 36 ? `${c.name.slice(0, 36)}…` : c.name;
                           return (
-                            <option key={c.id} value={c.id}>
-                              {c.name} — {c.tradeType || c.specialty || 'Artisan'} (₱{getWorkerDailyRate(c).toLocaleString()}/day • {avail.isOverlapping ? `Active on ${avail.overlappingProjects[0]}` : 'Available'})
+                            <option key={c.id} value={c.id} title={c.name}>
+                              {displayName} — {c.tradeType || c.specialty || 'Artisan'} (₱{getWorkerDailyRate(c).toLocaleString()}/day • {avail.isOverlapping ? `Active on ${avail.overlappingProjects[0]}` : 'Available'})
                             </option>
                           );
                         })}
@@ -1714,7 +1715,7 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                               <div className="flex items-center justify-between gap-2 flex-wrap">
                                 <div className="min-w-0 flex-1 space-y-1">
                                   <div className="flex items-center gap-2 flex-wrap">
-                                    <span className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
+                                    <span title={worker.name} className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
                                       {worker.name}
                                     </span>
                                     <span

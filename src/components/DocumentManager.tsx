@@ -4,8 +4,8 @@
  */
 
 import React, { useState, useMemo, useRef } from 'react';
-import { 
-  FileText, Upload, Download, Eye, CheckCircle2, 
+import {
+  FileText, Upload, Download, Eye, CheckCircle2,
   Clock, ShieldAlert, Folder, Filter, Plus, X, FileCode,
   Edit3, Trash2, Check, AlertTriangle, FileSpreadsheet,
   Maximize2, ZoomIn, ZoomOut, RotateCcw, Layers, MapPin,
@@ -160,8 +160,8 @@ const formatOneDriveDate = (dateStr?: string): string => {
   }
 };
 
-export default function DocumentManager({ 
-  documents, 
+export default function DocumentManager({
+  documents,
   onUploadDocument,
   onUpdateDocument,
   onDeleteDocument,
@@ -335,9 +335,30 @@ export default function DocumentManager({
     };
   };
 
-  // Real download trigger
-  const handleDownloadFile = (doc: ProjectDocument) => {
-    if (doc.fileUrl && (doc.fileUrl.startsWith('/uploads/') || doc.fileUrl.startsWith('http') || doc.fileUrl.startsWith('blob:'))) {
+  // Verify file reachability before opening/downloading to prevent broken "Failed to load PDF document" tabs
+  const verifyDocumentReachable = async (url: string): Promise<boolean> => {
+    if (!url) return false;
+    if (url.startsWith('blob:') || url.startsWith('data:')) return true;
+    try {
+      const res = await fetch(url, { method: 'HEAD', credentials: 'include' });
+      if (!res.ok) return false;
+      const contentType = (res.headers.get('content-type') || '').toLowerCase();
+      // Express SPA fallback returns text/html for missing static files on disk
+      if (contentType.includes('text/html')) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Real download trigger with graceful missing-file check
+  const handleDownloadFile = async (doc: ProjectDocument) => {
+    if (doc.fileUrl && (doc.fileUrl.startsWith('/uploads/') || doc.fileUrl.startsWith('/documents/') || doc.fileUrl.startsWith('http') || doc.fileUrl.startsWith('blob:'))) {
+      const reachable = await verifyDocumentReachable(doc.fileUrl);
+      if (!reachable) {
+        showToast('Document file is unavailable on disk — please re-upload');
+        return;
+      }
       const link = document.createElement('a');
       link.href = doc.fileUrl;
       link.download = doc.fileName || doc.title;
@@ -453,7 +474,7 @@ export default function DocumentManager({
     setSelectedFile(null);
     setFileSizeError(null);
     setIsUploadModalOpen(false);
-    showToast(`Uploaded "${uploadTitle.trim()}" (saved to server disk, indexed in database)`);
+    showToast(`Uploaded "${uploadTitle.trim()}" successfully.`);
   };
 
   // Open Edit Modal
@@ -510,7 +531,7 @@ export default function DocumentManager({
       });
     }
 
-    setSyncNotice(`Progress successfully synchronized with project database & Gantt timeline!`);
+    setSyncNotice(`Progress synchronized with Master Gantt timeline.`);
     setTimeout(() => setSyncNotice(null), 4000);
   };
 
@@ -562,8 +583,8 @@ export default function DocumentManager({
     const percentageUsed = percentageUsedNum.toFixed(1);
     const percentageAvailable = Math.max(0, 100 - percentageUsedNum).toFixed(1);
 
-    return { 
-      totalMb, 
+    return {
+      totalMb,
       usedBytes,
       usedLabel,
       maxBytes,
@@ -572,8 +593,8 @@ export default function DocumentManager({
       availableLabel,
       percentageUsed,
       percentageAvailable,
-      totalCount: effectiveDocuments.length, 
-      catCounts 
+      totalCount: effectiveDocuments.length,
+      catCounts
     };
   }, [effectiveDocuments]);
 
@@ -593,8 +614,8 @@ export default function DocumentManager({
       const matchesCategory = activeCategory === 'ALL' || d.category === activeCategory;
       const matchesStatus = statusFilter === 'ALL' || d.status === statusFilter;
       const q = searchQuery.toLowerCase().trim();
-      const matchesSearch = !q || 
-        d.title.toLowerCase().includes(q) || 
+      const matchesSearch = !q ||
+        d.title.toLowerCase().includes(q) ||
         (d.notes && d.notes.toLowerCase().includes(q)) ||
         d.uploadedBy.toLowerCase().includes(q) ||
         d.version.toLowerCase().includes(q);
@@ -672,7 +693,7 @@ export default function DocumentManager({
 
   return (
     <div className="space-y-4">
-      
+
       {/* Toast Notification */}
       {toastNotification && (
         <div className="fixed top-5 right-5 z-[999999] bg-slate-900 border border-teal-500/50 text-white px-4 py-2.5 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-semibold animate-fadeIn">
@@ -685,7 +706,7 @@ export default function DocumentManager({
       {/* 1. ONEDRIVE COMMAND BAR & ARCHIVE STORAGE STATUS             */}
       {/* ───────────────────────────────────────────────────────────── */}
       <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 shadow-sm flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        
+
         {/* Title & Drive Storage Metric */}
         <div className="space-y-1.5">
           <div className="flex items-center gap-3">
@@ -713,12 +734,12 @@ export default function DocumentManager({
             <span className="text-slate-400">{storageMetrics.maxLabel}</span>
             <span className="text-slate-600">•</span>
             <span className="text-emerald-400 font-medium">{storageMetrics.availableLabel} available</span>
-            
+
             {/* Visual mini progress bar */}
             <div className="w-16 bg-slate-800 rounded-full h-1.5 overflow-hidden mx-1 hidden sm:inline-block" title={`${storageMetrics.percentageUsed}% of ${storageMetrics.maxLabel} used`}>
-              <div 
-                className="bg-gradient-to-r from-teal-500 to-emerald-400 h-1.5 rounded-full transition-all duration-300" 
-                style={{ width: `${Math.max(4, Math.min(100, parseFloat(storageMetrics.percentageUsed)))}%` }} 
+              <div
+                className="bg-gradient-to-r from-teal-500 to-emerald-400 h-1.5 rounded-full transition-all duration-300"
+                style={{ width: `${Math.max(4, Math.min(100, parseFloat(storageMetrics.percentageUsed)))}%` }}
               />
             </div>
 
@@ -763,9 +784,9 @@ export default function DocumentManager({
 
             {isSortDropdownOpen && (
               <>
-                <div 
-                  className="fixed inset-0 z-40" 
-                  onClick={() => setIsSortDropdownOpen(false)} 
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setIsSortDropdownOpen(false)}
                 />
                 <div className="absolute right-0 top-full mt-1.5 z-50 w-56 bg-slate-950 border border-slate-800 rounded-xl p-1.5 shadow-2xl space-y-1 text-xs">
                   <div className="px-2.5 py-1 text-[10px] font-mono font-bold uppercase text-slate-400 tracking-wider">
@@ -773,63 +794,56 @@ export default function DocumentManager({
                   </div>
                   <button
                     onClick={() => { setSortField('title'); setSortDirection('asc'); setIsSortDropdownOpen(false); }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                      sortField === 'title' && sortDirection === 'asc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
-                    }`}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${sortField === 'title' && sortDirection === 'asc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
                   >
                     <span>Name (A to Z)</span>
                     <ArrowUp className="w-3 h-3" />
                   </button>
                   <button
                     onClick={() => { setSortField('title'); setSortDirection('desc'); setIsSortDropdownOpen(false); }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                      sortField === 'title' && sortDirection === 'desc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
-                    }`}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${sortField === 'title' && sortDirection === 'desc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
                   >
                     <span>Name (Z to A)</span>
                     <ArrowDown className="w-3 h-3" />
                   </button>
                   <button
                     onClick={() => { setSortField('createdAt'); setSortDirection('desc'); setIsSortDropdownOpen(false); }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                      sortField === 'createdAt' && sortDirection === 'desc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
-                    }`}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${sortField === 'createdAt' && sortDirection === 'desc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
                   >
                     <span>Modified (Newest First)</span>
                     <Clock className="w-3 h-3" />
                   </button>
                   <button
                     onClick={() => { setSortField('createdAt'); setSortDirection('asc'); setIsSortDropdownOpen(false); }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                      sortField === 'createdAt' && sortDirection === 'asc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
-                    }`}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${sortField === 'createdAt' && sortDirection === 'asc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
                   >
                     <span>Modified (Oldest First)</span>
                     <Clock className="w-3 h-3" />
                   </button>
                   <button
                     onClick={() => { setSortField('fileSize'); setSortDirection('desc'); setIsSortDropdownOpen(false); }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                      sortField === 'fileSize' && sortDirection === 'desc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
-                    }`}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${sortField === 'fileSize' && sortDirection === 'desc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
                   >
                     <span>File Size (Largest First)</span>
                     <ArrowDown className="w-3 h-3" />
                   </button>
                   <button
                     onClick={() => { setSortField('fileSize'); setSortDirection('asc'); setIsSortDropdownOpen(false); }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                      sortField === 'fileSize' && sortDirection === 'asc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
-                    }`}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${sortField === 'fileSize' && sortDirection === 'asc' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
                   >
                     <span>File Size (Smallest First)</span>
                     <ArrowUp className="w-3 h-3" />
                   </button>
                   <button
                     onClick={() => { setSortField('status'); setSortDirection('asc'); setIsSortDropdownOpen(false); }}
-                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${
-                      sortField === 'status' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
-                    }`}
+                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left transition-colors cursor-pointer ${sortField === 'status' ? 'bg-teal-500/20 text-teal-300 font-bold' : 'text-slate-300 hover:bg-slate-900'
+                      }`}
                   >
                     <span>Approval Status</span>
                     <FileCheck className="w-3 h-3" />
@@ -843,22 +857,20 @@ export default function DocumentManager({
           <div className="flex items-center bg-slate-950 border border-slate-800 rounded-xl p-0.5">
             <button
               onClick={() => handleToggleViewMode('list')}
-              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
-                viewMode === 'list'
+              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${viewMode === 'list'
                   ? 'bg-teal-500 text-slate-950 font-bold shadow-sm'
                   : 'text-slate-400 hover:text-white'
-              }`}
+                }`}
               title="OneDrive Table / List View"
             >
               <List className="w-4 h-4" />
             </button>
             <button
               onClick={() => handleToggleViewMode('grid')}
-              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${
-                viewMode === 'grid'
+              className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${viewMode === 'grid'
                   ? 'bg-teal-500 text-slate-950 font-bold shadow-sm'
                   : 'text-slate-400 hover:text-white'
-              }`}
+                }`}
               title="OneDrive Tiles / Grid View"
             >
               <LayoutGrid className="w-4 h-4" />
@@ -883,24 +895,22 @@ export default function DocumentManager({
         {/* Category Filter Pills */}
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin scrollbar-thumb-slate-800">
           {categories.map((cat) => {
-            const count = cat.id === 'ALL' 
-              ? effectiveDocuments.length 
+            const count = cat.id === 'ALL'
+              ? effectiveDocuments.length
               : effectiveDocuments.filter(d => d.category === cat.id).length;
 
             return (
               <button
                 key={cat.id}
                 onClick={() => setActiveCategory(cat.id)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1.5 ${
-                  activeCategory === cat.id
+                className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1.5 ${activeCategory === cat.id
                     ? 'bg-teal-500 text-slate-950 font-bold shadow-sm shadow-teal-500/20'
                     : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800/80'
-                }`}
+                  }`}
               >
                 <span>{cat.label}</span>
-                <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
-                  activeCategory === cat.id ? 'bg-slate-950/30 text-slate-950 font-bold' : 'bg-slate-800 text-slate-400'
-                }`}>
+                <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${activeCategory === cat.id ? 'bg-slate-950/30 text-slate-950 font-bold' : 'bg-slate-800 text-slate-400'
+                  }`}>
                   {count}
                 </span>
               </button>
@@ -969,9 +979,9 @@ export default function DocumentManager({
                 <tr className="bg-slate-950/90 border-b border-slate-800 text-slate-400 font-mono text-[11px] select-none">
                   {/* Select All Checkbox */}
                   <th className="py-3 px-3 w-10 text-center">
-                    <button 
+                    <button
                       type="button"
-                      onClick={handleSelectAll} 
+                      onClick={handleSelectAll}
                       className="text-slate-400 hover:text-white cursor-pointer"
                       title="Select all"
                     >
@@ -984,7 +994,7 @@ export default function DocumentManager({
                   </th>
 
                   {/* Document Name */}
-                  <th 
+                  <th
                     onClick={() => handleSortChange('title')}
                     className="py-3 px-3 font-semibold text-slate-300 hover:text-white cursor-pointer transition-colors"
                   >
@@ -997,7 +1007,7 @@ export default function DocumentManager({
                   </th>
 
                   {/* Category / Discipline */}
-                  <th 
+                  <th
                     onClick={() => handleSortChange('category')}
                     className="py-3 px-3 font-semibold text-slate-300 hover:text-white cursor-pointer transition-colors hidden md:table-cell"
                   >
@@ -1010,7 +1020,7 @@ export default function DocumentManager({
                   </th>
 
                   {/* Date Modified */}
-                  <th 
+                  <th
                     onClick={() => handleSortChange('createdAt')}
                     className="py-3 px-3 font-semibold text-slate-300 hover:text-white cursor-pointer transition-colors hidden sm:table-cell"
                   >
@@ -1028,7 +1038,7 @@ export default function DocumentManager({
                   </th>
 
                   {/* File Size */}
-                  <th 
+                  <th
                     onClick={() => handleSortChange('fileSize')}
                     className="py-3 px-3 font-semibold text-slate-300 hover:text-white cursor-pointer transition-colors text-right"
                   >
@@ -1041,7 +1051,7 @@ export default function DocumentManager({
                   </th>
 
                   {/* Approval Status */}
-                  <th 
+                  <th
                     onClick={() => handleSortChange('status')}
                     className="py-3 px-3 font-semibold text-slate-300 hover:text-white cursor-pointer transition-colors text-center hidden md:table-cell"
                   >
@@ -1070,12 +1080,11 @@ export default function DocumentManager({
                     <tr
                       key={doc.id}
                       onClick={() => setPreviewDoc(doc)}
-                      className={`group hover:bg-slate-800/50 transition-colors cursor-pointer ${
-                        isSelected ? 'bg-teal-950/30' : ''
-                      }`}
+                      className={`group hover:bg-slate-800/50 transition-colors cursor-pointer ${isSelected ? 'bg-teal-950/30' : ''
+                        }`}
                     >
                       {/* Checkbox */}
-                      <td 
+                      <td
                         className="py-3 px-3 text-center"
                         onClick={(e) => handleToggleSelectDoc(doc.id, e)}
                       >
@@ -1132,17 +1141,16 @@ export default function DocumentManager({
 
                       {/* Status */}
                       <td className="py-3 px-3 text-center hidden md:table-cell">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold inline-block ${
-                          doc.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 
-                          doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
-                          'bg-slate-800 text-slate-300 border border-slate-700'
-                        }`}>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold inline-block ${doc.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                            doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                              'bg-slate-800 text-slate-300 border border-slate-700'
+                          }`}>
                           {doc.status}
                         </span>
                       </td>
 
                       {/* Actions */}
-                      <td 
+                      <td
                         className="py-3 px-4 text-right"
                         onClick={(e) => e.stopPropagation()}
                       >
@@ -1216,9 +1224,8 @@ export default function DocumentManager({
               <div
                 key={doc.id}
                 onClick={() => setPreviewDoc(doc)}
-                className={`bg-slate-900/90 border rounded-2xl p-4 shadow-lg hover:shadow-2xl transition-all flex flex-col justify-between group cursor-pointer ${
-                  isSelected ? 'border-teal-500 bg-slate-900' : 'border-slate-800 hover:border-teal-700/60'
-                }`}
+                className={`bg-slate-900/90 border rounded-2xl p-4 shadow-lg hover:shadow-2xl transition-all flex flex-col justify-between group cursor-pointer ${isSelected ? 'border-teal-500 bg-slate-900' : 'border-slate-800 hover:border-teal-700/60'
+                  }`}
               >
                 <div>
                   <div className="flex items-start justify-between gap-2 mb-3">
@@ -1246,11 +1253,10 @@ export default function DocumentManager({
                       </div>
                     </div>
 
-                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                      doc.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' : 
-                      doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
-                      'bg-slate-800 text-slate-300 border border-slate-700'
-                    }`}>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${doc.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                        doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                          'bg-slate-800 text-slate-300 border border-slate-700'
+                      }`}>
                       {doc.status}
                     </span>
                   </div>
@@ -1340,7 +1346,7 @@ export default function DocumentManager({
       {isUploadModalOpen && (
         <div className="fixed inset-0 z-[99999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-lg shadow-2xl space-y-4 animate-fadeIn">
-            
+
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <div className="p-2 bg-teal-500/10 text-teal-400 rounded-xl border border-teal-500/20">
@@ -1365,7 +1371,7 @@ export default function DocumentManager({
             </div>
 
             <form onSubmit={handleUploadSubmit} className="space-y-3.5">
-              
+
               {/* File Drag/Pick Box with Database Limit Indicator */}
               <div>
                 <div className="flex items-center justify-between mb-1">
@@ -1378,13 +1384,12 @@ export default function DocumentManager({
                   </div>
                 </div>
 
-                <div className={`border border-dashed rounded-xl p-3.5 text-center bg-slate-950/60 cursor-pointer relative transition-all ${
-                  fileSizeError 
-                    ? 'border-rose-500/80 bg-rose-950/20' 
-                    : selectedFileName 
-                      ? 'border-teal-500/80 bg-teal-950/10' 
+                <div className={`border border-dashed rounded-xl p-3.5 text-center bg-slate-950/60 cursor-pointer relative transition-all ${fileSizeError
+                    ? 'border-rose-500/80 bg-rose-950/20'
+                    : selectedFileName
+                      ? 'border-teal-500/80 bg-teal-950/10'
                       : 'border-slate-700 hover:border-teal-500/80'
-                }`}>
+                  }`}>
                   <input
                     type="file"
                     onChange={handleFileSelect}
@@ -1433,12 +1438,11 @@ export default function DocumentManager({
                       </span>
                     </div>
                     <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
-                      <div 
-                        className={`h-1.5 rounded-full transition-all duration-300 ${
-                          (selectedFileSizeBytes / MAX_UPLOAD_SIZE_BYTES) > 0.8 
-                            ? 'bg-amber-400' 
+                      <div
+                        className={`h-1.5 rounded-full transition-all duration-300 ${(selectedFileSizeBytes / MAX_UPLOAD_SIZE_BYTES) > 0.8
+                            ? 'bg-amber-400'
                             : 'bg-teal-400'
-                        }`}
+                          }`}
                         style={{ width: `${Math.min(100, (selectedFileSizeBytes / MAX_UPLOAD_SIZE_BYTES) * 100)}%` }}
                       />
                     </div>
@@ -1541,11 +1545,10 @@ export default function DocumentManager({
                 <button
                   type="submit"
                   disabled={Boolean(isUploading || fileSizeError || selectedFileSizeBytes > MAX_UPLOAD_SIZE_BYTES)}
-                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
-                    isUploading || fileSizeError || selectedFileSizeBytes > MAX_UPLOAD_SIZE_BYTES
+                  className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${isUploading || fileSizeError || selectedFileSizeBytes > MAX_UPLOAD_SIZE_BYTES
                       ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed opacity-60'
                       : 'text-white bg-teal-600 hover:bg-teal-500 shadow-lg shadow-teal-950 cursor-pointer'
-                  }`}
+                    }`}
                 >
                   {isUploading ? (
                     <>
@@ -1569,7 +1572,7 @@ export default function DocumentManager({
       {editDoc && (
         <div className="fixed inset-0 z-[99999] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 w-full max-w-md shadow-2xl space-y-4 animate-fadeIn">
-            
+
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">
               <div className="flex items-center gap-2">
                 <div className="p-2 bg-amber-500/10 text-amber-400 rounded-xl border border-amber-500/20">
@@ -1711,18 +1714,17 @@ export default function DocumentManager({
       {previewDoc && (
         <div className="fixed inset-0 z-[99999] bg-black/85 backdrop-blur-md flex items-center justify-center p-3 sm:p-6">
           <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-5xl h-[88vh] flex flex-col shadow-2xl overflow-hidden animate-fadeIn">
-            
+
             {/* Top Preview Bar */}
             <div className="p-4 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-3">
-                <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold border ${
-                  isCadDocument(previewDoc) ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' :
-                  isExcelScheduleDocument(previewDoc) ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' :
-                  'bg-teal-500/10 border-teal-500/30 text-teal-400'
-                }`}>
-                  {isCadDocument(previewDoc) ? <FileCode className="w-5 h-5" /> : 
-                   isExcelScheduleDocument(previewDoc) ? <FileSpreadsheet className="w-5 h-5" /> : 
-                   <FileText className="w-5 h-5" />}
+                <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold border ${isCadDocument(previewDoc) ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' :
+                    isExcelScheduleDocument(previewDoc) ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' :
+                      'bg-teal-500/10 border-teal-500/30 text-teal-400'
+                  }`}>
+                  {isCadDocument(previewDoc) ? <FileCode className="w-5 h-5" /> :
+                    isExcelScheduleDocument(previewDoc) ? <FileSpreadsheet className="w-5 h-5" /> :
+                      <FileText className="w-5 h-5" />}
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
@@ -1776,7 +1778,7 @@ export default function DocumentManager({
 
             {/* Content Display: CAD Vector Canvas OR Excel Spreadsheet */}
             <div className="flex-1 overflow-auto bg-slate-950 relative p-4 flex flex-col items-center justify-center">
-              
+
               {/* Specialized A: AutoCAD / Blueprint Interactive Vector Viewer */}
               {isCadDocument(previewDoc) && (
                 <div className="w-full h-full flex flex-col">
@@ -1818,25 +1820,22 @@ export default function DocumentManager({
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => setCadShowGrid(prev => !prev)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold cursor-pointer transition-colors ${
-                          cadShowGrid ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-slate-800 text-slate-400'
-                        }`}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold cursor-pointer transition-colors ${cadShowGrid ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-slate-800 text-slate-400'
+                          }`}
                       >
                         Grid
                       </button>
                       <button
                         onClick={() => setCadShowMep(prev => !prev)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold cursor-pointer transition-colors ${
-                          cadShowMep ? 'bg-teal-500/20 text-teal-300 border border-teal-500/40' : 'bg-slate-800 text-slate-400'
-                        }`}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold cursor-pointer transition-colors ${cadShowMep ? 'bg-teal-500/20 text-teal-300 border border-teal-500/40' : 'bg-slate-800 text-slate-400'
+                          }`}
                       >
                         MEPFS
                       </button>
                       <button
                         onClick={() => setCadShowFurniture(prev => !prev)}
-                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold cursor-pointer transition-colors ${
-                          cadShowFurniture ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40' : 'bg-slate-800 text-slate-400'
-                        }`}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold cursor-pointer transition-colors ${cadShowFurniture ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40' : 'bg-slate-800 text-slate-400'
+                          }`}
                       >
                         Furniture
                       </button>
@@ -1979,7 +1978,17 @@ export default function DocumentManager({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-800">
-                        {scheduleData.map((row, idx) => (
+                        {scheduleData.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="py-12 px-4 text-center">
+                              <div className="flex flex-col items-center justify-center gap-2 text-slate-400">
+                                <FileSpreadsheet className="w-8 h-8 text-slate-600" />
+                                <p className="text-xs font-semibold text-slate-300">No BOQ line items found for this file</p>
+                                <p className="text-[11px] text-slate-500">Upload a populated BOQ spreadsheet or add tasks in Master Gantt to populate this matrix.</p>
+                              </div>
+                            </td>
+                          </tr>
+                        ) : scheduleData.map((row, idx) => (
                           <tr key={row.id} className="hover:bg-slate-800/60 transition-colors">
                             <td className="py-2.5 px-3 font-mono text-emerald-400 font-bold">{row.wbs}</td>
                             <td className="py-2.5 px-3 font-semibold text-white">
@@ -2018,11 +2027,10 @@ export default function DocumentManager({
                               </div>
                             </td>
                             <td className="py-2.5 px-3">
-                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                row.status === 'COMPLETED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                                row.status === 'IN_PROGRESS' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
-                                'bg-slate-800 text-slate-400'
-                              }`}>
+                              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${row.status === 'COMPLETED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
+                                  row.status === 'IN_PROGRESS' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                                    'bg-slate-800 text-slate-400'
+                                }`}>
                                 {row.status}
                               </span>
                             </td>
@@ -2038,10 +2046,10 @@ export default function DocumentManager({
               {!isCadDocument(previewDoc) && !isExcelScheduleDocument(previewDoc) && (
                 previewDoc.fileUrl && /\.(jpe?g|png|webp|gif)$/i.test(previewDoc.fileUrl || previewDoc.title) ? (
                   <div className="w-full h-full flex flex-col items-center justify-center p-4">
-                    <img 
-                      src={previewDoc.fileUrl} 
-                      alt={previewDoc.title} 
-                      className="max-h-[75vh] max-w-full object-contain rounded-2xl border border-slate-700 shadow-2xl" 
+                    <img
+                      src={previewDoc.fileUrl}
+                      alt={previewDoc.title}
+                      className="max-h-[75vh] max-w-full object-contain rounded-2xl border border-slate-700 shadow-2xl"
                     />
                     <div className="mt-3 flex items-center gap-3">
                       <span className="text-xs text-slate-300 font-medium">{previewDoc.title} ({previewDoc.fileSize})</span>

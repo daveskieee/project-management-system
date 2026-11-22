@@ -90,9 +90,9 @@ export function canAccessModule(roleInput: UserRole | string, moduleId: string):
   const role = normalizeRole(roleInput);
 
   switch (moduleId) {
-    // 1. Executive Analytics & Dashboards (OM Only)
+    // 1. Role-Specific Dashboards (OM/Admin, PM, Finance, Client)
     case 'dashboard':
-      return role === UserRole.OM;
+      return role === UserRole.OM || role === UserRole.PM || role === UserRole.FINANCE || role === UserRole.CLIENT;
 
     case 'operations-settings':
       return role === UserRole.OM;

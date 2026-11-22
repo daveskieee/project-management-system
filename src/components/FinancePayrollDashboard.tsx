@@ -18,6 +18,7 @@ import { computeWorkerShiftMetrics, DtrEntryState } from './TimekeeperAttendance
 import { openEnterprisePrintWindow, escapePrintHtml } from '../utils/printEngine';
 import { logAuditEvent } from '../utils/auditLogger';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 
 const FALLBACK_PAYROLL_ARTISANS = [
   { id: 'ART-101', name: 'Ramon Dela Cruz', position: 'Site Leadman / Master Carpenter', dailyRate: 950, hourlyOtRate: 148.44 },
@@ -45,6 +46,7 @@ export default function FinancePayrollDashboard({
   onRefreshData
 }: FinancePayrollDashboardProps) {
   const { isDark } = useTheme();
+  const { confirm: confirmDialog, toast } = useConfirm();
   // Build unified live + localStorage projects list so newly created projects (e.g. "2-storey residential unit") are always selectable
   const effectiveProjects = useMemo<ProjectProfile[]>(() => {
     const byId = new Map<string, ProjectProfile>();
@@ -758,12 +760,16 @@ export default function FinancePayrollDashboard({
   const handleFinalizePayroll = async () => {
     if (!selectedProjectId || !draftCalculation) return;
 
-    const confirmed = window.confirm(
-      `Finalize Weekly Payroll for Period ${periodStart} to ${periodEnd}?\n\n` +
-      `• Total Net Disbursal: ₱${draftCalculation.totalNet.toLocaleString()}\n` +
-      `• Total Deductions: ₱${draftCalculation.totalDeductions.toLocaleString()}\n\n` +
-      `CONFIRMATION LOCK: This action will permanently lock all site attendance records for this period and mark pending cash advances as deducted.`
-    );
+    const confirmed = await confirmDialog({
+      title: 'Finalize Weekly Payroll',
+      message:
+        `Finalize Weekly Payroll for Period ${periodStart} to ${periodEnd}?\n\n` +
+        `• Total Net Disbursal: ₱${draftCalculation.totalNet.toLocaleString()}\n` +
+        `• Total Deductions: ₱${draftCalculation.totalDeductions.toLocaleString()}\n\n` +
+        `CONFIRMATION LOCK: This action will permanently lock all site attendance records for this period and mark pending cash advances as deducted.`,
+      confirmLabel: 'Finalize & Lock Payroll',
+      variant: 'warning',
+    });
     if (!confirmed) return;
 
     setIsFinalizing(true);
@@ -821,7 +827,7 @@ export default function FinancePayrollDashboard({
     if (!selectedWorkerForVale || !selectedProjectId) return;
     const amountNum = parseFloat(valeAmount);
     if (isNaN(amountNum) || amountNum <= 0) {
-      alert('Please enter a valid cash advance amount');
+      toast('Please enter a valid cash advance amount.', 'warning');
       return;
     }
 
@@ -862,7 +868,7 @@ export default function FinancePayrollDashboard({
       // Auto-recalculate draft to reflect newly attached deduction
       handleGenerateDraft();
     } catch (err: any) {
-      alert(err.message || 'Failed to save cash advance');
+      toast(err.message || 'Failed to save cash advance', 'error');
     } finally {
       setIsSavingVale(false);
     }

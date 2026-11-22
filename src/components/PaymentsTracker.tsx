@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { Client, ProjectProfile } from '../types';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 import { openEnterprisePrintWindow, escapePrintHtml } from '../utils/printEngine';
 import { uploadFileToServer } from '../utils/imageCompression';
 
@@ -37,11 +38,16 @@ interface PaymentsTrackerProps {
   isPrivateAccounting?: boolean;
   onRecordPayment?: (paymentData: {
     clientId: string;
+    projectId?: string;
+    projectCode?: string;
+    projectName?: string;
+    clientName?: string;
     amount: number;
     paymentMethod: string;
     reference: string;
     notes: string;
-  }) => Promise<void>;
+    depositSlipUrl?: string;
+  }) => Promise<any>;
 }
 
 export default function PaymentsTracker({
@@ -53,41 +59,71 @@ export default function PaymentsTracker({
   onRecordPayment
 }: PaymentsTrackerProps) {
   const { isDark } = useTheme();
-  const isFinance = (userRole || '').toUpperCase() === 'FINANCE';
-  const isAdmin = isFinance || (userRole || '').toUpperCase() === 'ADMIN' || (userRole || '').toUpperCase() === 'OPERATIONS_DIRECTOR';
-  // Local list of installment records initialized from clients
-  const [installments, setInstallments] = useState<InstallmentRowItem[]>(() => {
-    return clients.flatMap(client => {
+  const { confirm: confirmDialog, toast } = useConfirm();
+  const upperRole = (userRole || '').toUpperCase().trim().replace(/\s+/g, '_');
+  const isFinance = upperRole === 'FINANCE' || upperRole === 'FINANCE_OFFICER';
+  const isAdmin = isFinance || upperRole === 'ADMIN' || upperRole === 'OPERATIONS_DIRECTOR' || upperRole === 'OPERATIONS_MANAGER' || upperRole === 'OM';
+  // Separation of duties: only Finance and Admin roles may record, edit, toggle, or void payments
+  const canManagePayments = isFinance || upperRole === 'ADMIN';
+  // Resolve actual Client Name and Project Title for each ledger row (handles legacy project-code client names like PRJ-0650)
+  const mapClientsToInstallments = React.useCallback((clientList: Client[], projectList: ProjectProfile[]): InstallmentRowItem[] => {
+    return (clientList || []).flatMap(client => {
+      const rawClientName = String(client.name || '').trim();
+      const rawPkgName = String(client.packageName || '').trim();
+      const clientProjectIds: string[] = Array.isArray((client as any).projectIds) ? (client as any).projectIds : [];
+
+      const matchedProject = (projectList || []).find(p => {
+        const pid = String(p.id || '').trim().toLowerCase();
+        const pname = String(p.name || '').trim().toLowerCase();
+        const pclient = String(p.clientName || '').trim().toLowerCase();
+        if (pid && (rawClientName.toLowerCase() === pid || rawPkgName.toLowerCase() === pid || clientProjectIds.includes(p.id))) return true;
+        if (pname && (rawPkgName.toLowerCase() === pname || rawClientName.toLowerCase() === pname)) return true;
+        if (pclient && rawClientName.toLowerCase() === pclient) return true;
+        return false;
+      });
+
+      const isGenericPkg =
+        !rawPkgName ||
+        rawPkgName.toLowerCase() === 'commercial fit-out & architectural works' ||
+        rawPkgName.toLowerCase() === 'commercial fit-out';
+
+      const displayClientName =
+        matchedProject?.clientName &&
+        (rawClientName.toLowerCase() === String(matchedProject.id || '').trim().toLowerCase() ||
+          rawClientName.toLowerCase() === String(matchedProject.name || '').trim().toLowerCase() ||
+          !rawClientName)
+          ? matchedProject.clientName
+          : rawClientName || matchedProject?.clientName || 'Commercial Client';
+
+      const displayProjectName =
+        matchedProject?.name && (isGenericPkg || rawPkgName.toLowerCase() === String(matchedProject.id || '').trim().toLowerCase())
+          ? matchedProject.name
+          : matchedProject?.name || rawPkgName || 'Commercial Fit-Out';
+
       return (client.payments || []).map(p => {
         const isOverdue = p.status === 'Pending' && new Date(p.dueDate) < new Date();
         return {
           ...p,
           clientId: client.id,
-          clientName: client.name,
-          projectName: client.packageName || 'Commercial Fit-Out',
+          clientName: displayClientName,
+          projectName: displayProjectName,
           isOverdue
         };
       });
     });
-  });
+  }, []);
 
-  // Re-sync if clients prop changes
+  // Local list of installment records initialized from clients + projects
+  const [installments, setInstallments] = useState<InstallmentRowItem[]>(() =>
+    mapClientsToInstallments(clients, projects)
+  );
+
+  // Re-sync if clients or projects prop changes
   React.useEffect(() => {
     if (clients && clients.length > 0) {
-      setInstallments(clients.flatMap(client => {
-        return (client.payments || []).map(p => {
-          const isOverdue = p.status === 'Pending' && new Date(p.dueDate) < new Date();
-          return {
-            ...p,
-            clientId: client.id,
-            clientName: client.name,
-            projectName: client.packageName || 'Commercial Fit-Out',
-            isOverdue
-          };
-        });
-      }));
+      setInstallments(mapClientsToInstallments(clients, projects));
     }
-  }, [clients]);
+  }, [clients, projects, mapClientsToInstallments]);
 
   const [selectedProjectFilter, setSelectedProjectFilter] = useState<string>(() => selectedProjectId || 'ALL');
 
@@ -303,11 +339,16 @@ export default function PaymentsTracker({
   const totalPending = Math.max(0, totalTCP - totalCollected);
   const overdueCount = targetInstallments.filter(i => i.isOverdue).length;
 
-  const handleToggleStatus = (id: string) => {
-    let nextStatus: 'Paid' | 'Pending' = 'Paid';
+  const handleToggleStatus = async (id: string) => {
+    if (!canManagePayments) {
+      toast('Only Finance and Admin accounts can modify payment ledger status.', 'warning');
+      return;
+    }
+    const existing = installments.find(i => i.id === id);
+    if (!existing) return;
+    const nextStatus: 'Paid' | 'Pending' = existing.status === 'Paid' ? 'Pending' : 'Paid';
     setInstallments(prev => prev.map(inst => {
       if (inst.id !== id) return inst;
-      nextStatus = inst.status === 'Paid' ? 'Pending' : 'Paid';
       const isOverdue = nextStatus === 'Pending' && new Date(inst.dueDate) < new Date();
       return {
         ...inst,
@@ -317,16 +358,46 @@ export default function PaymentsTracker({
       };
     }));
 
-    fetch(`/api/payments/installment/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: nextStatus })
-    }).catch(console.error);
+    try {
+      const res = await fetch(`/api/payments/installment/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: nextStatus })
+      });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error || 'Failed to update payment status');
+      }
+      toast(`Installment marked as ${nextStatus}.`, 'success');
+    } catch (err: any) {
+      toast(err?.message || 'Failed to update payment status', 'error');
+    }
   };
 
-  const handleDeleteInstallment = (id: string) => {
-    setInstallments(prev => prev.filter(i => i.id !== id));
-    fetch(`/api/payments/installment/${id}`, { method: 'DELETE' }).catch(console.error);
+  const handleDeleteInstallment = async (id: string) => {
+    if (!canManagePayments) {
+      toast('Only Finance and Admin accounts can void or delete payment records.', 'warning');
+      return;
+    }
+    const ok = await confirmDialog({
+      title: 'Void Payment Record',
+      message: 'Are you sure you want to delete this installment record? The project Funds Collected total will be recomputed.',
+      confirmLabel: 'Delete Record',
+      variant: 'danger',
+    });
+    if (!ok) return;
+
+    try {
+      const res = await fetch(`/api/payments/installment/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error || 'Failed to delete installment record');
+      }
+      setInstallments(prev => prev.filter(i => i.id !== id));
+      toast('Installment record removed and ledger recomputed.', 'success');
+    } catch (err: any) {
+      toast(err?.message || 'Failed to delete installment record', 'error');
+    }
   };
 
   const handleCreateInvoiceSubmit = async (e: React.FormEvent) => {
@@ -400,11 +471,30 @@ export default function PaymentsTracker({
 
   const handleRecordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManagePayments) {
+      toast('Only Finance and Admin accounts can record client payments.', 'warning');
+      return;
+    }
+
+    const effectiveClientId = recordClientId || payableAccounts[0]?.id || '';
     const exactAmount = Math.round(Number(recordAmount) * 100) / 100;
-    if (!recordClientId || !exactAmount || exactAmount <= 0) return;
+    if (!effectiveClientId) {
+      const msg = 'Please select a client or project account.';
+      setFeedbackMsg(`Error: ${msg}`);
+      toast(msg, 'warning');
+      return;
+    }
+    if (!exactAmount || exactAmount <= 0) {
+      const msg = 'Please enter a valid positive payment amount.';
+      setFeedbackMsg(`Error: ${msg}`);
+      toast(msg, 'warning');
+      return;
+    }
 
     if (!depositSlipAttached) {
-      setFeedbackMsg('Error: Verification required. Please attach or confirm Deposit Slip / Wire Confirmation.');
+      const msg = 'Verification required. Please attach or confirm Deposit Slip / Wire Confirmation.';
+      setFeedbackMsg(`Error: ${msg}`);
+      toast(msg, 'warning');
       return;
     }
 
@@ -412,60 +502,106 @@ export default function PaymentsTracker({
     setFeedbackMsg(null);
 
     try {
+      const matchedAcc = payableAccounts.find(a => a.id === effectiveClientId);
+      const matchedProj = (projects || []).find(
+        p => p.id === effectiveClientId || p.id === matchedAcc?.projectId || p.name === matchedAcc?.name
+      );
+      const paymentPayload = {
+        clientId: effectiveClientId,
+        projectId: matchedProj?.id || matchedAcc?.projectId || undefined,
+        projectCode: matchedProj?.id || undefined,
+        projectName: matchedProj?.name || (matchedAcc?.isProject ? matchedAcc.name : undefined),
+        clientName: matchedProj?.clientName || matchedAcc?.clientName || undefined,
+        amount: exactAmount,
+        paymentMethod: recordMethod,
+        reference: recordRef,
+        notes: depositSlipUrl ? `${recordNotes ? recordNotes + ' | ' : ''}Slip: ${depositSlipUrl}` : recordNotes,
+        depositSlipUrl: depositSlipUrl || undefined
+      };
+
+      let result: any = null;
       if (onRecordPayment) {
-        await onRecordPayment({
-          clientId: recordClientId,
-          amount: exactAmount,
-          paymentMethod: recordMethod,
-          reference: recordRef,
-          notes: depositSlipUrl ? `${recordNotes ? recordNotes + ' | ' : ''}Slip: ${depositSlipUrl}` : recordNotes
-        });
+        result = await onRecordPayment(paymentPayload);
       } else {
-        await fetch('/api/payments/record', {
+        const res = await fetch('/api/payments/record', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            clientId: recordClientId,
-            amount: exactAmount,
-            paymentMethod: recordMethod,
-            reference: recordRef,
-            notes: recordNotes,
-            depositSlipUrl: depositSlipUrl || undefined,
-            status: 'Pending Bank Reconciliation'
-          })
+          body: JSON.stringify(paymentPayload)
         });
+        result = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          throw new Error(result?.error || 'Failed to record payment');
+        }
       }
 
-      // Mark the first matching pending installment in local state as Pending Bank Reconciliation
-      setInstallments(prev => {
-        let found = false;
-        return prev.map(item => {
-          if (!found && item.status === 'Pending') {
-            found = true;
-            return {
-              ...item,
-              amount: exactAmount,
-              status: 'Pending Bank Reconciliation' as const,
-              isOverdue: false,
-              paidDate: new Date().toISOString().split('T')[0],
-              reference: recordRef || 'VERIFIED-SETTLED',
-              depositSlipUrl: depositSlipUrl || undefined
-            };
+      const todayIso = new Date().toISOString().split('T')[0];
+      const fallbackClientName = matchedProj?.clientName || matchedAcc?.clientName || matchedAcc?.name || 'Commercial Client';
+      const fallbackProjectName = matchedProj?.name || (matchedAcc?.isProject ? matchedAcc.name : matchedAcc?.subtitle) || 'Commercial Fit-Out';
+      const newPaidRow: InstallmentRowItem = result?.installment
+        ? {
+            id: String(result.installment.id),
+            clientId: String(result.installment.clientId || effectiveClientId),
+            clientName: String(
+              result.installment.clientName && result.installment.clientName !== matchedProj?.id
+                ? result.installment.clientName
+                : fallbackClientName
+            ),
+            projectName: String(
+              result.installment.projectName &&
+              result.installment.projectName !== 'Commercial Fit-Out & Architectural Works'
+                ? result.installment.projectName
+                : fallbackProjectName
+            ),
+            dueDate: String(result.installment.dueDate || todayIso),
+            amount: Number(result.installment.amount || exactAmount),
+            status: 'Paid',
+            paidDate: String(result.installment.paidDate || todayIso),
+            paymentMethod: result.installment.paymentMethod || recordMethod,
+            reference: result.installment.reference || recordRef || 'VERIFIED-SETTLED',
+            depositSlipUrl: result.installment.depositSlipUrl || depositSlipUrl || undefined,
+            isOverdue: false,
           }
-          return item;
-        });
+        : {
+            id: `PAY-${Date.now().toString().slice(-6)}`,
+            clientId: effectiveClientId,
+            clientName: fallbackClientName,
+            projectName: fallbackProjectName,
+            dueDate: todayIso,
+            amount: exactAmount,
+            status: 'Paid',
+            paidDate: todayIso,
+            paymentMethod: recordMethod,
+            reference: recordRef || 'VERIFIED-SETTLED',
+            depositSlipUrl: depositSlipUrl || undefined,
+            isOverdue: false,
+          };
+
+      // Immediately update matching pending row or prepend new Paid record in ledger state
+      setInstallments(prev => {
+        const existingIdx = prev.findIndex(item => item.id === newPaidRow.id);
+        if (existingIdx >= 0) {
+          return prev.map((item, i) => (i === existingIdx ? newPaidRow : item));
+        }
+        return [newPaidRow, ...prev];
       });
 
-      setFeedbackMsg(`Payment of ₱${exactAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} recorded!`);
+      const successText = `Payment of ₱${exactAmount.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} recorded & synced!`;
+      setFeedbackMsg(successText);
+      toast(successText, 'success');
       setTimeout(() => {
         setShowRecordModal(false);
         setFeedbackMsg(null);
+        setRecordAmount(0);
+        setRecordRef('');
+        setRecordNotes('');
         setDepositSlipAttached(false);
         setDepositSlipUrl('');
         setDepositSlipName('');
-      }, 1200);
+      }, 900);
     } catch (err: any) {
-      setFeedbackMsg(`Error: ${err.message || 'Payment recording failed'}`);
+      const errMsg = err?.message || 'Payment recording failed';
+      setFeedbackMsg(`Error: ${errMsg}`);
+      toast(errMsg, 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -697,24 +833,32 @@ export default function PaymentsTracker({
             <span>Print Billings Ledger</span>
           </button>
 
-          <button
-            onClick={() => setShowCreateInvoiceModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
-          >
-            <Plus className="w-4 h-4" />
-            <span>New Installment Schedule</span>
-          </button>
+          {canManagePayments && (
+            <>
+              <button
+                onClick={() => setShowCreateInvoiceModal(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <Plus className="w-4 h-4" />
+                <span>New Installment Schedule</span>
+              </button>
 
-          <button
-            onClick={() => {
-              if (clients.length > 0) setRecordClientId(clients[0].id);
-              setShowRecordModal(true);
-            }}
-            className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer text-xs"
-          >
-            <CheckCircle2 className="w-4 h-4" />
-            <span>Record Client Payment</span>
-          </button>
+              <button
+                onClick={() => {
+                  const activeMatch = !isAllSelected && activeProject
+                    ? payableAccounts.find(a => a.id === activeProject.id || a.name === activeProject.name)
+                    : undefined;
+                  const defaultAccountId = activeMatch?.id || payableAccounts[0]?.id || clients[0]?.id || '';
+                  setRecordClientId(defaultAccountId);
+                  setShowRecordModal(true);
+                }}
+                className="flex items-center gap-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold px-3.5 py-1.5 rounded-lg transition-colors cursor-pointer text-xs"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Record Client Payment</span>
+              </button>
+            </>
+          )}
         </div>
       </div>
 
@@ -876,9 +1020,11 @@ export default function PaymentsTracker({
                     </td>
                     <td className="py-3.5 px-4 text-center">
                       <button
+                        type="button"
+                        disabled={!canManagePayments}
                         onClick={() => handleToggleStatus(inst.id)}
-                        className="cursor-pointer transition hover:scale-105"
-                        title="Click to toggle Paid / Pending"
+                        className={canManagePayments ? 'cursor-pointer transition hover:scale-105' : 'cursor-default'}
+                        title={canManagePayments ? 'Click to toggle Paid / Pending' : 'View-only (Finance/Admin only)'}
                       >
                         {inst.status === 'Paid' ? (
                           <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800">
@@ -908,13 +1054,16 @@ export default function PaymentsTracker({
                         >
                           <FileText className="w-3 h-3" /> Receipt
                         </button>
-                        <button
-                          onClick={() => handleDeleteInstallment(inst.id)}
-                          className="p-1 text-slate-500 hover:text-rose-400 transition cursor-pointer"
-                          title="Delete Installment"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                        {canManagePayments && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteInstallment(inst.id)}
+                            className="p-1 text-slate-500 hover:text-rose-400 transition cursor-pointer"
+                            title="Delete Installment"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </td>
                   </tr>

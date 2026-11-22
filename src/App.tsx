@@ -1625,9 +1625,12 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(paymentData)
     });
-    if (!res.ok) throw new Error('Failed to record payment');
-    await fetchClients();
-    await fetchAuditLogs();
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data?.error || 'Failed to record payment');
+    }
+    await Promise.all([fetchClients(), fetchProjects(), fetchAuditLogs()]);
+    return data;
   };
 
   const handleDisbursePayroll = async (id?: string, all?: boolean) => {
@@ -1806,8 +1809,8 @@ export default function App() {
       ...projectData
     };
 
-    // Instant optimistic update (0ms UI latency)
-    setProjects(prev => [optimisticProject, ...prev]);
+    // Instant optimistic update (0ms UI latency, deduplicated by id)
+    setProjects(prev => (prev.some(p => p.id === optimisticProject.id) ? prev : [optimisticProject, ...prev]));
 
     try {
       const res = await fetch('/api/projects', {
@@ -2280,8 +2283,8 @@ export default function App() {
 
   return (
     <div className={`w-full relative bg-slate-950 ${isDashboardShellActive
-        ? 'h-screen h-[100dvh] overflow-hidden flex flex-col'
-        : 'min-h-screen flex flex-col justify-between overflow-x-hidden'
+      ? 'h-screen h-[100dvh] overflow-hidden flex flex-col'
+      : 'min-h-screen flex flex-col justify-between overflow-x-hidden'
       }`}>
 
       {/* Session Expiry Security Audit Banner */}

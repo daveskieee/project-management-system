@@ -14,14 +14,18 @@ import {
 } from 'lucide-react';
 import { ProjectProfile, Contractor, DailySiteLog } from '../types';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 import { getCsrfToken } from '../utils/apiClient';
 import { getStoredSession } from '../utils/session';
 import {
   STANDARD_CONSTRUCTION_PHASES as SHARED_STANDARD_CONSTRUCTION_PHASES,
   computeUnifiedProjectProgress,
+  getCanonicalProjectProgress,
   resolveTaskConstructionPhase,
   loadProjectGanttTasksFromStorage,
   saveProjectGanttTasks,
+  setLiveGanttTasksSnapshot,
+  normalizeTaskProgressFraction,
   getGanttStorageKey,
   createDefaultWbsTasksForProject,
   GANTT_SELECT_PROJECT_EVENT,
@@ -852,6 +856,7 @@ export default function GanttTimeline({
   onDeleteTask
 }: GanttTimelineProps) {
   const { isDark } = useTheme();
+  const { confirm: confirmDialog } = useConfirm();
 
   const [selectedProjectId, setSelectedProjectId] = useState<string>(() => {
     return projects.length > 0 ? projects[0].id : '';
@@ -1011,13 +1016,16 @@ export default function GanttTimeline({
     });
   }, []);
 
-  const currentProjectProgress = useMemo(() => {
-    return computeProjectProgress(tasks);
-  }, [tasks, computeProjectProgress]);
-
   const activeProject = useMemo(() => {
     return projects.find(p => p.id === selectedProjectId) || null;
   }, [projects, selectedProjectId]);
+
+  const currentProjectProgress = useMemo(() => {
+    if (activeProject) {
+      return getCanonicalProjectProgress(activeProject, tasks);
+    }
+    return computeProjectProgress(tasks);
+  }, [activeProject, tasks, computeProjectProgress]);
 
   // Critical Path Method (CPM) and Float Calculation
   const { criticalTaskIds, taskFloatMap, criticalLinkKeys } = useMemo(() => {
@@ -1175,7 +1183,7 @@ export default function GanttTimeline({
         startDate: startDateStr,
         endDate: endDateStr,
         duration,
-        progress: typeof t.progress === 'number' ? Math.max(0, Math.min(1, t.progress)) : 0,
+        progress: normalizeTaskProgressFraction({ progress: typeof t.progress === 'number' ? t.progress : Number(t.progress), status: t.status }),
         weight: typeof t.weight === 'number' ? t.weight : undefined,
         constructionPhase: resolvedPhase,
         baselineStart: t.baselineStart ? formatDateISO(parseDate(t.baselineStart)) : null,
@@ -1207,12 +1215,8 @@ export default function GanttTimeline({
     try {
       window.localStorage.removeItem(getGanttStorageKey(projectId));
     } catch { /* silent */ }
-    if (authoritativeTasks && typeof window !== 'undefined') {
-      window.dispatchEvent(
-        new CustomEvent(GANTT_TASKS_UPDATED_EVENT, {
-          detail: { projectId, tasks: authoritativeTasks },
-        })
-      );
+    if (authoritativeTasks !== undefined) {
+      setLiveGanttTasksSnapshot(projectId, authoritativeTasks);
     }
   }, []);
 
@@ -1253,88 +1257,19 @@ export default function GanttTimeline({
       const { parsedTasks: validTasks, parsedLinks: validLinks } = parseDbGanttPayload(projectId, rawTasks, rawLinks);
 
       if (validTasks.length > 0) {
-        // Authoritative PostgreSQL records — render directly and purge any stale localStorage cache
+        // Authoritative DB records — render directly and sync live snapshot
         setTasks(validTasks);
         setLinks(validLinks);
         purgeStaleLocalGanttCache(projectId, validTasks);
       } else {
-        // PostgreSQL returned 0 tasks: gather valid local/seed tasks and auto-migrate to PostgreSQL in background
-        const cachedTasks = (loadProjectGanttTasksFromStorage(projectId) || [])
-          .filter(t => !isTaskTombstoned(t.id)) as GanttTaskItem[];
-
-        let seedTasks: GanttTaskItem[] = [];
-        let seedLinks: GanttLinkItem[] = [];
-
-        if (cachedTasks.length > 0) {
-          seedTasks = cachedTasks;
-        } else if (tasksProp && tasksProp.length > 0 && tasksProp.some(t => t.projectId === projectId)) {
-          seedTasks = tasksProp
-            .filter(t => t.projectId === projectId && !isTaskTombstoned(t.id))
-            .map((t: any, idx: number) => ({
-              id: String(t.id),
-              projectId,
-              wbsCode: t.wbsCode || `${idx + 1}.0`,
-              text: t.title || t.text || 'Construction Task',
-              startDate: formatDateISO(parseDate(t.startDate)),
-              endDate: formatDateISO(parseDate(t.dueDate || t.endDate || t.startDate)),
-              duration: Math.max(1, Number(t.duration || 1)),
-              progress: typeof t.progress === 'number' ? (t.progress > 1 ? t.progress / 100 : t.progress) : 0,
-              weight: typeof t.weight === 'number' ? t.weight : undefined,
-              constructionPhase: resolveTaskConstructionPhase(t),
-              type: 'task',
-              parentTaskId: null,
-              sortOrder: idx,
-              predecessorIds: []
-            }));
-        } else if (projectId === 'default') {
-          seedTasks = DEFAULT_EM_JAY_TASKS;
-          seedLinks = DEFAULT_EM_JAY_LINKS;
-        } else {
-          seedTasks = createDefaultWbsTasksForProject(projectId) as GanttTaskItem[];
-        }
-
-        setTasks(seedTasks);
-        setLinks(seedLinks);
-
-        // Seamless background Auto-Migration into Neon PostgreSQL (zero manual buttons)
-        if (seedTasks.length > 0 && projectId !== 'default') {
-          try {
-            const migrateRes = await fetch(`/api/projects/${projectId}/gantt/sync`, {
-              method: 'POST',
-              credentials: 'include',
-              headers: buildGanttAuthHeaders(true),
-              body: JSON.stringify({
-                tasks: seedTasks.map((t, idx) => ({
-                  ...t,
-                  sortOrder: typeof t.sortOrder === 'number' ? t.sortOrder : idx,
-                  milestonePhase: t.constructionPhase || resolveTaskConstructionPhase(t),
-                })),
-                links: seedLinks,
-              }),
-            });
-            if (migrateRes.ok) {
-              const migratedJson = await migrateRes.json().catch(() => null);
-              if (Array.isArray(migratedJson?.data) && migratedJson.data.length > 0) {
-                const { parsedTasks: dbTasks, parsedLinks: dbLinks } = parseDbGanttPayload(
-                  projectId,
-                  migratedJson.data,
-                  Array.isArray(migratedJson.links) ? migratedJson.links : []
-                );
-                setTasks(dbTasks);
-                setLinks(dbLinks);
-                purgeStaleLocalGanttCache(projectId, dbTasks);
-              } else {
-                purgeStaleLocalGanttCache(projectId, seedTasks);
-              }
-            }
-          } catch (migrateErr) {
-            console.warn('Auto-migration to PostgreSQL deferred:', migrateErr);
-          }
-        }
+        // DB returned 0 tasks — start empty so template loading is strictly opt-in
+        setTasks([]);
+        setLinks([]);
+        purgeStaleLocalGanttCache(projectId, []);
       }
     } catch (err) {
       console.error('Failed to load project gantt data:', err);
-      const cached = loadProjectGanttTasksFromStorage(projectId);
+      const cached = loadProjectGanttTasksFromStorage(projectId, false);
       if (cached && cached.length > 0) {
         setTasks(cached as GanttTaskItem[]);
         setLinks([]);
@@ -1349,7 +1284,7 @@ export default function GanttTimeline({
             startDate: formatDateISO(parseDate(t.startDate)),
             endDate: formatDateISO(parseDate(t.dueDate || t.endDate || t.startDate)),
             duration: Math.max(1, Number(t.duration || 1)),
-            progress: typeof t.progress === 'number' ? (t.progress > 1 ? t.progress / 100 : t.progress) : 0,
+            progress: normalizeTaskProgressFraction(t),
             constructionPhase: resolveTaskConstructionPhase(t),
             type: 'task',
             parentTaskId: null,
@@ -1438,11 +1373,12 @@ export default function GanttTimeline({
           tasksCount: resData.result.tasksCount
         });
       }
-      setSyncFeedback({ type: 'success', message: 'Schedule saved to PostgreSQL.' });
+      setSyncFeedback({ type: 'success', message: 'All changes saved' });
       setTimeout(() => setSyncFeedback(null), 2500);
     } catch (err) {
       console.error('syncBackend error:', err);
-      setSyncFeedback({ type: 'error', message: 'Failed to save changes to database.' });
+      setSyncFeedback({ type: 'error', message: 'Unable to save schedule changes. Please try again.' });
+      setTimeout(() => setSyncFeedback(null), 4000);
     } finally {
       setIsSyncing(false);
     }
@@ -2136,11 +2072,17 @@ export default function GanttTimeline({
     setEditingTask(null);
   };
 
-  const handleDeleteTask = (taskId: string) => {
+  const handleDeleteTask = async (taskId: string) => {
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
-    if (!window.confirm(`Are you sure you want to delete "${task.text}"? Connected dependency lines will be unlinked.`)) {
+    const ok = await confirmDialog({
+      title: 'Delete Gantt Task',
+      message: `Are you sure you want to delete "${task.text}"? Connected dependency lines will be unlinked.`,
+      confirmLabel: 'Delete Task',
+      variant: 'danger',
+    });
+    if (!ok) {
       return;
     }
 
@@ -2509,7 +2451,7 @@ export default function GanttTimeline({
         )}
 
         {/* Action Controls Bar */}
-        <div className={`mt-3 pt-3 border-t flex flex-wrap items-center justify-between gap-2.5 ${isDark ? 'border-slate-800/80' : 'border-slate-200'
+        <div className={`no-print mt-3 pt-3 border-t flex flex-wrap items-center justify-between gap-2.5 ${isDark ? 'border-slate-800/80' : 'border-slate-200'
           }`}>
           <div className="flex flex-wrap items-center gap-2">
             {/* Project Switcher */}
@@ -2525,7 +2467,7 @@ export default function GanttTimeline({
               >
                 {projects.map(p => (
                   <option key={p.id} value={p.id}>
-                    {p.name} ({p.id === selectedProjectId ? currentProjectProgress : (p.progressPercentage || 0)}% Complete)
+                    {p.name} ({p.id === selectedProjectId ? currentProjectProgress : getCanonicalProjectProgress(p, tasksProp || [])}% Complete)
                   </option>
                 ))}
               </select>
@@ -2780,13 +2722,26 @@ export default function GanttTimeline({
           </div>
         </div>
 
-        {/* Feedback Alert */}
+        {/* Compact Floating Save Toast (bottom-right, zero layout shift) */}
         {syncFeedback && (
-          <div className={`mt-3 p-3 rounded-xl border text-xs font-mono flex items-center gap-2 animate-fadeIn ${syncFeedback.type === 'success'
-            ? isDark ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300' : 'bg-emerald-50 border-emerald-200 text-emerald-800'
-            : isDark ? 'bg-rose-950/80 border-rose-700 text-rose-300' : 'bg-rose-50 border-rose-200 text-rose-800'
-            }`}>
-            {syncFeedback.type === 'success' ? <CheckCircle2 className="w-4 h-4 shrink-0" /> : <AlertTriangle className="w-4 h-4 shrink-0" />}
+          <div
+            role="status"
+            aria-live="polite"
+            className={`no-print fixed bottom-5 right-5 z-[9990] px-3.5 py-2 rounded-xl border text-xs font-medium shadow-xl backdrop-blur-md flex items-center gap-2 animate-fadeIn ${
+              syncFeedback.type === 'success'
+                ? isDark
+                  ? 'bg-slate-900/95 border-emerald-500/40 text-emerald-300'
+                  : 'bg-white/95 border-emerald-300 text-emerald-800'
+                : isDark
+                  ? 'bg-slate-900/95 border-rose-500/40 text-rose-300'
+                  : 'bg-white/95 border-rose-300 text-rose-800'
+            }`}
+          >
+            {syncFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+            ) : (
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-400" />
+            )}
             <span>{syncFeedback.message}</span>
           </div>
         )}
@@ -2962,7 +2917,7 @@ export default function GanttTimeline({
       )}
 
       {/* 3. Dual-Pane Synchronized Gantt Canvas */}
-      <div className={`border rounded-2xl overflow-hidden flex flex-col xl:flex-row ${isDark ? 'bg-slate-950 border-slate-800 shadow-2xl' : 'bg-white border-slate-200/90 shadow-sm'
+      <div className={`gantt-print-canvas border rounded-2xl overflow-hidden flex flex-col xl:flex-row ${isDark ? 'bg-slate-950 border-slate-800 shadow-2xl' : 'bg-white border-slate-200/90 shadow-sm'
         } ${isFullscreen ? 'flex-1 min-h-0' : 'h-[520px] sm:h-[600px] xl:h-[660px]'
         }`}>
         {/* LEFT PANE: WBS Data Grid (Collapsible to maximize Timeline Canvas) */}
@@ -3192,7 +3147,7 @@ export default function GanttTimeline({
                         className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold rounded-lg text-xs transition cursor-pointer shadow-xs"
                       >
                         <Plus className="w-3.5 h-3.5" />
-                        <span>Add Task</span>
+                        <span>Add First Task</span>
                       </button>
                       <button
                         type="button"
@@ -3204,7 +3159,7 @@ export default function GanttTimeline({
                           }`}
                       >
                         <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                        <span>Load Standard Fit-Out Template</span>
+                        <span>Load Template</span>
                       </button>
                     </div>
                   </div>
@@ -3803,15 +3758,20 @@ export default function GanttTimeline({
                 <select
                   value={editFormData.assignedContractorId}
                   onChange={(e) => setEditFormData(prev => ({ ...prev, assignedContractorId: e.target.value }))}
-                  className={`w-full rounded-xl px-3 py-2 font-medium focus:border-amber-500 focus:outline-none cursor-pointer border ${isDark ? 'bg-slate-950 border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'
+                  className={`w-full max-w-full truncate rounded-xl px-3 py-2 font-medium focus:border-amber-500 focus:outline-none cursor-pointer border ${isDark ? 'bg-slate-950 border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'
                     }`}
                 >
                   <option value="">LDM In-House Crew</option>
-                  {contractors.map(c => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} ({c.company || c.specialty || 'Subcontractor'})
-                    </option>
-                  ))}
+                  {contractors.map(c => {
+                    const safeName = (c.name || '').length > 40 ? `${c.name.slice(0, 40)}…` : c.name;
+                    const safeCompany = (c.company || c.specialty || 'Subcontractor');
+                    const safeSub = safeCompany.length > 28 ? `${safeCompany.slice(0, 28)}…` : safeCompany;
+                    return (
+                      <option key={c.id} value={c.id} title={`${c.name} (${safeCompany})`}>
+                        {safeName} ({safeSub})
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 

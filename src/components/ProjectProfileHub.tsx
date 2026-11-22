@@ -11,7 +11,8 @@ import {
   MapPin, CloudSun, RefreshCw, LayoutGrid, Table, Eye, PieChart as PieChartIcon, Loader2, Sparkles, AlertTriangle, Printer
 } from 'lucide-react';
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip as ReTooltip, Legend } from 'recharts';
-import { ProjectProfile, ProjectTask, Contractor, WorkforceReallocationRecommendation, ProjectRFI, ChangeOrder } from '../types';
+import { ProjectProfile, ProjectTask, Contractor, WorkforceReallocationRecommendation, ProjectRFI, ChangeOrder, Client } from '../types';
+import { getCanonicalProjectFundsCollected } from '../utils/projectFundsSync';
 import { generateReallocationRecommendations } from '../services/WorkforceReallocationService';
 import { exportToCsv } from '../utils/exportUtils';
 import { openEnterprisePrintWindow, escapePrintHtml } from '../utils/printEngine';
@@ -27,6 +28,7 @@ import {
 } from '../utils/geocoding';
 import {
   computeUnifiedProjectProgress,
+  getCanonicalProjectProgress,
   loadProjectGanttTasksFromStorage,
   GANTT_TASKS_UPDATED_EVENT,
 } from '../utils/ganttProgress';
@@ -35,6 +37,7 @@ import { OptimizedLdmImage } from './OptimizedLdmImage';
 import { InteractiveLeafletPinMap } from './InteractiveLeafletPinMap';
 import { canAccessModule } from '../utils/rbac';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 
 export const AVAILABLE_PMS = [
   { id: 'usr-pm-ricardo', name: 'Engr. Ricardo Ramos (Senior Project Manager)' },
@@ -46,17 +49,13 @@ export const AVAILABLE_PMS = [
 export function calculateProjectProgress(
   projectId: string,
   tasks: ProjectTask[] = [],
-  fallbackProgress: number = 0
+  fallbackProgress: number = 0,
+  status?: string
 ): number {
-  const storedGantt = loadProjectGanttTasksFromStorage(projectId);
-  if (storedGantt !== null) {
-    return computeUnifiedProjectProgress(storedGantt);
-  }
-  const projectTasks = tasks.filter(t => t.projectId === projectId);
-  if (!projectTasks || projectTasks.length === 0) {
-    return Math.round(fallbackProgress);
-  }
-  return computeUnifiedProjectProgress(projectTasks);
+  return getCanonicalProjectProgress(
+    { id: projectId, status, progressPercentage: fallbackProgress },
+    tasks
+  );
 }
 
 export function getEffectiveProjectStatus(
@@ -72,6 +71,7 @@ export function getEffectiveProjectStatus(
 interface ProjectProfileHubProps {
   projects: ProjectProfile[];
   tasks: ProjectTask[];
+  clients?: Client[];
   contractors: Contractor[];
   rfis?: ProjectRFI[];
   changeOrders?: ChangeOrder[];
@@ -89,6 +89,7 @@ interface ProjectProfileHubProps {
 export default function ProjectProfileHub({
   projects = [],
   tasks = [],
+  clients = [],
   contractors = [],
   rfis = [],
   changeOrders = [],
@@ -100,12 +101,13 @@ export default function ProjectProfileHub({
   onDeleteProject,
   onNavigateToTab
 }: ProjectProfileHubProps) {
-  // Only show loading if there is zero data AND it's an initial cold boot
-  const isInitialColdLoad = Boolean(loading && projects.length === 0);
-
   // Local state initialized strictly from live database projects
+  const { confirm: confirmDialog } = useConfirm();
   const [localProjects, setLocalProjects] = useState<ProjectProfile[]>(projects || []);
   const [ganttSyncTick, setGanttSyncTick] = useState<number>(0);
+
+  // Show loading state whenever parent is fetching and localProjects hasn't hydrated yet
+  const isInitialColdLoad = Boolean(loading && localProjects.length === 0);
 
   // Sync when parent projects prop updates from database
   React.useEffect(() => {
@@ -704,16 +706,12 @@ export default function ProjectProfileHub({
 
   const synchronizedProjects = React.useMemo(() => {
     return localProjects.map(p => {
-      const rawFallback =
-        p.cpmProgress !== undefined && p.cpmProgress !== null ? p.cpmProgress :
-          p.overallProgress !== undefined && p.overallProgress !== null ? p.overallProgress :
-            p.progress !== undefined && p.progress !== null ? p.progress :
-              p.progressPercentage;
-
-      const computedProg = calculateProjectProgress(p.id, tasks, Number(rawFallback || 0));
+      const computedProg = getCanonicalProjectProgress(p, tasks);
       const computedStatus = getEffectiveProjectStatus(p.status, computedProg);
+      const liveCollected = getCanonicalProjectFundsCollected(p, clients);
       return {
         ...p,
+        fundsCollected: liveCollected,
         cpmProgress: computedProg,
         overallProgress: computedProg,
         progress: computedProg,
@@ -721,7 +719,7 @@ export default function ProjectProfileHub({
         status: computedStatus
       };
     });
-  }, [localProjects, tasks, ganttSyncTick]);
+  }, [localProjects, tasks, clients, ganttSyncTick]);
 
   const filteredProjects = synchronizedProjects.filter(p => {
     const matchesStatus = filterStatus === 'ALL' || p.status === filterStatus;
@@ -967,8 +965,8 @@ export default function ProjectProfileHub({
               setShowAiCrewGuide(prev => !prev);
             }}
             className={`px-3 py-1 rounded-lg text-xs font-semibold font-mono transition cursor-pointer flex items-center gap-1.5 border ${showAiCrewGuide
-                ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm shadow-indigo-500/20'
-                : 'bg-indigo-950/80 hover:bg-indigo-900/80 text-indigo-300 border-indigo-700/70'
+              ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm shadow-indigo-500/20'
+              : 'bg-indigo-950/80 hover:bg-indigo-900/80 text-indigo-300 border-indigo-700/70'
               }`}
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-300" />
@@ -1021,8 +1019,8 @@ export default function ProjectProfileHub({
                   <div
                     key={worker.id}
                     className={`p-2.5 rounded-lg border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 transition ${isAlreadyInDraft
-                        ? 'bg-indigo-900/40 border-amber-500/40 text-white'
-                        : 'bg-slate-950/70 border-slate-800/80 hover:border-indigo-700/60 text-slate-200'
+                      ? 'bg-indigo-900/40 border-amber-500/40 text-white'
+                      : 'bg-slate-950/70 border-slate-800/80 hover:border-indigo-700/60 text-slate-200'
                       }`}
                   >
                     <div className="space-y-0.5 min-w-0 flex-1">
@@ -1039,8 +1037,8 @@ export default function ProjectProfileHub({
                         </span>
                         <span
                           className={`text-[10px] font-mono px-2 py-0.5 rounded-full border whitespace-nowrap ${avail.isOverlapping
-                              ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold'
-                              : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 font-semibold'
+                            ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold'
+                            : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 font-semibold'
                             }`}
                         >
                           {avail.badgeText}
@@ -1059,8 +1057,8 @@ export default function ProjectProfileHub({
                         onClick={() => handleAcceptStagedSuggestion(worker.id)}
                         disabled={isAlreadyInDraft}
                         className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold transition cursor-pointer flex items-center gap-1 ${isAlreadyInDraft
-                            ? 'bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 cursor-default'
-                            : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
+                          ? 'bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 cursor-default'
+                          : 'bg-amber-500 hover:bg-amber-400 text-slate-950'
                           }`}
                       >
                         <Check className="w-3 h-3 stroke-[2.5]" />
@@ -1111,8 +1109,8 @@ export default function ProjectProfileHub({
             type="button"
             onClick={() => setModalWorkerTradeFilter(trade)}
             className={`px-2 py-0.5 rounded text-[10px] font-mono whitespace-nowrap transition cursor-pointer border ${modalWorkerTradeFilter === trade
-                ? 'bg-amber-500 text-slate-950 font-bold border-amber-500'
-                : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:bg-slate-800'
+              ? 'bg-amber-500 text-slate-950 font-bold border-amber-500'
+              : 'bg-slate-900 text-slate-400 border-slate-800 hover:text-white hover:bg-slate-800'
               }`}
           >
             {trade === 'ALL' ? 'All Trades' : trade}
@@ -1150,8 +1148,8 @@ export default function ProjectProfileHub({
               <div
                 key={worker.id}
                 className={`p-2 rounded-lg text-xs transition border space-y-1.5 ${isSelected
-                    ? 'bg-amber-500/10 border-amber-500/30 text-white'
-                    : 'border-slate-800/60 hover:bg-slate-800/60 text-slate-300'
+                  ? 'bg-amber-500/10 border-amber-500/30 text-white'
+                  : 'border-slate-800/60 hover:bg-slate-800/60 text-slate-300'
                   }`}
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1190,8 +1188,8 @@ export default function ProjectProfileHub({
                       }}
                       title={isLocked ? 'Locked by Admin (isLockedByAdmin = true). AI optimizer strictly skips this worker.' : 'Lock assignment or add manual override note'}
                       className={`text-[10px] font-mono px-2 py-0.5 rounded border flex items-center gap-1 transition cursor-pointer ${isLocked
-                          ? 'bg-rose-950/80 border-rose-500/50 text-rose-300 font-bold'
-                          : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-400 hover:text-white'
+                        ? 'bg-rose-950/80 border-rose-500/50 text-rose-300 font-bold'
+                        : 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-400 hover:text-white'
                         }`}
                     >
                       <Lock className="w-2.5 h-2.5" />
@@ -1201,8 +1199,8 @@ export default function ProjectProfileHub({
                     {/* Non-Blocking Availability / Overlap Status Badge */}
                     <span
                       className={`text-[10px] font-mono px-2 py-0.5 rounded-full border shrink-0 ${avail.isOverlapping
-                          ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold'
-                          : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 font-semibold'
+                        ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold'
+                        : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 font-semibold'
                         }`}
                     >
                       {avail.badgeText}
@@ -1325,63 +1323,74 @@ export default function ProjectProfileHub({
     formStartDate && formEndDate && new Date(formEndDate) < new Date(formStartDate)
   );
 
+  const [isSubmittingProject, setIsSubmittingProject] = useState(false);
+  const createSubmitLockRef = React.useRef(false);
+
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (createSubmitLockRef.current || isSubmittingProject) return;
     if (!formName.trim() || isTimelineInvalid) return;
 
-    // Resolve coordinates for project site weather synchronization
-    const syncCoords = resolveProjectCoordinatesSync(formLocation.trim(), formName.trim());
-    const finalLat = detectedCoords?.lat ?? syncCoords.lat;
-    const finalLon = detectedCoords?.lon ?? syncCoords.lon;
+    createSubmitLockRef.current = true;
+    setIsSubmittingProject(true);
 
-    const newProj: ProjectProfile = {
-      id: `PRJ-${Date.now().toString().slice(-4)}`,
-      name: formName.trim(),
-      clientName: formClient.trim(),
-      description: formDescription.trim(),
-      location: formLocation.trim(),
-      latitude: finalLat,
-      longitude: finalLon,
-      budget: Number(formBudget) || 0,
-      fundsCollected: 0,
-      progressPercentage: 0,
-      status: 'PLANNING',
-      targetHandoverDate: formEndDate,
-      startDate: formStartDate,
-      assignedWorkersCount: formAssignedWorkerIds.length || Number(formWorkers) || 0,
-      assignedContractorIds: formAssignedWorkerIds,
-      isPrivateAccounting: formIsPrivateAccounting,
-      tasksCount: Number(formTasksCount) || 0,
-      milestonesCount: Number(formMilestonesCount) || 0,
-      assignedProjectManagerId: formPMId || undefined,
-      assignedProjectManagerName: formPMName || undefined,
-    };
+    try {
+      // Resolve coordinates for project site weather synchronization
+      const syncCoords = resolveProjectCoordinatesSync(formLocation.trim(), formName.trim());
+      const finalLat = detectedCoords?.lat ?? syncCoords.lat;
+      const finalLon = detectedCoords?.lon ?? syncCoords.lon;
 
-    setLocalProjects(prev => [...prev, newProj]);
+      const newProj: ProjectProfile = {
+        id: `PRJ-${Date.now().toString().slice(-4)}`,
+        name: formName.trim(),
+        clientName: formClient.trim(),
+        description: formDescription.trim(),
+        location: formLocation.trim(),
+        latitude: finalLat,
+        longitude: finalLon,
+        budget: Number(formBudget) || 0,
+        fundsCollected: 0,
+        progressPercentage: 0,
+        status: 'PLANNING',
+        targetHandoverDate: formEndDate,
+        startDate: formStartDate,
+        assignedWorkersCount: formAssignedWorkerIds.length || Number(formWorkers) || 0,
+        assignedContractorIds: formAssignedWorkerIds,
+        isPrivateAccounting: formIsPrivateAccounting,
+        tasksCount: Number(formTasksCount) || 0,
+        milestonesCount: Number(formMilestonesCount) || 0,
+        assignedProjectManagerId: formPMId || undefined,
+        assignedProjectManagerName: formPMName || undefined,
+      };
 
-    if (onCreateProject) {
-      await onCreateProject(newProj);
-    } else {
-      fetch('/api/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newProj)
-      }).catch(console.error);
-    }
-
-    // Sync newly assigned workers to this project site
-    if (formAssignedWorkerIds.length > 0) {
-      for (const wId of formAssignedWorkerIds) {
-        fetch(`/api/projects/${newProj.id}/workers`, {
-          method: 'PUT',
+      if (onCreateProject) {
+        await onCreateProject(newProj);
+      } else {
+        setLocalProjects(prev => (prev.some(p => p.id === newProj.id) ? prev : [...prev, newProj]));
+        await fetch('/api/projects', {
+          method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ workerId: wId, action: 'add' })
+          body: JSON.stringify(newProj)
         }).catch(console.error);
       }
-    }
 
-    setShowNewModal(false);
-    setSelectedProject(newProj);
+      // Sync newly assigned workers to this project site
+      if (formAssignedWorkerIds.length > 0) {
+        for (const wId of formAssignedWorkerIds) {
+          fetch(`/api/projects/${newProj.id}/workers`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workerId: wId, action: 'add' })
+          }).catch(console.error);
+        }
+      }
+
+      setShowNewModal(false);
+      setSelectedProject(newProj);
+    } finally {
+      createSubmitLockRef.current = false;
+      setIsSubmittingProject(false);
+    }
   };
 
   const handleEditSubmit = async (e: React.FormEvent) => {
@@ -1402,11 +1411,12 @@ export default function ProjectProfileHub({
       latitude: finalLat,
       longitude: finalLon,
       budget: Number(formBudget),
-      fundsCollected: selectedProject.fundsCollected ?? Number(formCollected) ?? 0,
-      progressPercentage: calculateProjectProgress(selectedProject.id, tasks, selectedProject.progressPercentage),
+      // Strictly ledger-driven (auto-synced from Finance -> Progress Billing & Receipts)
+      fundsCollected: selectedProject.fundsCollected ?? 0,
+      progressPercentage: getCanonicalProjectProgress(selectedProject, tasks),
       // Auto-advance status: if progress > 0 and status is still PLANNING, bump to IN_PROGRESS
       status: (() => {
-        const currentCpmProg = calculateProjectProgress(selectedProject.id, tasks, selectedProject.progressPercentage);
+        const currentCpmProg = getCanonicalProjectProgress(selectedProject, tasks);
         const rawStatus = (formStatus || selectedProject.status || 'PLANNING') as ProjectProfile['status'];
         if (currentCpmProg > 0 && rawStatus === 'PLANNING') return 'IN_PROGRESS' as ProjectProfile['status'];
         return rawStatus;
@@ -1439,7 +1449,14 @@ export default function ProjectProfileHub({
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm('Are you sure you want to delete this project profile?')) return;
+    const targetProject = localProjects.find(p => p.id === id);
+    const ok = await confirmDialog({
+      title: 'Delete Project Profile',
+      message: `Are you sure you want to delete ${targetProject ? `"${targetProject.name}"` : 'this project profile'}? This action cannot be undone.`,
+      confirmLabel: 'Delete Project',
+      variant: 'danger',
+    });
+    if (!ok) return;
     setLocalProjects(prev => prev.filter(p => p.id !== id));
     if (selectedProject?.id === id) setSelectedProject(null);
 
@@ -1500,8 +1517,8 @@ export default function ProjectProfileHub({
               type="button"
               onClick={() => setViewMode('table')}
               className={`p-1.5 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1 ${viewMode === 'table'
-                  ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
-                  : 'text-slate-400 hover:text-white'
+                ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
+                : 'text-slate-400 hover:text-white'
                 }`}
               title="Compact Table View (Default)"
             >
@@ -1512,8 +1529,8 @@ export default function ProjectProfileHub({
               type="button"
               onClick={() => setViewMode('cards')}
               className={`p-1.5 rounded-md text-xs font-medium transition cursor-pointer flex items-center gap-1 ${viewMode === 'cards'
-                  ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
-                  : 'text-slate-400 hover:text-white'
+                ? 'bg-amber-500 text-slate-950 font-bold shadow-xs'
+                : 'text-slate-400 hover:text-white'
                 }`}
               title="Card Grid View"
             >
@@ -1662,19 +1679,18 @@ export default function ProjectProfileHub({
         {/* 4. Field Labor — RBAC-Gated Clickable to Labor Workforce & Artisan Trades */}
         <div
           onClick={canAccessModule(userRole, 'contractors') ? () => onNavigateToTab?.('contractors') : undefined}
-          className={`group relative bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-teal-500/50 p-4 rounded-xl transition-all ${
-            canAccessModule(userRole, 'contractors') ? 'cursor-pointer' : 'cursor-default'
-          }`}
+          className={`group relative bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-teal-500/50 p-4 rounded-xl transition-all ${canAccessModule(userRole, 'contractors') ? 'cursor-pointer' : 'cursor-default'
+            }`}
         >
           <div className="flex items-center justify-between">
-            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Field Labor</span>
+            <span className="text-[11px] font-mono text-slate-400 uppercase tracking-wider">Assigned Site Labor</span>
             <Users className="w-4 h-4 text-teal-400" />
           </div>
           <div className="text-xl font-bold text-white mt-1 font-mono">
-            {totalSiteManpower} Artisans
+            {totalSiteManpower} {totalSiteManpower === 1 ? 'Artisan' : 'Artisans'}
           </div>
           <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-between">
-            <span>On-Site Deployments</span>
+            <span>Assigned • {contractors.length} Total Roster</span>
             {canAccessModule(userRole, 'contractors') ? (
               <span className="text-[10px] font-mono text-teal-400">Open Workforce ↗</span>
             ) : (
@@ -1685,16 +1701,19 @@ export default function ProjectProfileHub({
           {/* Hover Popover */}
           <div className="hidden group-hover:block absolute right-0 top-full mt-1.5 w-72 z-50 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-2xl text-xs">
             <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-teal-400 font-bold pb-1.5 mb-1.5 border-b border-slate-800">
-              <span>Deployed Crew per Site</span>
+              <span>Assigned Crew per Site</span>
               <span>Headcount</span>
             </div>
             <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-              {synchronizedProjects.map((p) => (
-                <div key={p.id} className="flex items-center justify-between gap-2 py-0.5">
-                  <span className="truncate text-slate-200 font-medium">{p.name}</span>
-                  <span className="font-mono text-teal-300 font-bold shrink-0">{p.assignedWorkersCount || 0} Artisans</span>
-                </div>
-              ))}
+              {synchronizedProjects.map((p) => {
+                const count = p.assignedWorkersCount || 0;
+                return (
+                  <div key={p.id} className="flex items-center justify-between gap-2 py-0.5">
+                    <span className="truncate text-slate-200 font-medium">{p.name}</span>
+                    <span className="font-mono text-teal-300 font-bold shrink-0">{count} {count === 1 ? 'Artisan' : 'Artisans'}</span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -1737,7 +1756,7 @@ export default function ProjectProfileHub({
           <Building2 className="w-12 h-12 text-slate-600 mx-auto mb-3" />
           <h3 className="text-lg font-bold text-white mb-1">No Projects Found</h3>
           <p className="text-xs text-slate-400 max-w-md mx-auto mb-6">
-            There are currently no projects matching your filter in the database. Create a new commercial project profile to get started.
+            There are currently no projects matching your current filter. Create a new commercial project profile to get started.
           </p>
           {isAdmin && (
             <button
@@ -1824,10 +1843,10 @@ export default function ProjectProfileHub({
                       <td className="px-4 py-3">
                         <span
                           className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold tracking-wide uppercase ${displayStatus === 'IN_PROGRESS' || displayStatus === 'EXECUTION'
-                              ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30'
-                              : displayStatus === 'COMPLETED'
-                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
-                                : 'bg-slate-800 text-slate-400 border border-slate-700'
+                            ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30'
+                            : displayStatus === 'COMPLETED'
+                              ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                              : 'bg-slate-800 text-slate-400 border border-slate-700'
                             }`}
                         >
                           {displayStatus === 'IN_PROGRESS' ? 'IN PROGRESS' : displayStatus.replace('_', ' ')}
@@ -1848,10 +1867,10 @@ export default function ProjectProfileHub({
                           <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
                             <div
                               className={`h-full rounded-full transition-all duration-300 ${displayProgress >= 100
-                                  ? 'bg-emerald-500'
-                                  : displayProgress > 0
-                                    ? 'bg-gradient-to-r from-cyan-500 to-blue-500'
-                                    : 'bg-slate-700'
+                                ? 'bg-emerald-500'
+                                : displayProgress > 0
+                                  ? 'bg-gradient-to-r from-cyan-500 to-blue-500'
+                                  : 'bg-slate-700'
                                 }`}
                               style={{ width: `${Math.min(Math.max(displayProgress, 0), 100)}%` }}
                             />
@@ -2008,10 +2027,10 @@ export default function ProjectProfileHub({
                         </span>
                       )}
                       <span className={`text-xs px-2.5 py-0.5 rounded-full font-semibold border ${displayStatus === 'COMPLETED' ? 'bg-emerald-950/80 text-emerald-300 border-emerald-800' :
-                          displayStatus === 'PUNCHLIST_QA' ? 'bg-purple-950/80 text-purple-300 border-purple-800' :
-                            displayStatus === 'IN_PROGRESS' || displayStatus === 'EXECUTION' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30' :
-                              displayStatus === 'PLANNING' ? 'bg-blue-950/80 text-blue-300 border-blue-800' :
-                                'bg-amber-950/80 text-amber-300 border-amber-800'
+                        displayStatus === 'PUNCHLIST_QA' ? 'bg-purple-950/80 text-purple-300 border-purple-800' :
+                          displayStatus === 'IN_PROGRESS' || displayStatus === 'EXECUTION' ? 'bg-blue-500/10 text-blue-400 border border-blue-500/30' :
+                            displayStatus === 'PLANNING' ? 'bg-blue-950/80 text-blue-300 border-blue-800' :
+                              'bg-amber-950/80 text-amber-300 border-amber-800'
                         }`}>
                         {displayStatus === 'IN_PROGRESS' ? 'IN PROGRESS' : displayStatus.replace('_', ' ')}
                       </span>
@@ -2099,10 +2118,10 @@ export default function ProjectProfileHub({
                     <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
                       <div
                         className={`h-full rounded-full transition-all duration-300 ${displayProgress >= 100
-                            ? 'bg-emerald-500'
-                            : displayProgress > 0
-                              ? 'bg-gradient-to-r from-cyan-500 to-blue-500'
-                              : 'bg-slate-700'
+                          ? 'bg-emerald-500'
+                          : displayProgress > 0
+                            ? 'bg-gradient-to-r from-cyan-500 to-blue-500'
+                            : 'bg-slate-700'
                           }`}
                         style={{ width: `${Math.min(Math.max(displayProgress, 0), 100)}%` }}
                       />
@@ -2170,8 +2189,8 @@ export default function ProjectProfileHub({
 
                 <div className="flex flex-wrap items-center gap-2">
                   <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${selectedProject.status === 'COMPLETED' ? 'bg-emerald-950 text-emerald-300 border-emerald-800' :
-                      selectedProject.status === 'PUNCHLIST_QA' ? 'bg-purple-950 text-purple-300 border-purple-800' :
-                        'bg-amber-950 text-amber-300 border-amber-800'
+                    selectedProject.status === 'PUNCHLIST_QA' ? 'bg-purple-950 text-purple-300 border-purple-800' :
+                      'bg-amber-950 text-amber-300 border-amber-800'
                     }`}>
                     {selectedProject.status.replace('_', ' ')}
                   </span>
@@ -2186,7 +2205,13 @@ export default function ProjectProfileHub({
                   {onUpdateProject && selectedProject.status !== 'COMPLETED' && (
                     <button
                       onClick={async () => {
-                        if (!window.confirm(`Mark "${selectedProject.name}" as COMPLETED and archive it to Project History?`)) return;
+                        const ok = await confirmDialog({
+                          title: 'Complete & Archive Project',
+                          message: `Mark "${selectedProject.name}" as COMPLETED and archive it to Project History?`,
+                          confirmLabel: 'Mark as Completed',
+                          variant: 'primary',
+                        });
+                        if (!ok) return;
                         await onUpdateProject(selectedProject.id, { status: 'COMPLETED', progressPercentage: 100 });
                         setSelectedProject(prev => prev ? { ...prev, status: 'COMPLETED', progressPercentage: 100 } : null);
                       }}
@@ -2220,8 +2245,8 @@ export default function ProjectProfileHub({
                   type="button"
                   onClick={() => setActiveTabInsideProfile('OVERVIEW')}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTabInsideProfile === 'OVERVIEW'
-                      ? 'bg-amber-500 text-slate-950 font-bold'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    ? 'bg-amber-500 text-slate-950 font-bold'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                     }`}
                 >
                   <Layers className="w-3.5 h-3.5" />
@@ -2231,8 +2256,8 @@ export default function ProjectProfileHub({
                   type="button"
                   onClick={() => setActiveTabInsideProfile('FINANCIALS')}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTabInsideProfile === 'FINANCIALS'
-                      ? 'bg-amber-500 text-slate-950 font-bold'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    ? 'bg-amber-500 text-slate-950 font-bold'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                     }`}
                 >
                   <DollarSign className="w-3.5 h-3.5" />
@@ -2242,8 +2267,8 @@ export default function ProjectProfileHub({
                   type="button"
                   onClick={() => setActiveTabInsideProfile('WORKERS')}
                   className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer ${activeTabInsideProfile === 'WORKERS'
-                      ? 'bg-amber-500 text-slate-950 font-bold'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                    ? 'bg-amber-500 text-slate-950 font-bold'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
                     }`}
                 >
                   <Users className="w-3.5 h-3.5" />
@@ -2267,13 +2292,13 @@ export default function ProjectProfileHub({
                     <div className="flex justify-between items-center">
                       <span className="text-xs font-mono text-slate-300 font-bold uppercase tracking-wider">Overall Site Progress</span>
                       <span className="text-sm font-bold text-amber-400 font-mono">
-                        {calculateProjectProgress(selectedProject.id, tasks, selectedProject.progressPercentage)}% Complete
+                        {getCanonicalProjectProgress(selectedProject, tasks)}% Complete
                       </span>
                     </div>
                     <div className="w-full bg-slate-900 rounded-full h-2.5 overflow-hidden border border-slate-800">
                       <div
                         className="bg-gradient-to-r from-amber-500 via-amber-400 to-emerald-400 h-full rounded-full transition-all"
-                        style={{ width: `${calculateProjectProgress(selectedProject.id, tasks, selectedProject.progressPercentage)}%` }}
+                        style={{ width: `${getCanonicalProjectProgress(selectedProject, tasks)}%` }}
                       />
                     </div>
                     <div className="flex items-center gap-2 pt-0.5 text-xs text-amber-400 font-mono font-medium">
@@ -2288,7 +2313,7 @@ export default function ProjectProfileHub({
                       Live Site Operations & Resource Command
                     </h4>
                     {(() => {
-                      const livePct = calculateProjectProgress(selectedProject.id, tasks, selectedProject.progressPercentage);
+                      const livePct = getCanonicalProjectProgress(selectedProject, tasks);
                       const activePhaseLabel =
                         livePct < 15 ? 'Earthworks & Concreting Works' :
                           livePct < 35 ? 'Reinforcing Bar & Formworks' :
@@ -2303,7 +2328,8 @@ export default function ProjectProfileHub({
                       const crewHeadcount = assignedCrewList.length || selectedProject.assignedWorkersCount || 0;
                       const dailyLaborBurn = assignedCrewList.reduce((acc, w) => acc + Number(w.dailyRate || 750), 0) || (crewHeadcount * 780);
                       const siteRequests = rfis.filter(r => r.projectId === selectedProject.id || (r.projectName && r.projectName.toLowerCase() === selectedProject.name.toLowerCase()));
-                      const pendingReqCount = siteRequests.filter(r => r.status === 'OPEN' || r.status === 'UNDER_REVIEW').length || 2;
+                      const pendingReqCount = siteRequests.filter(r => r.status === 'OPEN' || r.status === 'UNDER_REVIEW').length;
+                      const projectTasksCount = tasks.filter(t => t.projectId === selectedProject.id || (t as any).project_id === selectedProject.id).length;
 
                       return (
                         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
@@ -2362,7 +2388,7 @@ export default function ProjectProfileHub({
                                 <span className="text-[10px] font-mono uppercase tracking-wider text-teal-400 font-semibold">3. Site Labor</span>
                                 <Users className="w-3.5 h-3.5 text-teal-400 shrink-0" />
                               </div>
-                              <div className="text-xs font-bold text-white font-mono">{crewHeadcount} Assigned Artisans</div>
+                              <div className="text-xs font-bold text-white font-mono">{crewHeadcount} Assigned {crewHeadcount === 1 ? 'Artisan' : 'Artisans'}</div>
                               <p className="text-[11px] text-slate-400 mt-1 font-mono">
                                 ₱{dailyLaborBurn.toLocaleString()}/day burn rate
                               </p>
@@ -2373,59 +2399,81 @@ export default function ProjectProfileHub({
                             </span>
                           </div>
 
-                          {/* 4. Live Profit Margin % (Synced to BOM Profit Pool & Material Overruns) */}
+                          {/* 4. Live Project Health & Profit Margin (Computed from Schedule + BOM Profit Pool) */}
                           {(() => {
                             void profitSyncTick;
                             const profitSummary = calculateProjectBomProfitSync({
                               projectId: selectedProject.id,
                               projectName: selectedProject.name,
                             });
-                            const isHealthy = profitSummary.isIntact;
-                            const isWarning = !isHealthy && profitSummary.profitMarginPct >= 60;
+                            const isCompleted = selectedProject.status === 'COMPLETED' || selectedProject.status === 'HANDED_OVER';
+                            const isPendingHealth = !isCompleted && (selectedProject.status === 'PLANNING' || projectTasksCount === 0);
+                            const isHealthy = !isPendingHealth && profitSummary.isIntact;
+                            const isWarning = !isPendingHealth && !isHealthy && profitSummary.profitMarginPct >= 60;
                             return (
                               <div
                                 onClick={() => openBudgetsModal('budget')}
-                                className={`bg-slate-950 hover:bg-slate-900 p-3.5 rounded-xl border flex flex-col justify-between cursor-pointer transition group ${
-                                  isHealthy
+                                className={`bg-slate-950 hover:bg-slate-900 p-3.5 rounded-xl border flex flex-col justify-between cursor-pointer transition group ${isPendingHealth
+                                  ? 'border-slate-800 hover:border-slate-700'
+                                  : isHealthy
                                     ? 'border-emerald-500/30 hover:border-emerald-400/60'
                                     : isWarning
-                                    ? 'border-amber-500/40 hover:border-amber-400/70'
-                                    : 'border-rose-500/40 hover:border-rose-400/70'
-                                }`}
+                                      ? 'border-amber-500/40 hover:border-amber-400/70'
+                                      : 'border-rose-500/40 hover:border-rose-400/70'
+                                  }`}
                               >
                                 <div>
                                   <div className="flex items-center justify-between mb-1">
-                                    <span className={`text-[10px] font-mono uppercase tracking-wider font-semibold ${
-                                      isHealthy ? 'text-emerald-400' : isWarning ? 'text-amber-400' : 'text-rose-400'
-                                    }`}>
-                                      4. Profit Margin
+                                    <span className={`text-[10px] font-mono uppercase tracking-wider font-semibold ${isPendingHealth ? 'text-slate-400' : isHealthy ? 'text-emerald-400' : isWarning ? 'text-amber-400' : 'text-rose-400'
+                                      }`}>
+                                      4. Project Health
                                     </span>
-                                    <TrendingUp className={`w-3.5 h-3.5 shrink-0 ${
-                                      isHealthy ? 'text-emerald-400' : isWarning ? 'text-amber-400' : 'text-rose-400'
-                                    }`} />
+                                    <TrendingUp className={`w-3.5 h-3.5 shrink-0 ${isPendingHealth ? 'text-slate-400' : isHealthy ? 'text-emerald-400' : isWarning ? 'text-amber-400' : 'text-rose-400'
+                                      }`} />
                                   </div>
-                                  <div className="flex items-baseline gap-1.5">
-                                    <span className={`text-base font-bold font-mono ${
-                                      isHealthy ? 'text-emerald-400' : isWarning ? 'text-amber-300' : 'text-rose-400'
-                                    }`}>
-                                      {profitSummary.profitMarginPct}%
-                                    </span>
-                                    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border font-semibold ${
-                                      isHealthy
-                                        ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                                        : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
-                                    }`}>
-                                      {isHealthy ? 'Intact' : `-₱${profitSummary.totalOverrun.toLocaleString()}`}
-                                    </span>
-                                  </div>
-                                  <p className="text-[11px] text-slate-400 mt-1 font-mono truncate">
-                                    Pool: ₱{profitSummary.remainingProfit.toLocaleString()} / ₱{profitSummary.baselineProfit.toLocaleString()}
-                                  </p>
+                                  {isPendingHealth ? (
+                                    <>
+                                      <div className="flex items-baseline gap-1.5">
+                                        <span className="text-base font-bold font-mono text-slate-300">Pending</span>
+                                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border font-semibold bg-slate-800/80 text-slate-400 border-slate-700">
+                                          N/A
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] text-slate-400 mt-1 font-mono truncate">
+                                        {projectTasksCount === 0 ? '0 WBS tasks scheduled' : 'In planning phase'}
+                                      </p>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <div className="flex items-baseline gap-1.5">
+                                        <span className={`text-base font-bold font-mono ${isHealthy ? 'text-emerald-400' : isWarning ? 'text-amber-300' : 'text-rose-400'
+                                          }`}>
+                                          {profitSummary.baselineProfit > 0 ? `${profitSummary.profitMarginPct}%` : `${livePct}%`}
+                                        </span>
+                                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border font-semibold ${isHealthy
+                                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                          : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                                          }`}>
+                                          {isCompleted ? 'Completed' : isHealthy ? 'Intact' : `-₱${profitSummary.totalOverrun.toLocaleString()}`}
+                                        </span>
+                                      </div>
+                                      <p className="text-[11px] text-slate-400 mt-1 font-mono truncate">
+                                        {profitSummary.baselineProfit > 0
+                                          ? `Pool: ₱${profitSummary.remainingProfit.toLocaleString()} / ₱${profitSummary.baselineProfit.toLocaleString()}`
+                                          : `Schedule: ${livePct}% across ${projectTasksCount} task${projectTasksCount === 1 ? '' : 's'}`}
+                                      </p>
+                                    </>
+                                  )}
                                 </div>
-                                <span className={`text-[10px] font-mono mt-2 flex items-center gap-1 font-semibold ${
-                                  isHealthy ? 'text-emerald-400' : 'text-amber-400'
-                                }`}>
-                                  <span>{isHealthy ? 'BOM Profit Pool Synced' : `${profitSummary.overrunCount} BOM Overrun(s)`}</span>
+                                <span className={`text-[10px] font-mono mt-2 flex items-center gap-1 font-semibold ${isPendingHealth ? 'text-slate-400' : isHealthy ? 'text-emerald-400' : 'text-amber-400'
+                                  }`}>
+                                  <span>
+                                    {isPendingHealth
+                                      ? 'Awaiting Active Schedule'
+                                      : isHealthy
+                                        ? 'Budget & Schedule Healthy'
+                                        : `${profitSummary.overrunCount} BOM Overrun(s)`}
+                                  </span>
                                   <ArrowRight className="w-3 h-3" />
                                 </span>
                               </div>
@@ -2460,15 +2508,19 @@ export default function ProjectProfileHub({
                         </div>
                         <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
                           <span className="text-xs text-slate-400 font-mono uppercase">Funds Collected</span>
-                          <div className="text-xl font-bold text-emerald-400 font-mono mt-1">₱{selectedProject.fundsCollected.toLocaleString()}</div>
+                          <div className="text-xl font-bold text-emerald-400 font-mono mt-1">
+                            ₱{getCanonicalProjectFundsCollected(selectedProject, clients).toLocaleString()}
+                          </div>
                           <span className="text-[10px] text-emerald-500/80">
-                            {selectedProject.budget > 0 ? Math.round((selectedProject.fundsCollected / selectedProject.budget) * 100) : 0}% collected to date
+                            {selectedProject.budget > 0
+                              ? Math.round((getCanonicalProjectFundsCollected(selectedProject, clients) / selectedProject.budget) * 100)
+                              : 0}% collected to date
                           </span>
                         </div>
                         <div className="bg-slate-950 p-4 rounded-xl border border-slate-800">
                           <span className="text-xs text-slate-400 font-mono uppercase">Outstanding Balance</span>
                           <div className="text-xl font-bold text-amber-400 font-mono mt-1">
-                            ₱{Math.max(0, selectedProject.budget - selectedProject.fundsCollected).toLocaleString()}
+                            ₱{Math.max(0, selectedProject.budget - getCanonicalProjectFundsCollected(selectedProject, clients)).toLocaleString()}
                           </div>
                           <span className="text-[10px] text-amber-500/80">Progress billing installment</span>
                         </div>
@@ -2699,8 +2751,8 @@ export default function ProjectProfileHub({
                               </div>
                               <span
                                 className={`text-[10px] font-mono px-2 py-0.5 rounded-full border shrink-0 ${avail.isOverlapping
-                                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold'
-                                    : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 font-semibold'
+                                  ? 'bg-amber-500/15 border-amber-500/40 text-amber-300 font-semibold'
+                                  : 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300 font-semibold'
                                   }`}
                               >
                                 {avail.badgeText}
@@ -2904,8 +2956,8 @@ export default function ProjectProfileHub({
                               type="button"
                               onClick={() => handleSelectLocation(s)}
                               className={`w-full text-left px-3.5 py-2.5 flex items-center gap-3 transition-colors ${selectedSuggestionIndex === idx
-                                  ? 'bg-amber-500/15 border-l-2 border-amber-400 text-white'
-                                  : 'hover:bg-slate-800/80 text-slate-200'
+                                ? 'bg-amber-500/15 border-l-2 border-amber-400 text-white'
+                                : 'hover:bg-slate-800/80 text-slate-200'
                                 }`}
                             >
                               {s.isRecent ? (
@@ -2932,11 +2984,10 @@ export default function ProjectProfileHub({
                       )}
 
                       {/* Pandago-Style Pinned Coordinates & Interactive Map Pinpoint Bar */}
-                      <div className={`mt-2.5 p-2.5 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${
-                        detectedCoords
-                          ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
-                          : 'bg-slate-950 border-slate-800 text-slate-400'
-                      }`}>
+                      <div className={`mt-2.5 p-2.5 rounded-xl border text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${detectedCoords
+                        ? 'bg-emerald-950/50 border-emerald-500/40 text-emerald-300'
+                        : 'bg-slate-950 border-slate-800 text-slate-400'
+                        }`}>
                         <div className="flex items-center gap-2 min-w-0">
                           <MapPin className={`w-4 h-4 shrink-0 ${detectedCoords ? 'text-emerald-400' : 'text-amber-400'}`} />
                           <div className="truncate">
@@ -3066,17 +3117,18 @@ export default function ProjectProfileHub({
               <div className="p-4 border-t border-slate-800 bg-slate-900 flex items-center justify-between gap-3">
                 <button
                   type="button"
+                  disabled={isSubmittingProject}
                   onClick={() => setShowNewModal(false)}
-                  className="px-4 py-1.5 rounded-lg text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 text-xs font-medium cursor-pointer"
+                  className="px-4 py-1.5 rounded-lg text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-medium cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={isTimelineInvalid || !formName.trim()}
+                  disabled={isSubmittingProject || isTimelineInvalid || !formName.trim()}
                   className="px-4 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed text-slate-950 font-bold text-xs transition cursor-pointer"
                 >
-                  Save Project Profile
+                  {isSubmittingProject ? 'Saving...' : 'Save Project Profile'}
                 </button>
               </div>
             </form>
@@ -3227,8 +3279,8 @@ export default function ProjectProfileHub({
                               type="button"
                               onClick={() => handleSelectLocation(s)}
                               className={`w-full text-left px-3.5 py-2.5 flex items-center gap-3 transition-colors ${selectedSuggestionIndex === idx
-                                  ? 'bg-amber-500/15 border-l-2 border-amber-400 text-white'
-                                  : 'hover:bg-slate-800/80 text-slate-200'
+                                ? 'bg-amber-500/15 border-l-2 border-amber-400 text-white'
+                                : 'hover:bg-slate-800/80 text-slate-200'
                                 }`}
                             >
                               {s.isRecent ? (
@@ -3299,12 +3351,15 @@ export default function ProjectProfileHub({
                       <div>
                         <label className="block text-xs font-mono text-slate-400 uppercase mb-1">Funds Collected (PHP)</label>
                         <input
-                          type="number"
-                          value={formCollected === 0 ? '' : formCollected}
-                          onChange={(e) => setFormCollected(e.target.value === '' ? 0 : Number(e.target.value))}
-                          placeholder="0"
-                          className="w-full bg-slate-950 border border-slate-700 text-white rounded-lg px-3 py-2 text-xs sm:text-sm focus:border-amber-500 focus:outline-none font-mono"
+                          type="text"
+                          readOnly
+                          disabled
+                          value={`₱${Number(selectedProject.fundsCollected || 0).toLocaleString()}`}
+                          className="w-full bg-slate-900/70 border border-slate-800 text-slate-400 rounded-lg px-3 py-2 text-xs sm:text-sm font-mono cursor-not-allowed select-none"
                         />
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          Auto-synced from Finance → Progress Billing &amp; Receipts
+                        </p>
                       </div>
                     </div>
 
@@ -3473,8 +3528,8 @@ export default function ProjectProfileHub({
 
                       <div className="flex items-center gap-2">
                         <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold border ${rec.workforceCategory === 'PROFESSIONAL' ? 'bg-purple-950 text-purple-300 border-purple-700' :
-                            rec.workforceCategory === 'SKILLED' ? 'bg-amber-950 text-amber-300 border-amber-700' :
-                              'bg-cyan-950 text-cyan-300 border-cyan-700'
+                          rec.workforceCategory === 'SKILLED' ? 'bg-amber-950 text-amber-300 border-amber-700' :
+                            'bg-cyan-950 text-cyan-300 border-cyan-700'
                           }`}>
                           {rec.workforceCategory}
                         </span>
@@ -3657,6 +3712,8 @@ export default function ProjectProfileHub({
         isOpen={isBudgetsModalOpen}
         onClose={() => setIsBudgetsModalOpen(false)}
         projects={synchronizedProjects}
+        tasks={tasks}
+        clients={clients}
         initialFocus={budgetsModalFocus}
       />
     </div>

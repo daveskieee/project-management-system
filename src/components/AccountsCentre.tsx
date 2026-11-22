@@ -68,7 +68,61 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
   notify,
   onUpdateSession,
 }) => {
-  const isDark = theme !== 'light';
+  const [systemPrefersDark, setSystemPrefersDark] = useState<boolean>(() =>
+    typeof window !== 'undefined' && window.matchMedia
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches
+      : true
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => setSystemPrefersDark(mq.matches);
+    if (mq.addEventListener) {
+      mq.addEventListener('change', onChange);
+      return () => mq.removeEventListener('change', onChange);
+    } else if (mq.addListener) {
+      mq.addListener(onChange);
+      return () => mq.removeListener(onChange);
+    }
+  }, []);
+
+  const resolvedTheme: 'light' | 'dark' | 'night' =
+    theme === 'system' ? (systemPrefersDark ? 'dark' : 'light') : theme;
+  const isDark = resolvedTheme !== 'light';
+  const isNight = resolvedTheme === 'night';
+
+  const applyAndPersistTheme = (mode: ThemeMode) => {
+    setTheme(mode);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('ldm_theme', mode);
+        localStorage.setItem('ctvill_theme', mode);
+      } catch {
+        // Ignore storage quota errors
+      }
+      const root = document.documentElement;
+      const effective: 'light' | 'dark' | 'night' =
+        mode === 'system'
+          ? (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+          : mode;
+      root.style.transition = 'background-color 150ms ease, color 150ms ease';
+      if (effective === 'light') {
+        root.classList.remove('dark', 'night');
+        root.classList.add('light', 'light-mode');
+        root.setAttribute('data-theme', 'light');
+      } else if (effective === 'night') {
+        root.classList.remove('light', 'light-mode');
+        root.classList.add('dark', 'night');
+        root.setAttribute('data-theme', 'night');
+      } else {
+        root.classList.remove('light', 'light-mode', 'night');
+        root.classList.add('dark');
+        root.setAttribute('data-theme', 'dark');
+      }
+    }
+  };
+
   // Navigation Sub-Tabs
   const [activeSubTab, setActiveSubTab] = useState<'security' | 'profile' | 'preferences' | 'sessions'>('security');
 
@@ -77,6 +131,7 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
   const [isChangeEmailOpen, setIsChangeEmailOpen] = useState<boolean>(false);
   const [isSecurityCheckupOpen, setIsSecurityCheckupOpen] = useState<boolean>(false);
   const [is2faModalOpen, setIs2faModalOpen] = useState<boolean>(false);
+  const [copiedSetupKey, setCopiedSetupKey] = useState<boolean>(false);
   const [twoFactorEnabled, setTwoFactorEnabled] = useState<boolean>(() =>
     is2faEnrolled(profileEmail || session?.email || '')
   );
@@ -354,25 +409,25 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
   };
 
   return (
-    <div className="max-w-6xl w-full mx-auto py-6 space-y-6 animate-in fade-in duration-200">
-      
+    <div className="w-full max-w-[1600px] mx-auto px-6 lg:px-8 py-4 space-y-6 animate-in fade-in duration-200">
+
       {/* ============================================================= */}
       {/* META ACCOUNTS CENTRE CONTAINER */}
       {/* ============================================================= */}
-      <div className={`${
-        isDark 
-          ? 'bg-slate-950 border-slate-800 shadow-2xl' 
+      <div className={`w-full ${isNight
+        ? 'bg-[#0A0A0C] border-slate-800/90 shadow-2xl'
+        : isDark
+          ? 'bg-slate-950 border-slate-800 shadow-2xl'
           : 'bg-white border-slate-200/90 shadow-xl'
-      } border rounded-3xl overflow-hidden flex flex-col md:flex-row min-h-[620px]`}>
-        
+        } border rounded-3xl overflow-hidden flex flex-col md:flex-row min-h-[620px]`}>
+
         {/* Left Column: Accounts Centre Navigation */}
-        <div className={`w-full md:w-80 border-b md:border-b-0 md:border-r ${
-          isDark 
-            ? 'border-slate-800/80 bg-slate-950/70' 
-            : 'border-slate-200 bg-slate-50/80'
-        } p-6 flex flex-col justify-between shrink-0`}>
+        <div className={`w-full md:w-80 border-b md:border-b-0 md:border-r ${isDark
+          ? 'border-slate-800/80 bg-slate-950/70'
+          : 'border-slate-200 bg-slate-50/80'
+          } p-6 flex flex-col justify-between shrink-0`}>
           <div className="space-y-6">
-            
+
             {/* Header Brand */}
             <div>
               <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-400">
@@ -390,15 +445,14 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
             <button
               type="button"
               onClick={() => setActiveSubTab('profile')}
-              className={`w-full flex items-center gap-3.5 p-3 rounded-2xl transition-all text-left cursor-pointer ${
-                activeSubTab === 'profile'
-                  ? isDark
-                    ? 'bg-slate-800 text-white shadow-md'
-                    : 'bg-slate-900 text-white shadow-md'
-                  : isDark
-                    ? 'text-slate-300 hover:bg-slate-900/80 hover:text-white'
-                    : 'text-slate-700 hover:bg-slate-200/70 hover:text-slate-900'
-              }`}
+              className={`w-full flex items-center gap-3.5 p-3 rounded-2xl transition-all text-left cursor-pointer ${activeSubTab === 'profile'
+                ? isDark
+                  ? 'bg-slate-800 text-white shadow-md'
+                  : 'bg-slate-900 text-white shadow-md'
+                : isDark
+                  ? 'text-slate-300 hover:bg-slate-900/80 hover:text-white'
+                  : 'text-slate-700 hover:bg-slate-200/70 hover:text-slate-900'
+                }`}
             >
               <div className="w-10 h-10 rounded-full bg-amber-500 text-slate-950 flex items-center justify-center font-bold text-sm shrink-0 overflow-hidden border border-amber-400/50">
                 {avatarUrl ? (
@@ -423,15 +477,14 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
               <button
                 type="button"
                 onClick={() => setActiveSubTab('security')}
-                className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${
-                  activeSubTab === 'security'
-                    ? isDark
-                      ? 'bg-slate-800 text-white font-bold shadow-md'
-                      : 'bg-slate-900 text-white font-bold shadow-md'
-                    : isDark
-                      ? 'text-slate-400 hover:text-white hover:bg-slate-900/60'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-                }`}
+                className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${activeSubTab === 'security'
+                  ? isDark
+                    ? 'bg-slate-800 text-white font-bold shadow-md'
+                    : 'bg-slate-900 text-white font-bold shadow-md'
+                  : isDark
+                    ? 'text-slate-400 hover:text-white hover:bg-slate-900/60'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                  }`}
               >
                 <Shield className={`w-4 h-4 shrink-0 ${activeSubTab === 'security' ? (isDark ? 'text-amber-400' : 'text-amber-300') : 'text-slate-400'}`} />
                 <span className="flex-1">Password and security</span>
@@ -441,15 +494,14 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
               <button
                 type="button"
                 onClick={() => setActiveSubTab('preferences')}
-                className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${
-                  activeSubTab === 'preferences'
-                    ? isDark
-                      ? 'bg-slate-800 text-white font-bold shadow-md'
-                      : 'bg-slate-900 text-white font-bold shadow-md'
-                    : isDark
-                      ? 'text-slate-400 hover:text-white hover:bg-slate-900/60'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-                }`}
+                className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${activeSubTab === 'preferences'
+                  ? isDark
+                    ? 'bg-slate-800 text-white font-bold shadow-md'
+                    : 'bg-slate-900 text-white font-bold shadow-md'
+                  : isDark
+                    ? 'text-slate-400 hover:text-white hover:bg-slate-900/60'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                  }`}
               >
                 <Sliders className={`w-4 h-4 shrink-0 ${activeSubTab === 'preferences' ? (isDark ? 'text-amber-400' : 'text-amber-300') : 'text-slate-400'}`} />
                 <span className="flex-1">Display & preferences</span>
@@ -459,15 +511,14 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
               <button
                 type="button"
                 onClick={() => setActiveSubTab('sessions')}
-                className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${
-                  activeSubTab === 'sessions'
-                    ? isDark
-                      ? 'bg-slate-800 text-white font-bold shadow-md'
-                      : 'bg-slate-900 text-white font-bold shadow-md'
-                    : isDark
-                      ? 'text-slate-400 hover:text-white hover:bg-slate-900/60'
-                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-                }`}
+                className={`w-full flex items-center gap-3 px-3.5 py-3 rounded-2xl text-xs font-semibold transition-all text-left cursor-pointer ${activeSubTab === 'sessions'
+                  ? isDark
+                    ? 'bg-slate-800 text-white font-bold shadow-md'
+                    : 'bg-slate-900 text-white font-bold shadow-md'
+                  : isDark
+                    ? 'text-slate-400 hover:text-white hover:bg-slate-900/60'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+                  }`}
               >
                 <Laptop className={`w-4 h-4 shrink-0 ${activeSubTab === 'sessions' ? (isDark ? 'text-amber-400' : 'text-amber-300') : 'text-slate-400'}`} />
                 <span className="flex-1">Where you're logged in</span>
@@ -486,11 +537,12 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
         </div>
 
         {/* Right Column: Dynamic Content Area */}
-        <div className={`flex-1 p-6 sm:p-8 lg:p-10 overflow-y-auto ${isDark ? 'bg-slate-950' : 'bg-white'}`}>
+        <div className={`flex-1 min-w-0 w-full p-6 sm:p-8 lg:p-10 overflow-y-auto ${isNight ? 'bg-[#0A0A0C]' : isDark ? 'bg-slate-950' : 'bg-white'
+          }`}>
 
           {/* 1. PASSWORD AND SECURITY (Directly mirrors Meta Accounts Centre reference!) */}
           {activeSubTab === 'security' && (
-            <div className="max-w-xl space-y-8 animate-in fade-in duration-200">
+            <div className="w-full space-y-8 animate-in fade-in duration-200">
               <div>
                 <h1 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-900'} tracking-tight`}>Password and security</h1>
               </div>
@@ -586,11 +638,10 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                     </div>
                     <div className="flex items-center gap-2">
                       <span
-                        className={`text-[9px] font-mono px-2 py-0.5 rounded font-bold border ${
-                          twoFactorEnabled
-                            ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/40'
-                            : 'bg-slate-800 text-slate-400 border-slate-700'
-                        }`}
+                        className={`text-[9px] font-mono px-2 py-0.5 rounded font-bold border ${twoFactorEnabled
+                          ? 'bg-emerald-950/60 text-emerald-400 border-emerald-800/40'
+                          : 'bg-slate-800 text-slate-400 border-slate-700'
+                          }`}
                       >
                         {twoFactorEnabled ? 'ENABLED' : 'OPTIONAL (OFF)'}
                       </span>
@@ -670,16 +721,26 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => setIsSecurityCheckupOpen(true)}
+                    onClick={() => {
+                      const targetEmail = profileEmail || session?.email || '';
+                      setTwoFactorEnabled(is2faEnrolled(targetEmail));
+                      setIsSecurityCheckupOpen(true);
+                    }}
                     className="w-full flex items-center justify-between p-4 hover:bg-slate-800/50 transition-colors text-left cursor-pointer group"
                   >
                     <div>
                       <div className="text-xs font-semibold text-white group-hover:text-amber-400 transition-colors">
                         Security Checkup
                       </div>
-                      <div className="text-[10px] text-emerald-400 mt-0.5 flex items-center gap-1 font-medium">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" /> All security recommendations satisfied
-                      </div>
+                      {twoFactorEnabled ? (
+                        <div className="text-[10px] text-emerald-400 mt-0.5 flex items-center gap-1 font-medium">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-400" /> All security recommendations satisfied
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-amber-400 mt-0.5 flex items-center gap-1 font-medium">
+                          <AlertTriangle className="w-3 h-3 text-amber-400" /> 1 recommendation: Enable Two-Factor Authentication (2FA)
+                        </div>
+                      )}
                     </div>
                     <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-amber-400 transition-colors" />
                   </button>
@@ -691,7 +752,7 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
 
           {/* 2. PROFILES AND PERSONAL DETAILS */}
           {activeSubTab === 'profile' && (
-            <div className="max-w-xl space-y-6 animate-in fade-in duration-200">
+            <div className="w-full space-y-6 animate-in fade-in duration-200">
               <div>
                 <h1 className="text-2xl font-bold text-white tracking-tight">Profiles and personal details</h1>
                 <p className="text-xs text-slate-400 mt-1">Manage your administrative profile, official job title, and team assignment.</p>
@@ -700,19 +761,38 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
               <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-6 space-y-6">
                 {/* Avatar container */}
                 <div className="flex items-center gap-4 border-b border-slate-800 pb-5">
-                  <div className="relative group shrink-0">
-                    <div className="w-16 h-16 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center font-black text-xl shadow-lg shadow-amber-500/20 overflow-hidden border-2 border-amber-500/40">
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => avatarInputRef.current?.click()}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        avatarInputRef.current?.click();
+                      }
+                    }}
+                    title="Click to upload a new avatar photo"
+                    className="relative group shrink-0 cursor-pointer focus:outline-none"
+                  >
+                    <div className="w-16 h-16 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center font-black text-xl shadow-lg shadow-amber-500/20 overflow-hidden border-2 border-amber-500/40 group-hover:border-amber-400 transition-all relative">
                       {avatarUrl ? (
                         <img src={avatarUrl} alt={profileName} className="w-full h-full object-cover" />
                       ) : (
                         <span>{getInitials(profileName)}</span>
                       )}
+                      <div className="absolute inset-0 bg-slate-950/65 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center text-white">
+                        <Camera className="w-4 h-4 text-amber-400" />
+                        <span className="text-[9px] font-bold tracking-wide mt-0.5">Change</span>
+                      </div>
                     </div>
                     <button
                       type="button"
-                      onClick={() => avatarInputRef.current?.click()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        avatarInputRef.current?.click();
+                      }}
                       title="Change Avatar Photo"
-                      className="absolute -bottom-1 -right-1 p-1.5 rounded-full bg-slate-900 border border-amber-500/60 text-amber-400 hover:bg-amber-500 hover:text-slate-950 transition-all shadow-md cursor-pointer"
+                      className="absolute -bottom-1 -right-1 p-1.5 rounded-full bg-slate-900 border border-amber-500/70 text-amber-400 group-hover:bg-amber-500 group-hover:text-slate-950 transition-all shadow-md cursor-pointer"
                     >
                       <Camera className="w-3.5 h-3.5" />
                     </button>
@@ -811,86 +891,98 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
 
           {/* 3. DISPLAY AND PREFERENCES */}
           {activeSubTab === 'preferences' && (
-            <div className="max-w-xl space-y-6 animate-in fade-in duration-200">
+            <div className="w-full space-y-6 animate-in fade-in duration-200">
               <div>
-                <h1 className="text-2xl font-bold text-white tracking-tight">Display & preferences</h1>
-                <p className="text-xs text-slate-400 mt-1">Customize your executive visual theme and interface experience.</p>
+                <h1 className={`text-2xl font-bold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>Display &amp; preferences</h1>
+                <p className={`text-xs mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Customize your executive visual theme and interface experience.</p>
               </div>
 
-              <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-6 space-y-6">
+              <div className={`${isNight ? 'bg-[#111116] border-slate-800' : isDark ? 'bg-slate-900/70 border-slate-800' : 'bg-slate-50 border-slate-200'} border rounded-2xl p-6 space-y-6`}>
                 <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-2">Interface Appearance Theme</label>
+                  <label className={`block text-xs font-semibold mb-2 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Interface Appearance Theme</label>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <button
                       type="button"
-                      onClick={() => setTheme('light')}
-                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${
-                        theme === 'light'
+                      onClick={() => applyAndPersistTheme('light')}
+                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${theme === 'light'
+                        ? isDark
                           ? 'bg-amber-500/10 border-amber-500 text-white shadow-md'
-                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
-                      }`}
+                          : 'bg-amber-50 border-amber-500 text-slate-900 shadow-md'
+                        : isDark
+                          ? 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                          : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                        }`}
                     >
                       <div className="text-sm font-bold flex items-center justify-between">
                         <span className="flex items-center gap-1.5"><Sun className="w-4 h-4 text-amber-500" /> Light</span>
                         {theme === 'light' && <span className="w-2 h-2 rounded-full bg-amber-400" />}
                       </div>
-                      <p className="text-[11px] text-slate-400 mt-1">Daylight surface (#F5F6F8) with crisp high-contrast cards &amp; borders.</p>
+                      <p className={`text-[11px] mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Daylight surface (#F5F6F8) with crisp high-contrast cards &amp; borders.</p>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => setTheme('dark')}
-                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${
-                        theme === 'dark'
+                      onClick={() => applyAndPersistTheme('dark')}
+                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${theme === 'dark'
+                        ? isDark
                           ? 'bg-amber-500/10 border-amber-500 text-white shadow-md'
-                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
-                      }`}
+                          : 'bg-amber-50 border-amber-500 text-slate-900 shadow-md'
+                        : isDark
+                          ? 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                          : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                        }`}
                     >
                       <div className="text-sm font-bold flex items-center justify-between">
                         <span className="flex items-center gap-1.5"><Moon className="w-4 h-4 text-blue-400" /> Dark</span>
                         {theme === 'dark' && <span className="w-2 h-2 rounded-full bg-amber-400" />}
                       </div>
-                      <p className="text-[11px] text-slate-400 mt-1">Carbon slate palette (#111625) tailored for executive clarity.</p>
+                      <p className={`text-[11px] mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Carbon slate palette (#111625) tailored for executive clarity.</p>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => setTheme('night')}
-                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${
-                        theme === 'night'
+                      onClick={() => applyAndPersistTheme('night')}
+                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${theme === 'night'
+                        ? isDark
                           ? 'bg-amber-500/10 border-amber-500 text-white shadow-md'
-                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
-                      }`}
+                          : 'bg-amber-50 border-amber-500 text-slate-900 shadow-md'
+                        : isDark
+                          ? 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                          : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                        }`}
                     >
                       <div className="text-sm font-bold flex items-center justify-between">
                         <span className="flex items-center gap-1.5"><Sparkles className="w-4 h-4 text-purple-400" /> Night (Obsidian)</span>
                         {theme === 'night' && <span className="w-2 h-2 rounded-full bg-amber-400" />}
                       </div>
-                      <p className="text-[11px] text-slate-400 mt-1">True obsidian palette (#0A0A0C) for ultra deep contrast.</p>
+                      <p className={`text-[11px] mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>True obsidian palette (#0A0A0C) for ultra deep contrast.</p>
                     </button>
 
                     <button
                       type="button"
-                      onClick={() => setTheme('system')}
-                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${
-                        theme === 'system'
+                      onClick={() => applyAndPersistTheme('system')}
+                      className={`p-4 rounded-xl border text-left cursor-pointer transition-all ${theme === 'system'
+                        ? isDark
                           ? 'bg-amber-500/10 border-amber-500 text-white shadow-md'
-                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
-                      }`}
+                          : 'bg-amber-50 border-amber-500 text-slate-900 shadow-md'
+                        : isDark
+                          ? 'bg-slate-950 border-slate-800 text-slate-400 hover:border-slate-700'
+                          : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300'
+                        }`}
                     >
                       <div className="text-sm font-bold flex items-center justify-between">
                         <span className="flex items-center gap-1.5"><Laptop className="w-4 h-4 text-slate-400" /> System default</span>
                         {theme === 'system' && <span className="w-2 h-2 rounded-full bg-amber-400" />}
                       </div>
-                      <p className="text-[11px] text-slate-400 mt-1">Automatically matches your operating system appearance.</p>
+                      <p className={`text-[11px] mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Automatically matches your operating system appearance.</p>
                     </button>
                   </div>
                 </div>
 
-                <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-1">
-                  <div className="text-xs font-bold text-white">Default View Preference</div>
-                  <p className="text-[11px] text-slate-400">
-                    Initial module displayed upon login is managed in <strong>Operations & System Settings</strong>.
+                <div className={`p-4 rounded-xl space-y-1 border ${isDark ? 'bg-slate-950 border-slate-800' : 'bg-white border-slate-200'}`}>
+                  <div className={`text-xs font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Default View Preference</div>
+                  <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Initial module displayed upon login is managed in <strong>Operations &amp; System Settings</strong>.
                   </p>
                 </div>
               </div>
@@ -899,7 +991,7 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
 
           {/* 4. WHERE YOU'RE LOGGED IN */}
           {activeSubTab === 'sessions' && (
-            <div className="max-w-xl space-y-6 animate-in fade-in duration-200">
+            <div className="w-full space-y-6 animate-in fade-in duration-200">
               <div>
                 <h1 className="text-2xl font-bold text-white tracking-tight">Where you're logged in</h1>
                 <p className="text-xs text-slate-400 mt-1">Review your active session envelopes and device history.</p>
@@ -956,25 +1048,25 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
       {/* ============================================================= */}
       {isChangePasswordOpen && typeof document !== 'undefined' && createPortal(
         <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4">
-          <div 
+          <div
             className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm cursor-pointer"
             onClick={() => setIsChangePasswordOpen(false)}
           />
-          <div 
+          <div
             className="relative z-10 w-full max-w-md bg-slate-950 border border-slate-800 rounded-3xl shadow-2xl p-6 sm:p-7 space-y-4 animate-in fade-in zoom-in-95 duration-150"
           >
             {/* Top Bar Navigation */}
             <div className="flex items-center justify-between pb-1">
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsChangePasswordOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-900 transition-colors cursor-pointer"
                 title="Back"
               >
                 <ChevronLeft className="w-5 h-5" />
               </button>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsChangePasswordOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-900 transition-colors cursor-pointer"
                 title="Close"
@@ -1028,8 +1120,10 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                   <button
                     type="button"
                     tabIndex={-1}
+                    aria-label={showCurrentPass ? 'Hide current password' : 'Show current password'}
+                    title={showCurrentPass ? 'Hide password' : 'Show password'}
                     onClick={() => setShowCurrentPass(!showCurrentPass)}
-                    className="absolute right-3 top-3 text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors cursor-pointer"
                   >
                     {showCurrentPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -1053,12 +1147,62 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                   <button
                     type="button"
                     tabIndex={-1}
+                    aria-label={showNewPass ? 'Hide new password' : 'Show new password'}
+                    title={showNewPass ? 'Hide password' : 'Show password'}
                     onClick={() => setShowNewPass(!showNewPass)}
-                    className="absolute right-3 top-3 text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors cursor-pointer"
                   >
                     {showNewPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+
+                {/* Live Password Strength & Requirements Indicator */}
+                {newPass.length > 0 && (() => {
+                  const hasMinLen = newPass.length >= 6;
+                  const hasGoodLen = newPass.length >= 8;
+                  const hasLetter = /[a-zA-Z]/.test(newPass);
+                  const hasNumber = /\d/.test(newPass);
+                  const hasSpecial = /[^a-zA-Z0-9]/.test(newPass);
+                  const score = [hasMinLen, hasGoodLen, hasLetter, hasNumber, hasSpecial].filter(Boolean).length;
+                  const strengthLabel = score <= 2 ? 'Weak' : score === 3 ? 'Fair' : score === 4 ? 'Good' : 'Strong';
+                  const strengthBarClass =
+                    score <= 2 ? 'bg-rose-500' : score === 3 ? 'bg-amber-500' : score === 4 ? 'bg-sky-400' : 'bg-emerald-400';
+                  const strengthTextClass =
+                    score <= 2 ? 'text-rose-400' : score === 3 ? 'text-amber-400' : score === 4 ? 'text-sky-400' : 'text-emerald-400';
+                  return (
+                    <div className="mt-2 p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 space-y-2">
+                      <div className="flex items-center justify-between text-[10px] font-mono">
+                        <span className="text-slate-400 uppercase">Password Strength</span>
+                        <span className={`font-bold ${strengthTextClass}`}>{strengthLabel}</span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1">
+                        {[1, 2, 3, 4].map((step) => (
+                          <div
+                            key={step}
+                            className={`h-1 rounded-full transition-colors ${score >= step + 1 || (step === 1 && score >= 1)
+                              ? strengthBarClass
+                              : 'bg-slate-800'
+                              }`}
+                          />
+                        ))}
+                      </div>
+                      <div className="grid grid-cols-2 gap-1 text-[10px]">
+                        <span className={hasMinLen ? 'text-emerald-400' : 'text-slate-500'}>
+                          {hasMinLen ? '✓' : '○'} 6+ characters
+                        </span>
+                        <span className={hasLetter ? 'text-emerald-400' : 'text-slate-500'}>
+                          {hasLetter ? '✓' : '○'} Letters (A–z)
+                        </span>
+                        <span className={hasNumber ? 'text-emerald-400' : 'text-slate-500'}>
+                          {hasNumber ? '✓' : '○'} Number (0–9)
+                        </span>
+                        <span className={hasSpecial ? 'text-emerald-400' : 'text-slate-500'}>
+                          {hasSpecial ? '✓' : '○'} Special (!$@%)
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               <div>
@@ -1078,12 +1222,19 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                   <button
                     type="button"
                     tabIndex={-1}
+                    aria-label={showConfirmPass ? 'Hide retype password' : 'Show retype password'}
+                    title={showConfirmPass ? 'Hide password' : 'Show password'}
                     onClick={() => setShowConfirmPass(!showConfirmPass)}
-                    className="absolute right-3 top-3 text-slate-500 hover:text-slate-300 transition-colors cursor-pointer"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors cursor-pointer"
                   >
                     {showConfirmPass ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
+                {confirmPass.length > 0 && (
+                  <p className={`text-[10px] mt-1 font-medium ${newPass === confirmPass ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {newPass === confirmPass ? '✓ Passwords match' : '✕ Passwords do not match'}
+                  </p>
+                )}
               </div>
             </div>
 
@@ -1116,7 +1267,7 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                 disabled={isUpdatingPass}
                 className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs rounded-xl shadow-lg shadow-blue-600/30 cursor-pointer flex items-center justify-center gap-1.5 transition-all disabled:opacity-50"
               >
-                <span>{isUpdatingPass ? 'Updating in Database...' : 'Change password'}</span>
+                <span>{isUpdatingPass ? 'Updating Password...' : 'Change password'}</span>
               </button>
             </div>
           </div>
@@ -1129,25 +1280,25 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
       {/* ============================================================= */}
       {isChangeEmailOpen && typeof document !== 'undefined' && createPortal(
         <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4">
-          <div 
+          <div
             className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm cursor-pointer"
             onClick={() => setIsChangeEmailOpen(false)}
           />
-          <div 
+          <div
             className="relative z-10 w-full max-w-md bg-slate-950 border border-slate-800 rounded-3xl shadow-2xl p-6 sm:p-7 space-y-4 animate-in fade-in zoom-in-95 duration-150"
           >
             {/* Top Bar Navigation */}
             <div className="flex items-center justify-between pb-1">
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsChangeEmailOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-900 transition-colors cursor-pointer"
                 title="Back"
               >
                 <ChevronLeft className="w-5 h-5" />
               </button>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsChangeEmailOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-900 transition-colors cursor-pointer"
                 title="Close"
@@ -1263,19 +1414,24 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
       {/* ============================================================= */}
       {isSecurityCheckupOpen && typeof document !== 'undefined' && createPortal(
         <div className="fixed inset-0 z-[99999] flex items-center justify-center p-4">
-          <div 
+          <div
             className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm cursor-pointer"
             onClick={() => setIsSecurityCheckupOpen(false)}
           />
-          <div 
+          <div
             className="relative z-10 w-full max-w-md bg-slate-950 border border-slate-800 rounded-3xl shadow-2xl p-6 sm:p-7 space-y-4 animate-in fade-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-1">
-              <span className="text-xs font-bold text-emerald-400 flex items-center gap-1">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" /> Security Checkup
+              <span className={`text-xs font-bold flex items-center gap-1 ${twoFactorEnabled ? 'text-emerald-400' : 'text-amber-400'}`}>
+                {twoFactorEnabled ? (
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                ) : (
+                  <AlertTriangle className="w-4 h-4 text-amber-400" />
+                )}
+                Security Checkup
               </span>
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={() => setIsSecurityCheckupOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-full hover:bg-slate-900 transition-colors cursor-pointer"
               >
@@ -1286,11 +1442,53 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
             <div>
               <h3 className="text-xl font-bold text-white tracking-tight">Account Protection Status</h3>
               <p className="text-xs text-slate-400 mt-1">
-                Your account security controls have been audited against OWASP enterprise standards.
+                {twoFactorEnabled
+                  ? 'Your account security controls have been audited against OWASP enterprise standards.'
+                  : '1 security recommendation requires your attention to strengthen account protection.'}
               </p>
             </div>
 
             <div className="space-y-3 pt-2">
+              {/* Dynamic Two-Factor Authentication (2FA) Check */}
+              {twoFactorEnabled ? (
+                <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl flex items-start gap-3">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="text-xs font-bold text-white">Two-Factor Authentication (2FA)</div>
+                    <div className="text-[11px] text-slate-400">Authenticator app and single-use recovery codes are active on sign-in.</div>
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3 bg-amber-950/30 border border-amber-500/40 rounded-xl flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <div className="text-xs font-bold text-amber-300">Two-Factor Authentication (2FA) Disabled</div>
+                      <div className="text-[11px] text-amber-200/80">
+                        Protect your account with an Authenticator app to prevent unauthorized sign-ins.
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const targetEmail = profileEmail || session?.email || '';
+                      setIsSecurityCheckupOpen(false);
+                      setTotpSetupError(null);
+                      setTotpVerifyInput('');
+                      setBackupCodes(getBackupRecoveryCodes(targetEmail));
+                      setIsBackupCodesUnlocked(false);
+                      setShowUnlinkConfirm(false);
+                      setTotpSetupStep('qr');
+                      setIs2faModalOpen(true);
+                    }}
+                    className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-[11px] font-bold shrink-0 cursor-pointer transition-colors"
+                  >
+                    Set up 2FA
+                  </button>
+                </div>
+              )}
+
               <div className="p-3 bg-slate-900/80 border border-slate-800 rounded-xl flex items-start gap-3">
                 <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
                 <div>
@@ -1365,21 +1563,19 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
             {totpSetupStep !== 'active' && (
               <div className="flex items-center gap-2 text-[10px] font-mono font-bold uppercase tracking-wider">
                 <span
-                  className={`px-2.5 py-1 rounded-lg border ${
-                    totpSetupStep === 'qr'
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                      : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                  }`}
+                  className={`px-2.5 py-1 rounded-lg border ${totpSetupStep === 'qr'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                    }`}
                 >
                   {totpSetupStep === 'qr' ? 'Step 1 of 2 • Scan QR' : '✓ Step 1 Scanned'}
                 </span>
                 <span className="text-slate-600">→</span>
                 <span
-                  className={`px-2.5 py-1 rounded-lg border ${
-                    totpSetupStep === 'verify'
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                      : 'bg-slate-900 text-slate-500 border-slate-800'
-                  }`}
+                  className={`px-2.5 py-1 rounded-lg border ${totpSetupStep === 'verify'
+                    ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    : 'bg-slate-900 text-slate-500 border-slate-800'
+                    }`}
                 >
                   Step 2 of 2 • Enter 6-Digit Code
                 </span>
@@ -1416,15 +1612,45 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                     </div>
                   )}
 
-                  <div className="space-y-1 pt-2 border-t border-slate-800/80">
+                  <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
                     <div className="flex items-center justify-between">
                       <span className="text-slate-300 font-bold text-[11px]">Can&apos;t scan? Manual Setup Key (Base32)</span>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 font-bold">
                         RFC 6238 TOTP
                       </span>
                     </div>
-                    <div className="p-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-center text-amber-400 font-bold tracking-wider text-[11px] select-all">
-                      {formatTotpSecretDisplay(getOrCreateTotpSecret(profileEmail || session?.email || ''))}
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 p-2 bg-slate-950 border border-slate-800 rounded-xl font-mono text-center text-amber-400 font-bold tracking-wider text-[11px] select-all truncate">
+                        {formatTotpSecretDisplay(getOrCreateTotpSecret(profileEmail || session?.email || ''))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const rawSecret = getOrCreateTotpSecret(profileEmail || session?.email || '');
+                          if (navigator.clipboard && navigator.clipboard.writeText) {
+                            navigator.clipboard.writeText(rawSecret).catch(() => { });
+                          }
+                          setCopiedSetupKey(true);
+                          notify('📋 Manual 2FA setup key copied to clipboard.');
+                          setTimeout(() => setCopiedSetupKey(false), 2000);
+                        }}
+                        className={`px-3 py-2 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 shrink-0 cursor-pointer transition-colors ${copiedSetupKey
+                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40'
+                          : 'bg-slate-950 hover:bg-slate-800 text-slate-200 border-slate-700'
+                          }`}
+                      >
+                        {copiedSetupKey ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Key</span>
+                          </>
+                        )}
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1566,11 +1792,10 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                           >
                             <span className="font-semibold tracking-wider">LDM-••••-••••</span>
                             <span
-                              className={`text-[9px] px-1.5 py-0.5 rounded font-bold border ${
-                                item.used
-                                  ? 'bg-rose-950/70 text-rose-400 border-rose-800/50'
-                                  : 'bg-slate-900 text-slate-500 border-slate-800'
-                              }`}
+                              className={`text-[9px] px-1.5 py-0.5 rounded font-bold border ${item.used
+                                ? 'bg-rose-950/70 text-rose-400 border-rose-800/50'
+                                : 'bg-slate-900 text-slate-500 border-slate-800'
+                                }`}
                             >
                               {item.used ? 'EXPIRED' : 'LOCKED'}
                             </span>
@@ -1684,11 +1909,10 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
                               }
                             }}
                             title={item.used ? 'Backup code already used' : 'Click to copy backup code'}
-                            className={`rounded-lg bg-slate-950/60 border px-3.5 py-2.5 flex items-center justify-between font-mono text-xs ${
-                              item.used
-                                ? 'border-rose-900/40 text-slate-500 line-through select-none'
-                                : 'border-slate-800 hover:border-emerald-500/40 text-emerald-400 cursor-pointer group'
-                            }`}
+                            className={`rounded-lg bg-slate-950/60 border px-3.5 py-2.5 flex items-center justify-between font-mono text-xs ${item.used
+                              ? 'border-rose-900/40 text-slate-500 line-through select-none'
+                              : 'border-slate-800 hover:border-emerald-500/40 text-emerald-400 cursor-pointer group'
+                              }`}
                           >
                             <span className="font-bold tracking-wider">{item.code}</span>
                             {item.used ? (

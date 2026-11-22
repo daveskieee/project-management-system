@@ -574,16 +574,82 @@ financeRouter.post('/payroll/disburse', requireRole(['FINANCE', 'ADMIN']), async
 // CLIENT PROGRESS PAYMENTS & INVOICING
 // ============================================================================
 
+// Helper: Recompute commercial_projects.funds_collected strictly from PAID installment_ledgers
+async function recomputeCommercialProjectsFundsCollected(projectId?: string | null): Promise<number | null> {
+  try {
+    const ledgerSumSql = `
+      COALESCE(
+        (
+          SELECT ROUND(SUM(COALESCE(il."amountPaid", il."amountDue", 0))::numeric, 2)
+          FROM installment_ledgers il
+          INNER JOIN client_packages cp ON cp.id = il."clientPackageId"
+          INNER JOIN users u ON u.id = cp."userId"
+          WHERE il.status::text = 'PAID'
+            AND (
+              LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.name))
+              OR LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.id))
+              OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.id))
+              OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.name))
+              OR (
+                COALESCE(TRIM(p.client_name), '') <> ''
+                AND LOWER(TRIM(u.name)) = LOWER(TRIM(p.client_name))
+              )
+              OR (
+                COALESCE(TRIM(u.email), '') <> ''
+                AND LENGTH(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) >= 4
+                AND LOWER(u.email) LIKE '%' || LOWER(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) || '%'
+              )
+              OR p.id = ANY(COALESCE(u.project_ids, ARRAY[]::text[]))
+            )
+        ),
+        0
+      )
+    `;
+
+    if (projectId) {
+      const updated = await pool.query(
+        `UPDATE commercial_projects p
+         SET funds_collected = ${ledgerSumSql}
+         WHERE p.id = $1
+         RETURNING funds_collected`,
+        [projectId]
+      );
+      invalidateAllDataCache();
+      broadcastChange('projects');
+      return Number(updated.rows?.[0]?.funds_collected ?? 0);
+    } else {
+      await pool.query(`UPDATE commercial_projects p SET funds_collected = ${ledgerSumSql}`);
+      invalidateAllDataCache();
+      broadcastChange('projects');
+      return null;
+    }
+  } catch (err) {
+    console.warn('Failed to recompute commercial_projects.funds_collected:', err);
+    return null;
+  }
+}
+
 // POST /api/payments/record
 financeRouter.post('/payments/record', requireRole(['FINANCE', 'ADMIN']), async (req: Request, res: Response) => {
   try {
-    const { clientId, amount, paymentMethod, reference, depositSlipUrl } = req.body;
+    const {
+      clientId,
+      projectId: bodyProjectId,
+      projectCode: bodyProjectCode,
+      projectName: bodyProjectName,
+      clientName: bodyClientName,
+      amount,
+      paymentMethod,
+      reference,
+      depositSlipUrl
+    } = req.body;
     const exactAmount = Math.round(Number(amount) * 100) / 100;
-    if (!clientId || !exactAmount || exactAmount <= 0) {
-      return res.status(400).json({ error: 'Missing clientId or valid positive amount' });
+    const lookupKey = bodyProjectId || bodyProjectCode || clientId;
+    if (!lookupKey || !exactAmount || exactAmount <= 0) {
+      return res.status(400).json({ error: 'Missing clientId/projectId or valid positive amount' });
     }
 
-    let clientUser = await prisma.user.findUnique({
+    let clientUser = clientId ? await prisma.user.findUnique({
       where: { id: clientId },
       include: {
         clientPackage: {
@@ -592,9 +658,9 @@ financeRouter.post('/payments/record', requireRole(['FINANCE', 'ADMIN']), async 
           }
         }
       }
-    });
+    }) : null;
 
-    if (!clientUser) {
+    if (!clientUser && clientId) {
       clientUser = await prisma.user.findFirst({
         where: { name: clientId },
         include: {
@@ -607,34 +673,55 @@ financeRouter.post('/payments/record', requireRole(['FINANCE', 'ADMIN']), async 
       });
     }
 
-    // Check if clientId corresponds to a project ID, project name, or project client
-    let targetProject = null;
+    // Resolve target project by UUID/code (id), project name, or client name
+    let targetProject: any = null;
     try {
       const targetProjectRes = await pool.query(
-        'SELECT * FROM commercial_projects WHERE id = $1 OR name = $1 OR client_name = $1 LIMIT 1',
-        [clientId]
+        `SELECT * FROM commercial_projects
+         WHERE id = $1 OR id = $2 OR LOWER(TRIM(name)) = LOWER(TRIM($3)) OR LOWER(TRIM(client_name)) = LOWER(TRIM($4))
+         LIMIT 1`,
+        [
+          String(bodyProjectId || clientId || ''),
+          String(bodyProjectCode || clientId || ''),
+          String(bodyProjectName || clientId || ''),
+          String(bodyClientName || clientId || '')
+        ]
       );
       targetProject = targetProjectRes.rows?.[0] || null;
-      if (targetProject) {
-        await pool.query(
-          'UPDATE commercial_projects SET funds_collected = ROUND((COALESCE(funds_collected, 0) + $1)::numeric, 2) WHERE id = $2',
-          [exactAmount, targetProject.id]
-        );
-        broadcastChange('projects');
-      }
     } catch (e) {
       console.warn('Error checking commercial_projects for payment:', e);
     }
 
+    // Also try matching existing clientUser by targetProject.client_name or project_ids
+    if (!clientUser && targetProject?.client_name) {
+      clientUser = await prisma.user.findFirst({
+        where: { name: targetProject.client_name },
+        include: {
+          clientPackage: {
+            include: {
+              installmentLedgers: { orderBy: { dueDate: 'asc' } }
+            }
+          }
+        }
+      });
+    }
+
+    const resolvedClientDisplayName =
+      (targetProject?.client_name && String(targetProject.client_name).trim()) ||
+      (bodyClientName && String(bodyClientName).trim()) ||
+      (clientUser?.name && clientUser.name !== targetProject?.id ? clientUser.name : '') ||
+      targetProject?.name ||
+      String(clientId || 'Commercial Client');
+
     if (!clientUser) {
-      const clientName = targetProject?.client_name || clientId;
       try {
         clientUser = await prisma.user.create({
           data: {
-            name: clientName,
-            email: `${clientName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'client'}_${Date.now()}@client.ctvill.internal`,
+            name: resolvedClientDisplayName,
+            email: `${resolvedClientDisplayName.toLowerCase().replace(/[^a-z0-9]/g, '') || 'client'}_${Date.now()}@client.ctvill.internal`,
             role: 'CLIENT',
-            passwordHash: 'CLIENT_NOPASS'
+            passwordHash: 'CLIENT_NOPASS',
+            projectIds: targetProject?.id ? [String(targetProject.id)] : []
           },
           include: {
             clientPackage: {
@@ -647,72 +734,125 @@ financeRouter.post('/payments/record', requireRole(['FINANCE', 'ADMIN']), async 
       } catch (userErr) {
         console.warn('Fallback client creation notice:', userErr);
       }
+    } else if (targetProject?.id) {
+      const existingPids = Array.isArray(clientUser.projectIds) ? clientUser.projectIds : [];
+      const needsProjectLink = !existingPids.includes(String(targetProject.id));
+      const needsNameFix =
+        targetProject.client_name &&
+        String(targetProject.client_name).trim() !== '' &&
+        (clientUser.name === targetProject.id || clientUser.name === targetProject.name);
+      if (needsProjectLink || needsNameFix) {
+        clientUser = await prisma.user.update({
+          where: { id: clientUser.id },
+          data: {
+            ...(needsProjectLink ? { projectIds: Array.from(new Set([...existingPids, String(targetProject.id)])) } : {}),
+            ...(needsNameFix ? { name: String(targetProject.client_name).trim() } : {})
+          },
+          include: {
+            clientPackage: {
+              include: {
+                installmentLedgers: { orderBy: { dueDate: 'asc' } }
+              }
+            }
+          }
+        }).catch(() => clientUser);
+      }
     }
 
     if (!clientUser) {
-      // If still unable to create User, return success if project was updated
-      if (targetProject) {
-        broadcastChange('projects');
-        broadcastChange('auditLogs');
-        return res.json({ success: true, amount: Number(amount), projectId: targetProject.id });
-      }
-      return res.status(404).json({ error: 'Client user not found' });
+      return res.status(404).json({ error: 'Client account could not be resolved for this payment.' });
     }
 
     const paymentAmount = exactAmount;
+    const resolvedProjectName =
+      targetProject?.name ||
+      (bodyProjectName && String(bodyProjectName).trim()) ||
+      clientUser.clientPackage?.packageType ||
+      'Commercial Fit-Out & Architectural Works';
     let packageId = clientUser.clientPackage?.id;
     if (!packageId) {
       const newPkg = await prisma.clientPackage.create({
         data: {
           userId: clientUser.id,
-          price: paymentAmount,
-          packageType: 'Commercial Fit-Out & Architectural Works',
+          price: targetProject?.budget ? Number(targetProject.budget) : paymentAmount,
+          packageType: resolvedProjectName,
           paymentMethod: PaymentMethod.INSTALLMENT
         }
       });
       packageId = newPkg.id;
+    } else if (
+      targetProject?.name &&
+      (!clientUser.clientPackage?.packageType ||
+        clientUser.clientPackage.packageType === 'Commercial Fit-Out & Architectural Works')
+    ) {
+      await prisma.clientPackage.update({
+        where: { id: packageId },
+        data: { packageType: targetProject.name }
+      }).catch(() => { });
     }
 
     const pendingLedger = clientUser.clientPackage?.installmentLedgers?.find(
       l => l.status === PaymentStatus.PENDING
     );
 
-    if (pendingLedger) {
-      await prisma.installmentLedger.update({
+    const nowDate = new Date();
+    const savedLedger = pendingLedger
+      ? await prisma.installmentLedger.update({
         where: { id: pendingLedger.id },
         data: {
           status: PaymentStatus.PAID,
           amountPaid: paymentAmount,
-          paymentDate: new Date()
+          paymentDate: nowDate
         }
-      });
-    } else {
-      await prisma.installmentLedger.create({
+      })
+      : await prisma.installmentLedger.create({
         data: {
           clientPackageId: packageId,
-          dueDate: new Date(),
+          dueDate: nowDate,
           amountDue: paymentAmount,
           amountPaid: paymentAmount,
           status: PaymentStatus.PAID,
-          paymentDate: new Date()
+          paymentDate: nowDate
         }
       });
-    }
+
+    // Recompute commercial_projects.funds_collected strictly from PAID installment_ledgers
+    const updatedFundsCollected = await recomputeCommercialProjectsFundsCollected(targetProject?.id || null);
 
     await prisma.processAuditLog.create({
       data: {
         entityType: 'PAYMENT',
-        entityId: clientId,
+        entityId: savedLedger.id,
         action: 'PAYMENT_RECEIVED',
-        actorName: 'Treasury / Finance Lead',
-        actorRole: 'ADMIN',
-        details: `Recorded payment of ₱${paymentAmount.toLocaleString()} via ${paymentMethod || 'Bank Transfer'} for ${clientUser.name}. ${reference ? `Ref: ${reference}` : ''}`,
+        actorName: (req as any).user?.name || 'Treasury / Finance Lead',
+        actorRole: (req as any).user?.role || 'FINANCE',
+        details: `Recorded payment of ₱${paymentAmount.toLocaleString()} via ${paymentMethod || 'Bank Transfer'} for ${clientUser.name} (${resolvedProjectName}). ${reference ? `Ref: ${reference}` : ''}`,
       }
     }).catch(() => { });
 
+    invalidateAllDataCache();
     broadcastChange('clients');
+    broadcastChange('projects');
     broadcastChange('auditLogs');
-    res.json({ success: true, amount: paymentAmount });
+    res.json({
+      success: true,
+      amount: paymentAmount,
+      projectId: targetProject?.id || null,
+      fundsCollected: updatedFundsCollected,
+      installment: {
+        id: savedLedger.id,
+        clientId: clientUser.id,
+        clientName: clientUser.name,
+        projectName: resolvedProjectName,
+        dueDate: savedLedger.dueDate.toISOString().split('T')[0],
+        amount: paymentAmount,
+        status: 'Paid',
+        paidDate: nowDate.toISOString().split('T')[0],
+        paymentMethod: paymentMethod || 'Bank Transfer',
+        reference: reference || '',
+        depositSlipUrl: depositSlipUrl || undefined
+      }
+    });
   } catch (error) {
     console.error('Error recording payment:', error);
     res.status(500).json({ error: 'Internal Server Error' });
@@ -827,6 +967,8 @@ financeRouter.patch('/payments/installment/:id', requireRole(['FINANCE', 'ADMIN'
       }
     });
 
+    await recomputeCommercialProjectsFundsCollected();
+    invalidateAllDataCache();
     broadcastChange('clients');
     res.json(updated);
   } catch (error) {
@@ -840,6 +982,8 @@ financeRouter.delete('/payments/installment/:id', requireRole(['FINANCE', 'ADMIN
   try {
     const { id } = req.params;
     await prisma.installmentLedger.delete({ where: { id } });
+    await recomputeCommercialProjectsFundsCollected();
+    invalidateAllDataCache();
     broadcastChange('clients');
     res.json({ success: true });
   } catch (error) {

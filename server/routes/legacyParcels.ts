@@ -9,7 +9,7 @@ import * as crypto from 'crypto';
 import { prisma, pool } from '../db';
 import { broadcastChange, setCacheInvalidator } from '../events';
 import { getMailTransporter } from '../email';
-import { requireAuth, requireRole, checkUserProjectAccess } from '../middleware/auth';
+import { requireAuth, requireRole, checkUserProjectAccess, hasProjectManagementAccess } from '../middleware/auth';
 
 export const legacyParcelsRouter = Router();
 
@@ -69,7 +69,7 @@ export async function mapUserToClient(user: any) {
   const payments = ledgers.map((l: any) => ({
     id: l.id,
     dueDate: l.dueDate.toISOString().split('T')[0],
-    amount: Number(l.amountDue),
+    amount: Number(l.status === PaymentStatus.PAID ? (l.amountPaid ?? l.amountDue) : l.amountDue),
     status: l.status === PaymentStatus.PAID ? 'Paid' : 'Pending',
     paidDate: l.paymentDate ? l.paymentDate.toISOString().split('T')[0] : undefined,
   }));
@@ -119,6 +119,7 @@ export async function mapUserToClient(user: any) {
     hasPendingInvite: Boolean(user.inviteToken && (!user.inviteTokenExpiry || new Date() <= user.inviteTokenExpiry)),
     inviteTokenExpiry: user.inviteTokenExpiry ? user.inviteTokenExpiry.toISOString() : null,
     slotId: pkg?.slotId || null,
+    projectIds: Array.isArray(user.projectIds) ? user.projectIds : [],
     packageName: pkg?.packageType || '',
     paymentPlan: pkg?.paymentMethod === PaymentMethod.INSTALLMENT ? 'Installment' : 'Cash',
     totalContractPrice,
@@ -247,42 +248,76 @@ legacyParcelsRouter.get('/all-data', async (req: Request, res: Response) => {
       pool.query(`
         SELECT 
           p.*,
+          CASE
+            WHEN UPPER(COALESCE(p.status, '')) IN ('COMPLETED', 'HANDED_OVER') THEN 100
+            ELSE COALESCE(
+              (
+                SELECT ROUND(
+                  SUM(
+                    (CASE 
+                      WHEN t.status = 'COMPLETED' THEN 100.0
+                      WHEN t.progress > 1.0 THEN LEAST(100.0, t.progress)
+                      WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
+                      ELSE 0.0 
+                    END) * GREATEST(COALESCE(t.duration, 1), 1)
+                  ) 
+                  / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
+                )
+                FROM project_tasks t 
+                WHERE t."projectId" = p.id
+                  AND NOT EXISTS (SELECT 1 FROM project_tasks c WHERE c."parentTaskId" = t.id)
+              ), 
+              0
+            )
+          END AS progress,
+          CASE
+            WHEN UPPER(COALESCE(p.status, '')) IN ('COMPLETED', 'HANDED_OVER') THEN 100
+            ELSE COALESCE(
+              (
+                SELECT ROUND(
+                  SUM(
+                    (CASE 
+                      WHEN t.status = 'COMPLETED' THEN 100.0
+                      WHEN t.progress > 1.0 THEN LEAST(100.0, t.progress)
+                      WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
+                      ELSE 0.0 
+                    END) * GREATEST(COALESCE(t.duration, 1), 1)
+                  ) 
+                  / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
+                )
+                FROM project_tasks t 
+                WHERE t."projectId" = p.id
+                  AND NOT EXISTS (SELECT 1 FROM project_tasks c WHERE c."parentTaskId" = t.id)
+              ), 
+              0
+            )
+          END AS "cpmProgress",
           COALESCE(
             (
-              SELECT ROUND(
-                SUM(
-                  (CASE 
-                    WHEN t.status = 'COMPLETED' OR t.progress >= 1.0 THEN 100.0 
-                    WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
-                    ELSE COALESCE(t.progress, 0.0) 
-                  END) * GREATEST(COALESCE(t.duration, 1), 1)
-                ) 
-                / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
-              )
-              FROM project_tasks t 
-              WHERE t."projectId" = p.id
-            ), 
-            p.progress_percentage, 
+              SELECT ROUND(SUM(COALESCE(il."amountPaid", il."amountDue", 0))::numeric, 2)
+              FROM installment_ledgers il
+              INNER JOIN client_packages cp ON cp.id = il."clientPackageId"
+              INNER JOIN users u ON u.id = cp."userId"
+              WHERE il.status::text = 'PAID'
+                AND (
+                  LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.name))
+                  OR LOWER(TRIM(cp."packageType")) = LOWER(TRIM(p.id))
+                  OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.id))
+                  OR LOWER(TRIM(u.name)) = LOWER(TRIM(p.name))
+                  OR (
+                    COALESCE(TRIM(p.client_name), '') <> ''
+                    AND LOWER(TRIM(u.name)) = LOWER(TRIM(p.client_name))
+                  )
+                  OR (
+                    COALESCE(TRIM(u.email), '') <> ''
+                    AND LENGTH(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) >= 4
+                    AND LOWER(u.email) LIKE '%' || LOWER(REGEXP_REPLACE(p.id, '[^a-zA-Z0-9]', '', 'g')) || '%'
+                  )
+                  OR p.id = ANY(COALESCE(u.project_ids, ARRAY[]::text[]))
+                )
+            ),
             0
-          ) AS progress,
-          COALESCE(
-            (
-              SELECT ROUND(
-                SUM(
-                  (CASE 
-                    WHEN t.status = 'COMPLETED' OR t.progress >= 1.0 THEN 100.0 
-                    WHEN t.progress > 0 AND t.progress <= 1.0 THEN t.progress * 100.0 
-                    ELSE COALESCE(t.progress, 0.0) 
-                  END) * GREATEST(COALESCE(t.duration, 1), 1)
-                ) 
-                / NULLIF(SUM(GREATEST(COALESCE(t.duration, 1), 1)), 0)
-              )
-              FROM project_tasks t 
-              WHERE t."projectId" = p.id
-            ), 
-            p.progress_percentage, 
-            0
-          ) AS "cpmProgress"
+          ) AS ledger_funds_collected
         FROM commercial_projects p 
         ORDER BY p.created_at ASC
       `).catch(() => ({ rows: [] })),
@@ -374,7 +409,9 @@ legacyParcelsRouter.get('/all-data', async (req: Request, res: Response) => {
         description: p.description || '',
         location: p.location || '',
         budget: Number(p.budget || 0),
-        fundsCollected: Number(p.funds_collected || 0),
+        fundsCollected: Number(p.ledger_funds_collected ?? 0),
+        collected: Number(p.ledger_funds_collected ?? 0),
+        amountPaid: Number(p.ledger_funds_collected ?? 0),
         progressPercentage: computedProg,
         cpmProgress: computedProg,
         overallProgress: computedProg,
@@ -401,7 +438,9 @@ legacyParcelsRouter.get('/all-data', async (req: Request, res: Response) => {
     const isTimekeeper = userRole === 'TIMEKEEPER';
     const isEngineer = userRole === 'ENGINEER';
 
-    const projects = isFinanceOrAdmin 
+    const hasPortfolioProjectAccess = isFinanceOrAdmin || hasProjectManagementAccess(user);
+
+    const projects = hasPortfolioProjectAccess 
       ? allProjects 
       : allProjects.filter(p => checkUserProjectAccess(user, p.id));
 
@@ -455,6 +494,11 @@ legacyParcelsRouter.get('/all-data', async (req: Request, res: Response) => {
     const allMappedTasks = dbTasks.map(t => ({
       id: t.id,
       projectId: t.projectId,
+      project_id: t.projectId,
+      parentTaskId: t.parentTaskId || null,
+      type: t.type || 'task',
+      wbsCode: t.wbsCode || '',
+      text: t.text || t.title || '',
       title: t.title || t.text,
       description: t.description || t.text,
       assigneeName: t.assigneeName || t.assignedContractor?.name || '',
@@ -474,7 +518,7 @@ legacyParcelsRouter.get('/all-data', async (req: Request, res: Response) => {
       createdAt: t.createdAt.toISOString(),
     }));
 
-    const tasks = isFinanceOrAdmin
+    const tasks = hasPortfolioProjectAccess
       ? allMappedTasks
       : authorizedProjectIds.size === 0
         ? []

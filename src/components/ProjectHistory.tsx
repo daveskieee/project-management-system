@@ -25,6 +25,7 @@ import {
 } from '../utils/bomProfitSync';
 import { openEnterprisePrintWindow, escapePrintHtml } from '../utils/printEngine';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 
 interface ProjectHistoryProps {
   projects: ProjectProfile[];
@@ -52,6 +53,7 @@ export default function ProjectHistory({
   onUpdateProject,
 }: ProjectHistoryProps) {
   const { isDark } = useTheme();
+  const { confirm: confirmDialog } = useConfirm();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedProject, setSelectedProject] = useState<ProjectProfile | null>(null);
   const [activeDossierTab, setActiveDossierTab] = useState<DossierTab>('OVERVIEW');
@@ -119,7 +121,13 @@ export default function ProjectHistory({
 
   const handleMarkAsCompleted = async (proj: ProjectProfile) => {
     if (!onUpdateProject) return;
-    if (!confirm(`Mark "${proj.name}" as COMPLETED and archive it in Project History?`)) return;
+    const ok = await confirmDialog({
+      title: 'Complete & Archive Project',
+      message: `Mark "${proj.name}" as COMPLETED and archive it in Project History?`,
+      confirmLabel: 'Mark as Completed',
+      variant: 'primary',
+    });
+    if (!ok) return;
     setMarkingId(proj.id);
     try {
       await onUpdateProject(proj.id, {

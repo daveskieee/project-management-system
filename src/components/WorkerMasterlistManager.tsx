@@ -11,6 +11,7 @@ import {
 import { ProjectProfile, SiteWorker, UserSession, Contractor } from '../types';
 import { normalizeRole, UserRole } from '../utils/rbac';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 
 interface WorkerMasterlistManagerProps {
   projects: ProjectProfile[];
@@ -27,6 +28,7 @@ export default function WorkerMasterlistManager({
   onRefreshData
 }: WorkerMasterlistManagerProps) {
   const { isDark } = useTheme();
+  const { toast } = useConfirm();
   // Helper to convert contractors to SiteWorker model
   const mapContractorsToWorkers = (list: Contractor[]): SiteWorker[] => {
     return (list || []).map(c => {
@@ -138,7 +140,7 @@ export default function WorkerMasterlistManager({
   const handleCreateWorker = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!firstName.trim() || !lastName.trim() || parseFloat(dailyRate) <= 0) {
-      alert('Please fill in first name, last name, and daily wage rate.');
+      toast('Please fill in first name, last name, and daily wage rate.', 'warning');
       return;
     }
 
@@ -174,7 +176,7 @@ export default function WorkerMasterlistManager({
       await fetchWorkers();
       if (onRefreshData) onRefreshData();
     } catch (err: any) {
-      alert(err.message || 'Error creating worker');
+      toast(err.message || 'Error creating worker', 'error');
     } finally {
       setIsSaving(false);
     }
@@ -202,7 +204,7 @@ export default function WorkerMasterlistManager({
       setEditingWorker(null);
       await fetchWorkers();
     } catch (err: any) {
-      alert(err.message || 'Failed to update worker');
+      toast(err.message || 'Failed to update worker', 'error');
     }
   };
 
@@ -393,9 +395,14 @@ export default function WorkerMasterlistManager({
                   <td className="py-3 px-4 font-mono text-slate-500">{idx + 1}</td>
                   
                   {/* Name */}
-                  <td className="py-3 px-4">
-                    <div className={`font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>{w.name}</div>
-                    <div className="text-[10px] text-slate-500 font-mono">{w.id}</div>
+                  <td className="py-3 px-4 max-w-[200px] sm:max-w-[240px]">
+                    <div
+                      title={w.name}
+                      className={`font-bold truncate max-w-[200px] sm:max-w-[240px] ${isDark ? 'text-white' : 'text-slate-900'}`}
+                    >
+                      {w.name}
+                    </div>
+                    <div className="text-[10px] text-slate-500 font-mono truncate">{w.id}</div>
                   </td>
 
                   {/* Position */}
@@ -609,9 +616,9 @@ export default function WorkerMasterlistManager({
             </div>
 
             <div className="space-y-3 text-xs">
-              <div>
+              <div className="min-w-0">
                 <span className="text-slate-400">Worker:</span>
-                <div className="font-bold text-white text-sm">{editingWorker.name}</div>
+                <div title={editingWorker.name} className="font-bold text-white text-sm truncate max-w-full">{editingWorker.name}</div>
               </div>
 
               <div>

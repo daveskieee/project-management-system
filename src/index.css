@@ -210,8 +210,8 @@ html.light [class*=" border-slate-200/"] {
   border-color: #CBD5E1 !important;
 }
 
-html.light [class*="divide-slate-800"]:not(.preserve-dark-surface) > :not([hidden]) ~ :not([hidden]),
-html.light [class*="divide-slate-900"]:not(.preserve-dark-surface) > :not([hidden]) ~ :not([hidden]) {
+html.light [class*="divide-slate-800"]:not(.preserve-dark-surface)> :not([hidden])~ :not([hidden]),
+html.light [class*="divide-slate-900"]:not(.preserve-dark-surface)> :not([hidden])~ :not([hidden]) {
   border-color: #CBD5E1 !important;
 }
 
@@ -569,9 +569,11 @@ html.light [class*="border-violet-700"] {
 .virtual-tour-overlay span {
   color: #FFFFFF !important;
 }
+
 .virtual-tour-overlay p.tour-subtitle {
   color: #E2E8F0 !important;
 }
+
 .virtual-tour-overlay p.tour-highlights {
   color: #FCD34D !important;
 }
@@ -822,7 +824,7 @@ html.dark:not(.night) [class^="border-slate-800/"],
 html.dark:not(.night) [class~="border-slate-700"],
 html.dark:not(.night) [class*=" border-slate-700/"],
 html.dark:not(.night) [class^="border-slate-700/"],
-html.dark:not(.night) [class*="divide-slate-800"] > :not([hidden]) ~ :not([hidden]) {
+html.dark:not(.night) [class*="divide-slate-800"]> :not([hidden])~ :not([hidden]) {
   border-color: #2A344E !important;
 }
 
@@ -905,7 +907,7 @@ html.night [class^="border-slate-800/"],
 html.night [class~="border-slate-700"],
 html.night [class*=" border-slate-700/"],
 html.night [class^="border-slate-700/"],
-html.night [class*="divide-slate-800"] > :not([hidden]) ~ :not([hidden]) {
+html.night [class*="divide-slate-800"]> :not([hidden])~ :not([hidden]) {
   border-color: #27272A !important;
 }
 
@@ -1079,29 +1081,26 @@ html:not(.light) .erp-table tr:hover td {
   0% {
     background-position: -200% 0;
   }
+
   100% {
     background-position: 200% 0;
   }
 }
 
 .skeleton-shimmer {
-  background: linear-gradient(
-    90deg,
-    rgba(30, 41, 59, 0.45) 0%,
-    rgba(51, 65, 85, 0.65) 50%,
-    rgba(30, 41, 59, 0.45) 100%
-  );
+  background: linear-gradient(90deg,
+      rgba(30, 41, 59, 0.45) 0%,
+      rgba(51, 65, 85, 0.65) 50%,
+      rgba(30, 41, 59, 0.45) 100%);
   background-size: 200% 100%;
   animation: shimmerSweep 1.8s ease-in-out infinite;
 }
 
 html.light .skeleton-shimmer {
-  background: linear-gradient(
-    90deg,
-    rgba(226, 232, 240, 0.6) 0%,
-    rgba(203, 213, 225, 0.9) 50%,
-    rgba(226, 232, 240, 0.6) 100%
-  );
+  background: linear-gradient(90deg,
+      rgba(226, 232, 240, 0.6) 0%,
+      rgba(203, 213, 225, 0.9) 50%,
+      rgba(226, 232, 240, 0.6) 100%);
   background-size: 200% 100%;
 }
 
@@ -1110,13 +1109,14 @@ html.light .skeleton-shimmer {
    ============================================================================ */
 @media print {
   @page {
-    size: A4 portrait;
-    margin: 12mm;
+    size: landscape;
+    margin: 10mm;
   }
 
   .no-print,
   aside,
   nav,
+  header,
   header button,
   .modal-backdrop {
     display: none !important;
@@ -1130,11 +1130,38 @@ html.light .skeleton-shimmer {
     color: #0f172a !important;
     overflow: visible !important;
     height: auto !important;
+    width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
   }
 
   * {
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+  }
+
+  /* Master Gantt & Timeline landscape print scaling without clipping */
+  .gantt-print-canvas {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: none !important;
+    height: auto !important;
+    max-height: none !important;
+    overflow: visible !important;
+    display: flex !important;
+    flex-direction: row !important;
+    width: 100% !important;
+    zoom: 0.82;
+    page-break-inside: avoid;
+  }
+
+  .gantt-print-canvas>div {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    border-color: #cbd5e1 !important;
+    overflow: visible !important;
+    height: auto !important;
   }
 
   table {

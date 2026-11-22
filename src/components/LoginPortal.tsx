@@ -4,11 +4,11 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
-import { 
+import {
   ShieldAlert, LogIn, Key, Mail, ArrowLeft,
   Sparkles, Layers, CheckSquare, Eye, EyeOff,
   ShieldCheck, Lock, KeyRound,
-  Send, Shield, QrCode
+  Send, Shield, QrCode, X, UserPlus
 } from 'lucide-react';
 import QRCode from 'qrcode';
 import { UserSession } from '../types';
@@ -45,6 +45,85 @@ interface LoginPortalProps {
   onLoginSuccess: (session: UserSession) => void;
   onBackToLanding: () => void;
   initialInviteToken?: string | null;
+}
+
+interface RecentAccountProfile {
+  name: string;
+  email: string;
+  role: string;
+  avatarUrl?: string | null;
+}
+
+const RECENT_ACCOUNTS_STORAGE_KEY = 'recentAccounts';
+
+function loadRecentAccounts(): RecentAccountProfile[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(RECENT_ACCOUNTS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((item): item is RecentAccountProfile => Boolean(item && typeof item.email === 'string' && item.email.trim()))
+      .map((item) => ({
+        name: String(item.name || item.email.split('@')[0]).trim(),
+        email: String(item.email).trim().toLowerCase(),
+        role: String(item.role || 'Staff').trim(),
+        avatarUrl: typeof item.avatarUrl === 'string' && item.avatarUrl.trim() ? item.avatarUrl.trim() : null,
+      }))
+      .slice(0, 6);
+  } catch {
+    return [];
+  }
+}
+
+function saveRecentAccount(session: UserSession): RecentAccountProfile[] {
+  if (typeof window === 'undefined' || !session?.email) return [];
+  const normalizedEmail = String(session.email).trim().toLowerCase();
+  const profile: RecentAccountProfile = {
+    name: String(session.name || normalizedEmail.split('@')[0]).trim(),
+    email: normalizedEmail,
+    role: String(session.role || 'Staff').trim(),
+    avatarUrl: typeof session.avatarUrl === 'string' && session.avatarUrl.trim() ? session.avatarUrl.trim() : null,
+  };
+  const existing = loadRecentAccounts().filter((acc) => acc.email.toLowerCase() !== normalizedEmail);
+  const next = [profile, ...existing].slice(0, 6);
+  try {
+    // Store ONLY non-sensitive profile metadata (never passwords or tokens)
+    localStorage.setItem(RECENT_ACCOUNTS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota errors
+  }
+  return next;
+}
+
+function removeRecentAccount(emailToRemove: string): RecentAccountProfile[] {
+  if (typeof window === 'undefined') return [];
+  const target = String(emailToRemove).trim().toLowerCase();
+  const next = loadRecentAccounts().filter((acc) => acc.email.toLowerCase() !== target);
+  try {
+    localStorage.setItem(RECENT_ACCOUNTS_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // Ignore storage quota errors
+  }
+  return next;
+}
+
+function getProfileInitials(name: string): string {
+  const clean = String(name || '').replace(/jr\.?|sr\.?|iii|ii|iv/gi, '').trim();
+  const parts = clean.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '??';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+function formatRecentRoleLabel(role: string): string {
+  const key = String(role || '').trim().toUpperCase();
+  if (key === 'ADMIN' || key === 'OPERATIONS_MANAGER' || key === 'OM') return 'Operations Manager';
+  if (key === 'FINANCE') return 'Finance Controller';
+  if (key === 'TIMEKEEPER') return 'Site Timekeeper';
+  if (key === 'CLIENT') return 'Client Portal';
+  return 'Project Manager';
 }
 
 // Presentation Demo Accounts Configuration
@@ -198,6 +277,21 @@ export function set2faEnrolled(email: string, enrolled: boolean): void {
 export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPortalProps) {
   const { isDark } = useTheme();
 
+  // Facebook-style Recent Accounts Quick-Switcher (safe non-sensitive metadata only)
+  const [recentAccounts, setRecentAccounts] = useState<RecentAccountProfile[]>(() => loadRecentAccounts());
+  const [showManualForm, setShowManualForm] = useState<boolean>(() => loadRecentAccounts().length === 0);
+  const [selectedRecentAccount, setSelectedRecentAccount] = useState<RecentAccountProfile | null>(null);
+  // Keep inputs readOnly until explicit user interaction so Chrome never silently pre-fills credentials
+  const [isInputUnlocked, setIsInputUnlocked] = useState<boolean>(false);
+
+  const completeLogin = (session: UserSession) => {
+    const updated = saveRecentAccount(session);
+    setRecentAccounts(updated);
+    setPassword('');
+    setIsInputUnlocked(false);
+    onLoginSuccess(session);
+  };
+
   // Active Card View: 'signin' | '2fa' | 'recovery'
   const [view, setView] = useState<'signin' | '2fa' | 'recovery'>('signin');
 
@@ -254,8 +348,8 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
       view === '2fa'
         ? pendingSession?.email || email
         : view === 'recovery'
-        ? recoveryEmail || email
-        : email;
+          ? recoveryEmail || email
+          : email;
     if (!activeEmail) return;
     const uri = buildOtpAuthUri(activeEmail);
     QRCode.toDataURL(uri, {
@@ -267,8 +361,11 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
       .catch(() => setQrCodeDataUrl(''));
   }, [view, pendingSession?.email, recoveryEmail, email]);
 
-  // Immediate mount cleanup: If opened on login with expired flag/param, wipe lingering keys
+  // Immediate mount cleanup: lock inputs against silent autofill & wipe expired session keys
   useEffect(() => {
+    setIsInputUnlocked(false);
+    setEmail('');
+    setPassword('');
     if (typeof window === 'undefined') return;
     const params = new URLSearchParams(window.location.search);
     const hash = window.location.hash.toLowerCase();
@@ -280,6 +377,13 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
       clearExpiredAuthSession();
     }
   }, []);
+
+  // Re-lock inputs whenever returning to the sign-in view
+  useEffect(() => {
+    if (view === 'signin') {
+      setIsInputUnlocked(false);
+    }
+  }, [view]);
 
   // Continuous 30-Second TOTP Authenticator Sync Indicator (never locks or expires)
   useEffect(() => {
@@ -368,7 +472,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
     if (!emailCheck.valid || !STRICT_EMAIL_REGEX.test(emailCheck.cleanEmail)) {
       setErrorMsg(
         emailCheck.error ||
-          'Please enter a valid corporate email address (e.g., name@ldmconstruction.ph).'
+        'Please enter a valid corporate email address (e.g., name@ldmconstruction.ph).'
       );
       return;
     }
@@ -434,9 +538,9 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
       } else if (isRegisteredLocalMatch && registeredDemoAcc) {
         const resolvedRole = (registeredDemoAcc.role.includes('Manager') ? 'Admin'
           : registeredDemoAcc.role.includes('Engineer') ? 'Engineer'
-          : registeredDemoAcc.role.includes('Timekeeper') ? 'Timekeeper'
-          : registeredDemoAcc.role.includes('Finance') ? 'Finance'
-          : 'Engineer') as any;
+            : registeredDemoAcc.role.includes('Timekeeper') ? 'Timekeeper'
+              : registeredDemoAcc.role.includes('Finance') ? 'Finance'
+                : 'Engineer') as any;
 
         validatedSession = {
           id: `usr-${resolvedRole.toLowerCase()}-custom`,
@@ -468,7 +572,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
           actorRole: validatedSession.role,
           details: `Direct sign-in executed for ${cleanEmail}.`,
         });
-        onLoginSuccess(validatedSession);
+        completeLogin(validatedSession);
         return;
       }
 
@@ -513,9 +617,9 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
 
         const resolvedRole = (registeredDemoAcc.role.includes('Manager') ? 'Admin'
           : registeredDemoAcc.role.includes('Engineer') ? 'Engineer'
-          : registeredDemoAcc.role.includes('Timekeeper') ? 'Timekeeper'
-          : registeredDemoAcc.role.includes('Finance') ? 'Finance'
-          : 'Engineer') as any;
+            : registeredDemoAcc.role.includes('Timekeeper') ? 'Timekeeper'
+              : registeredDemoAcc.role.includes('Finance') ? 'Finance'
+                : 'Engineer') as any;
 
         const offlineSession: UserSession = {
           id: `usr-${resolvedRole.toLowerCase()}-offline`,
@@ -529,7 +633,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
         };
 
         if (!is2faEnrolled(cleanEmail) || isWorkstationTrusted(cleanEmail)) {
-          onLoginSuccess(offlineSession);
+          completeLogin(offlineSession);
           return;
         }
 
@@ -645,7 +749,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
         setWorkstationTrusted(pendingSession.email);
       }
       setIsVerifying2fa(false);
-      onLoginSuccess(pendingSession);
+      completeLogin(pendingSession);
       return;
     }
 
@@ -664,7 +768,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
         setWorkstationTrusted(pendingSession.email);
       }
       setIsVerifying2fa(false);
-      onLoginSuccess(pendingSession);
+      completeLogin(pendingSession);
       return;
     }
 
@@ -694,7 +798,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
         }
 
         setIsVerifying2fa(false);
-        onLoginSuccess(pendingSession);
+        completeLogin(pendingSession);
         return;
       }
 
@@ -735,7 +839,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
     }
 
     setIsVerifying2fa(false);
-    onLoginSuccess(pendingSession);
+    completeLogin(pendingSession);
   };
 
   const handleResend2fa = async () => {
@@ -946,9 +1050,9 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
       if (!isOtpValid && !isMasterValid) {
         setErrorMsg(
           data.error ||
-            (useMasterKey
-              ? 'Invalid Admin Master Recovery Key. Please check the master key format (LDM-ADMIN-RECOVERY).'
-              : 'Invalid recovery code. Please check your dispatched code or request a new one.')
+          (useMasterKey
+            ? 'Invalid Admin Master Recovery Key. Please check the master key format (LDM-ADMIN-RECOVERY).'
+            : 'Invalid recovery code. Please check your dispatched code or request a new one.')
         );
         return;
       }
@@ -1091,21 +1195,21 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
 
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4 sm:p-6 lg:p-8 relative overflow-hidden select-none font-sans selection:bg-amber-500 selection:text-slate-950">
-      
+
       {/* Clean ERP Subtle Grid Background */}
       <div className="absolute inset-0 z-0 opacity-20 pointer-events-none">
-        <div className={`absolute inset-0 ${isDark 
+        <div className={`absolute inset-0 ${isDark
           ? 'bg-[linear-gradient(to_right,#1e293b_1px,transparent_1px),linear-gradient(to_bottom,#1e293b_1px,transparent_1px)]'
           : 'bg-[linear-gradient(to_right,rgba(15,23,42,0.035)_1px,transparent_1px),linear-gradient(to_bottom,rgba(15,23,42,0.035)_1px,transparent_1px)]'
-        } bg-[size:36px_36px]`}></div>
+          } bg-[size:36px_36px]`}></div>
       </div>
 
       <div className="w-full max-w-5xl bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden relative z-10 grid grid-cols-1 lg:grid-cols-12 animate-slideUp">
-        
+
         {/* Left Column: Brand Identity & PMS Overview */}
         <div className={`lg:col-span-7 ${isDark ? 'bg-slate-950 text-white' : 'bg-white text-slate-900'} p-6 sm:p-8 lg:p-10 border-b border-slate-800 lg:border-b-0 lg:border-r flex flex-col justify-between`}>
           <div className="space-y-6">
-            
+
             {/* Top Bar */}
             <div className="flex items-center justify-between gap-3">
               <button
@@ -1213,7 +1317,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
         {/* Right Column: Portal Sign-In / 2FA / Passkey Recovery Panel */}
         <div className={`lg:col-span-5 ${isDark ? 'bg-slate-900' : 'bg-[#FFFFFF] border-l border-[#CBD5E1]'} p-6 sm:p-8 flex flex-col justify-between space-y-6`}>
           <div>
-            
+
             {/* Header branding on right card */}
             <div className="text-center py-2">
               <div className="flex justify-center mx-auto">
@@ -1227,9 +1331,8 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
               <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'} font-mono mt-0.5`}>
                 {view === 'signin' && 'Authorized Engineers, Architects & Project Staff'}
                 {view === '2fa' && 'Enter the 6-digit verification code from your Authenticator app (Google / Microsoft Authenticator).'}
-                {view === 'recovery' && `Step ${recoveryStep} of 3: ${
-                  recoveryStep === 1 ? 'Identity Lookup' : recoveryStep === 2 ? 'Security Verification' : 'Reset Password'
-                }`}
+                {view === 'recovery' && `Step ${recoveryStep} of 3: ${recoveryStep === 1 ? 'Identity Lookup' : recoveryStep === 2 ? 'Security Verification' : 'Reset Password'
+                  }`}
               </p>
             </div>
 
@@ -1249,91 +1352,224 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
             )}
 
             {/* ===============================================================
-                VIEW 1: OPERATIONS SIGN-IN FORM (Non-Credential Container to Suppress Chrome Password Popups)
+                VIEW 1: RECENT ACCOUNTS QUICK-SWITCHER + OPERATIONS SIGN-IN FORM
                 =============================================================== */}
-            {view === 'signin' && (
-              <div
-                role="region"
+            {view === 'signin' && recentAccounts.length > 0 && !showManualForm && (
+              <div className="space-y-4 mt-6 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className={`text-[11px] font-bold uppercase tracking-wider font-mono ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Recent Logins
+                  </span>
+                  <span className={`text-[10px] ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                    Click a profile to sign in
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {recentAccounts.map((acc) => (
+                    <div
+                      key={acc.email}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        setIsInputUnlocked(false);
+                        setSelectedRecentAccount(acc);
+                        setEmail(acc.email);
+                        setPassword('');
+                        setErrorMsg('');
+                        setShowManualForm(true);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setIsInputUnlocked(false);
+                          setSelectedRecentAccount(acc);
+                          setEmail(acc.email);
+                          setPassword('');
+                          setErrorMsg('');
+                          setShowManualForm(true);
+                        }
+                      }}
+                      className={`group relative flex items-center gap-3 p-3 rounded-xl border transition-all cursor-pointer text-left ${
+                        isDark
+                          ? 'bg-slate-950/90 border-slate-800 hover:border-amber-500/60 hover:bg-slate-900'
+                          : 'bg-slate-50 border-slate-200 hover:border-amber-500 hover:bg-white shadow-xs'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        aria-label={`Remove ${acc.name} from recent logins`}
+                        title="Remove account from this device"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const next = removeRecentAccount(acc.email);
+                          setRecentAccounts(next);
+                          if (next.length === 0) {
+                            setShowManualForm(true);
+                            setSelectedRecentAccount(null);
+                          }
+                        }}
+                        className={`absolute top-1.5 right-1.5 w-5 h-5 rounded-full flex items-center justify-center transition-colors cursor-pointer ${
+                          isDark
+                            ? 'text-slate-500 hover:text-white hover:bg-slate-800'
+                            : 'text-slate-400 hover:text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+
+                      <div className="w-10 h-10 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center font-black text-xs shrink-0 overflow-hidden">
+                        {acc.avatarUrl ? (
+                          <img src={acc.avatarUrl} alt={acc.name} className="w-full h-full object-cover" />
+                        ) : (
+                          <span>{getProfileInitials(acc.name)}</span>
+                        )}
+                      </div>
+
+                      <div className="min-w-0 flex-1 pr-4">
+                        <div className={`text-xs font-bold truncate ${isDark ? 'text-white group-hover:text-amber-400' : 'text-slate-900 group-hover:text-amber-600'} transition-colors`}>
+                          {acc.name}
+                        </div>
+                        <div className={`text-[10px] truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                          {acc.email}
+                        </div>
+                        <span className="inline-block mt-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 text-amber-400 text-[9px] font-mono font-bold">
+                          {formatRecentRoleLabel(acc.role)}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsInputUnlocked(false);
+                    setSelectedRecentAccount(null);
+                    setEmail('');
+                    setPassword('');
+                    setErrorMsg('');
+                    setShowManualForm(true);
+                  }}
+                  className={`w-full py-2.5 rounded-xl border font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer ${
+                    isDark
+                      ? 'bg-slate-900 hover:bg-slate-800 border-slate-700 text-slate-200'
+                      : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-700'
+                  }`}
+                >
+                  <UserPlus className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Use another account</span>
+                </button>
+              </div>
+            )}
+
+            {view === 'signin' && (recentAccounts.length === 0 || showManualForm) && (
+              <form
+                onSubmit={handleLoginSubmit}
+                method="post"
                 aria-label="Operations Sign-In"
-                data-form-type="other"
                 className="space-y-4 mt-6 text-xs"
               >
+                {recentAccounts.length > 0 && (
+                  <div className={`flex items-center justify-between gap-2 p-2.5 rounded-xl border ${
+                    isDark ? 'bg-slate-950/80 border-slate-800' : 'bg-slate-50 border-slate-200'
+                  }`}>
+                    {selectedRecentAccount ? (
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="w-7 h-7 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center font-black text-[10px] shrink-0 overflow-hidden">
+                          {selectedRecentAccount.avatarUrl ? (
+                            <img src={selectedRecentAccount.avatarUrl} alt={selectedRecentAccount.name} className="w-full h-full object-cover" />
+                          ) : (
+                            <span>{getProfileInitials(selectedRecentAccount.name)}</span>
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <div className={`text-[11px] font-bold truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                            {selectedRecentAccount.name}
+                          </div>
+                          <div className="text-[9px] font-mono text-amber-400 truncate">
+                            {formatRecentRoleLabel(selectedRecentAccount.role)}
+                          </div>
+                        </div>
+                      </div>
+                    ) : (
+                      <span className={`text-[11px] font-semibold ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                        Sign in with another account
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsInputUnlocked(false);
+                        setShowManualForm(false);
+                        setSelectedRecentAccount(null);
+                        setEmail('');
+                        setPassword('');
+                        setErrorMsg('');
+                      }}
+                      className="text-[11px] font-bold text-amber-500 hover:text-amber-400 hover:underline shrink-0 cursor-pointer"
+                    >
+                      Switch account
+                    </button>
+                  </div>
+                )}
                 <div>
-                  <label htmlFor="ldm_operator_ref" className={`block ${isDark ? 'text-slate-300' : 'text-slate-700'} font-semibold mb-1.5`}>
+                  <label htmlFor="login-username" className={`block ${isDark ? 'text-slate-300' : 'text-slate-700'} font-semibold mb-1.5`}>
                     Account Email ID
                   </label>
                   <div className="relative">
                     <Mail className="absolute left-3.5 top-3 w-4 h-4 text-slate-500" />
                     <input
                       ref={emailInputRef}
-                      id="ldm_operator_ref"
-                      name="ldm_operator_ref"
-                      type="text"
+                      id="login-username"
+                      name="username"
+                      type="email"
                       inputMode="email"
-                      autoComplete="off"
+                      autoComplete="username"
                       autoCorrect="off"
                       autoCapitalize="none"
                       spellCheck={false}
-                      data-form-type="other"
-                      data-lpignore="true"
-                      data-1p-ignore="true"
+                      readOnly={!isInputUnlocked}
+                      onPointerDown={() => { if (!isInputUnlocked) setIsInputUnlocked(true); }}
+                      onFocus={() => { if (!isInputUnlocked) setIsInputUnlocked(true); }}
                       disabled={lockoutSeconds > 0}
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          handleLoginSubmit(e);
-                        }
-                      }}
                       placeholder="e.g., engineer@ldmconstruction.ph"
-                      className={`w-full ${
-                        isDark
+                      className={`w-full ${isDark
                           ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                           : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                      } border rounded-xl pl-10 pr-4 py-2.5 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 disabled:opacity-50`}
+                        } border rounded-xl pl-10 pr-4 py-2.5 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 disabled:opacity-50`}
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label htmlFor="ldm_access_token" className={`block ${isDark ? 'text-slate-300' : 'text-slate-700'} font-semibold mb-1.5`}>
+                  <label htmlFor="login-password" className={`block ${isDark ? 'text-slate-300' : 'text-slate-700'} font-semibold mb-1.5`}>
                     Password
                   </label>
                   <div className="relative">
                     <Key className="absolute left-3.5 top-3 w-4 h-4 text-slate-500" />
                     <input
                       ref={passwordInputRef}
-                      id="ldm_access_token"
-                      name="ldm_access_token"
-                      type="text"
-                      autoComplete="off"
+                      id="login-password"
+                      name="password"
+                      type={showPassword ? 'text' : 'password'}
+                      autoComplete="current-password"
                       autoCorrect="off"
                       autoCapitalize="none"
                       spellCheck={false}
-                      data-form-type="other"
-                      data-lpignore="true"
-                      data-1p-ignore="true"
+                      readOnly={!isInputUnlocked}
+                      onPointerDown={() => { if (!isInputUnlocked) setIsInputUnlocked(true); }}
+                      onFocus={() => { if (!isInputUnlocked) setIsInputUnlocked(true); }}
                       disabled={lockoutSeconds > 0}
-                      style={
-                        {
-                          WebkitTextSecurity: showPassword ? 'none' : 'disc',
-                        } as React.CSSProperties
-                      }
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          handleLoginSubmit(e);
-                        }
-                      }}
                       placeholder="Enter your password"
-                      className={`w-full ${
-                        isDark
+                      className={`w-full ${isDark
                           ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                           : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                      } border rounded-xl pl-10 pr-10 py-2.5 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 disabled:opacity-50`}
+                        } border rounded-xl pl-10 pr-10 py-2.5 focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 disabled:opacity-50`}
                     />
                     <button
                       type="button"
@@ -1368,8 +1604,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                 </div>
 
                 <button
-                  type="button"
-                  onClick={(e) => handleLoginSubmit(e)}
+                  type="submit"
                   disabled={isSubmitting || lockoutSeconds > 0}
                   className="w-full py-2.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black rounded-lg shadow-xs transition-colors cursor-pointer flex items-center justify-center gap-2 mt-4 text-xs disabled:opacity-50"
                 >
@@ -1390,7 +1625,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                     </>
                   )}
                 </button>
-              </div>
+              </form>
             )}
 
             {/* ===============================================================
@@ -1425,11 +1660,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           value={digit}
                           onChange={(e) => handleDigitChange(idx, e.target.value)}
                           onKeyDown={(e) => handleDigitKeyDown(idx, e)}
-                          className={`w-10 h-12 sm:w-11 sm:h-13 text-center text-xl font-mono font-black rounded-xl border ${
-                            isDark
+                          className={`w-10 h-12 sm:w-11 sm:h-13 text-center text-xl font-mono font-black rounded-xl border ${isDark
                               ? 'bg-slate-950 border-slate-700 text-white focus:border-amber-500'
                               : 'bg-white border-[#CBD5E1] text-[#0F172A] focus:border-amber-500 shadow-2xs'
-                          } focus:outline-none focus:ring-2 focus:ring-amber-500/20 transition-all`}
+                            } focus:outline-none focus:ring-2 focus:ring-amber-500/20 transition-all`}
                         />
                       ))}
                     </div>
@@ -1453,11 +1687,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                         value={backupCodeInput}
                         onChange={(e) => setBackupCodeInput(e.target.value)}
                         placeholder="LDM-XXXX-XXXX"
-                        className={`w-full ${
-                          isDark
+                        className={`w-full ${isDark
                             ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                             : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                        } border rounded-xl pl-10 pr-4 py-2.5 font-mono uppercase focus:outline-none focus:border-amber-500`}
+                          } border rounded-xl pl-10 pr-4 py-2.5 font-mono uppercase focus:outline-none focus:border-amber-500`}
                       />
                     </div>
                     <p className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
@@ -1525,13 +1758,11 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                   {[1, 2, 3].map((step) => (
                     <div key={step} className="flex-1 flex flex-col items-center gap-1">
                       <div
-                        className={`w-full h-1.5 rounded-full transition-colors ${
-                          recoveryStep >= step ? 'bg-amber-500' : isDark ? 'bg-slate-800' : 'bg-slate-200'
-                        }`}
+                        className={`w-full h-1.5 rounded-full transition-colors ${recoveryStep >= step ? 'bg-amber-500' : isDark ? 'bg-slate-800' : 'bg-slate-200'
+                          }`}
                       />
-                      <span className={`text-[9px] font-mono font-bold ${
-                        recoveryStep === step ? 'text-amber-500' : isDark ? 'text-slate-500' : 'text-slate-400'
-                      }`}>
+                      <span className={`text-[9px] font-mono font-bold ${recoveryStep === step ? 'text-amber-500' : isDark ? 'text-slate-500' : 'text-slate-400'
+                        }`}>
                         {step === 1 ? '1. Identity' : step === 2 ? '2. Verify' : '3. Reset'}
                       </span>
                     </div>
@@ -1567,11 +1798,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           value={recoveryEmail}
                           onChange={(e) => setRecoveryEmail(e.target.value)}
                           placeholder="e.g. om@ldmconstruction.ph"
-                          className={`w-full ${
-                            isDark
+                          className={`w-full ${isDark
                               ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                               : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                          } border rounded-xl pl-10 pr-4 py-2.5 focus:outline-none focus:border-amber-500`}
+                            } border rounded-xl pl-10 pr-4 py-2.5 focus:outline-none focus:border-amber-500`}
                         />
                       </div>
                     </div>
@@ -1591,11 +1821,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           value={securityPin}
                           onChange={(e) => setSecurityPin(e.target.value)}
                           placeholder="e.g. 0001, 0004 or 2026"
-                          className={`w-full ${
-                            isDark
+                          className={`w-full ${isDark
                               ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                               : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                          } border rounded-xl pl-10 pr-4 py-2.5 font-mono focus:outline-none focus:border-amber-500`}
+                            } border rounded-xl pl-10 pr-4 py-2.5 font-mono focus:outline-none focus:border-amber-500`}
                         />
                       </div>
                       <p className={`text-[10px] ${isDark ? 'text-slate-500' : 'text-slate-500'} mt-1`}>
@@ -1650,11 +1879,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                               value={digit}
                               onChange={(e) => handleRecoveryDigitChange(idx, e.target.value)}
                               onKeyDown={(e) => handleRecoveryDigitKeyDown(idx, e)}
-                              className={`w-10 h-12 sm:w-11 sm:h-13 text-center text-xl font-mono font-black rounded-xl border ${
-                                isDark
+                              className={`w-10 h-12 sm:w-11 sm:h-13 text-center text-xl font-mono font-black rounded-xl border ${isDark
                                   ? 'bg-slate-950 border-slate-700 text-white focus:border-amber-500'
                                   : 'bg-white border-[#CBD5E1] text-[#0F172A] focus:border-amber-500 shadow-2xs'
-                              } focus:outline-none focus:ring-2 focus:ring-amber-500/20`}
+                                } focus:outline-none focus:ring-2 focus:ring-amber-500/20`}
                             />
                           ))}
                         </div>
@@ -1671,11 +1899,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                             type="button"
                             disabled={recoveryTimerSec > 0}
                             onClick={handleResendRecoveryOtp}
-                            className={`font-bold transition-colors cursor-pointer bg-transparent border-0 p-0 ${
-                              recoveryTimerSec > 0
+                            className={`font-bold transition-colors cursor-pointer bg-transparent border-0 p-0 ${recoveryTimerSec > 0
                                 ? 'text-slate-600 cursor-not-allowed'
                                 : 'text-amber-500 hover:text-amber-400 underline'
-                            }`}
+                              }`}
                           >
                             [Resend Code]
                           </button>
@@ -1693,11 +1920,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                             value={recoveryMasterKey}
                             onChange={(e) => setRecoveryMasterKey(e.target.value)}
                             placeholder="Enter master key (LDM-ADMIN-RECOVERY)"
-                            className={`w-full ${
-                              isDark
+                            className={`w-full ${isDark
                                 ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                                 : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                            } border rounded-xl pl-10 pr-4 py-2.5 font-mono uppercase focus:outline-none focus:border-amber-500`}
+                              } border rounded-xl pl-10 pr-4 py-2.5 font-mono uppercase focus:outline-none focus:border-amber-500`}
                           />
                         </div>
                         <p className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
@@ -1767,11 +1993,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           value={newPasskey}
                           onChange={(e) => setNewPasskey(e.target.value)}
                           placeholder="Min 8 characters (letters & numbers)"
-                          className={`w-full ${
-                            isDark
+                          className={`w-full ${isDark
                               ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                               : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                          } border rounded-xl pl-10 pr-10 py-2.5 focus:outline-none focus:border-amber-500`}
+                            } border rounded-xl pl-10 pr-10 py-2.5 focus:outline-none focus:border-amber-500`}
                         />
                         <button
                           type="button"
@@ -1788,9 +2013,8 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           {[1, 2, 3, 4].map((bar) => (
                             <div
                               key={bar}
-                              className={`h-full rounded-full transition-colors ${
-                                passStrength.score >= bar ? passStrength.color : isDark ? 'bg-slate-800' : 'bg-slate-200'
-                              }`}
+                              className={`h-full rounded-full transition-colors ${passStrength.score >= bar ? passStrength.color : isDark ? 'bg-slate-800' : 'bg-slate-200'
+                                }`}
                             />
                           ))}
                         </div>
@@ -1826,11 +2050,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           value={confirmPasskey}
                           onChange={(e) => setConfirmPasskey(e.target.value)}
                           placeholder="Re-type new password"
-                          className={`w-full ${
-                            isDark
+                          className={`w-full ${isDark
                               ? 'bg-slate-950 border-slate-700 text-white placeholder-slate-500'
                               : 'bg-[#F8FAFC] border-[#CBD5E1] text-[#0F172A] placeholder-slate-400'
-                          } border rounded-xl pl-10 pr-4 py-2.5 focus:outline-none focus:border-amber-500`}
+                            } border rounded-xl pl-10 pr-4 py-2.5 focus:outline-none focus:border-amber-500`}
                         />
                       </div>
                     </div>

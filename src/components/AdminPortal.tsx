@@ -66,9 +66,11 @@ import SubcontractorBillingsDisbursements from './SubcontractorBillingsDisbursem
 import SubcontractorRollCallAudits from './SubcontractorRollCallAudits';
 import AuditTrailQaLogs from './AuditTrailQaLogs';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 import { ThemeToggle } from './ThemeToggle';
 import Sidebar from './Sidebar';
 import BudgetsExpensesModal from './BudgetsExpensesModal';
+import RoleDashboard from './RoleDashboard';
 import {
   EstimatorConfig,
   SpaceCategoryKey,
@@ -500,17 +502,11 @@ export default function AdminPortal({
 
   // Interface Theme Hook (Light / Dark Mode)
   const { theme, resolvedTheme, isDark, setTheme } = useTheme();
+  const { confirm: confirmDialog, toast } = useConfirm();
   const isLight = !isDark;
 
-  // Scoped datasets for Project Manager
-  const pmAssignedProjects = projects.filter(p => {
-    if (!isProjectManager) return true;
-    if (session?.id && p.assignedProjectManagerId === session.id) return true;
-    if (session?.name && p.assignedProjectManagerName && p.assignedProjectManagerName.toLowerCase().includes(session.name.toLowerCase())) return true;
-    if (p.name === '2-Storey Residential House' || p.name === '2-storey residential unit' || p.name === 'LDM Prime Residential Build' || p.name.includes('Proyecto Bahia')) return true;
-    return false;
-  });
-  const pmScopedProjects = pmAssignedProjects.length > 0 ? pmAssignedProjects : projects;
+  // Scoped datasets for Project Manager — always keep all active projects visible across Hub, Gantt & History
+  const pmScopedProjects = projects;
   const pmProjectNames = new Set(pmScopedProjects.map(p => p.name.toLowerCase()));
 
   const pmPunchListDefects = punchListDefects.filter(d => {
@@ -594,21 +590,40 @@ export default function AdminPortal({
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // Staff Account Management State
+  // Operations & System Settings Sub-Tab & Staff Account Management State
+  type StaffAccountRoleOption = 'Admin' | 'ProjectManager' | 'Finance' | 'Timekeeper';
+  const [opsSettingsSubTab, setOpsSettingsSubTab] = useState<'general' | 'estimator' | 'reviews' | 'staff'>('general');
+  const canCreateAdminStaff = Boolean(
+    isAdmin &&
+    normalizeRole(session?.role) === UserRole.OM &&
+    String(session?.role || '').trim().toUpperCase() === 'ADMIN'
+  );
   const [staffList, setStaffList] = useState<any[]>([]);
   const [staffLoading, setStaffLoading] = useState(false);
+  const [staffSearchQuery, setStaffSearchQuery] = useState('');
   const [showAddStaff, setShowAddStaff] = useState(false);
   const [newStaffEmail, setNewStaffEmail] = useState('');
   const [newStaffName, setNewStaffName] = useState('');
   const [newStaffPassword, setNewStaffPassword] = useState('');
-  const [newStaffRole, setNewStaffRole] = useState<'Admin' | 'ProjectManager'>('ProjectManager');
+  const [newStaffRole, setNewStaffRole] = useState<StaffAccountRoleOption>('ProjectManager');
   const [staffError, setStaffError] = useState('');
   const [staffSaving, setStaffSaving] = useState(false);
+  const [editingStaffId, setEditingStaffId] = useState<string | null>(null);
+  const [editingStaffRole, setEditingStaffRole] = useState<StaffAccountRoleOption>('ProjectManager');
+  const [editingStaffSaving, setEditingStaffSaving] = useState(false);
+
+  const normalizeStaffRoleToOption = (rawRole: string | undefined): StaffAccountRoleOption => {
+    const key = String(rawRole || '').trim().toUpperCase();
+    if (key === 'ADMIN') return 'Admin';
+    if (key === 'FINANCE') return 'Finance';
+    if (key === 'TIMEKEEPER') return 'Timekeeper';
+    return 'ProjectManager';
+  };
 
   const fetchStaff = async () => {
     setStaffLoading(true);
     try {
-      const res = await fetch('/api/staff');
+      const res = await secureFetch('/api/staff');
       if (res.ok) setStaffList(await res.json());
     } catch { }
     setStaffLoading(false);
@@ -617,9 +632,13 @@ export default function AdminPortal({
   const handleAddStaff = async (e: React.FormEvent) => {
     e.preventDefault();
     setStaffError('');
+    if (newStaffRole === 'Admin' && !canCreateAdminStaff) {
+      setStaffError('Only authorized top-level Administrators can create Admin (Full Access) accounts.');
+      return;
+    }
     setStaffSaving(true);
     try {
-      const res = await fetch('/api/staff', {
+      const res = await secureFetch('/api/staff', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: newStaffEmail, name: newStaffName, password: newStaffPassword, role: newStaffRole }),
@@ -628,7 +647,7 @@ export default function AdminPortal({
       if (!res.ok) { setStaffError(data.error || 'Failed to create account'); }
       else {
         setStaffList(prev => [...prev, data]);
-        setNewStaffEmail(''); setNewStaffName(''); setNewStaffPassword('');
+        setNewStaffEmail(''); setNewStaffName(''); setNewStaffPassword(''); setNewStaffRole('ProjectManager');
         setShowAddStaff(false);
         setSystemNotice('Staff account created successfully.');
       }
@@ -636,13 +655,50 @@ export default function AdminPortal({
     setStaffSaving(false);
   };
 
-  const handleDeleteStaff = async (id: string, name: string) => {
-    if (!window.confirm(`Remove staff account for "${name}"? They will no longer be able to log in.`)) return;
+  const handleUpdateStaffRole = async (id: string) => {
+    if (editingStaffRole === 'Admin' && !canCreateAdminStaff) {
+      setSystemNotice('Only authorized top-level Administrators can assign Admin (Full Access) privileges.');
+      return;
+    }
+    setEditingStaffSaving(true);
     try {
-      const res = await fetch(`/api/staff/${id}`, { method: 'DELETE' });
+      const res = await secureFetch(`/api/staff/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: editingStaffRole }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSystemNotice(data.error || 'Failed to update staff role.');
+      } else {
+        const updatedUser = data.user || { role: editingStaffRole };
+        setStaffList(prev => prev.map(s => (s.id === id ? { ...s, role: updatedUser.role } : s)));
+        setEditingStaffId(null);
+        setSystemNotice('Staff access role updated successfully.');
+      }
+    } catch {
+      setSystemNotice('Network error while updating staff role.');
+    }
+    setEditingStaffSaving(false);
+  };
+
+  const handleDeleteStaff = async (id: string, name: string) => {
+    const ok = await confirmDialog({
+      title: 'Remove Staff Account',
+      message: `Remove staff account for "${name}"? They will no longer be able to log in.`,
+      confirmLabel: 'Remove Account',
+      variant: 'danger',
+    });
+    if (!ok) return;
+    try {
+      const res = await secureFetch(`/api/staff/${id}`, { method: 'DELETE' });
       const data = await res.json();
       if (!res.ok) { setSystemNotice(data.error || 'Failed to remove account.'); }
-      else { setStaffList(prev => prev.filter(s => s.id !== id)); setSystemNotice('Staff account removed.'); }
+      else {
+        if (editingStaffId === id) setEditingStaffId(null);
+        setStaffList(prev => prev.filter(s => s.id !== id));
+        setSystemNotice('Staff account removed.');
+      }
     } catch { setSystemNotice('Network error.'); }
   };
 
@@ -1156,7 +1212,7 @@ export default function AdminPortal({
         notify('✅ Account profile & settings successfully saved.');
       } else {
         const errData = await res.json().catch(() => ({}));
-        notify(`❌ Failed to save to database: ${errData.error || 'Server error'}`);
+        notify(`❌ Unable to save changes: ${errData.error || 'Server error'}`);
       }
     } catch (err) {
       console.error('Save settings error:', err);
@@ -1171,7 +1227,7 @@ export default function AdminPortal({
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      alert('Please select a valid image file (JPG, PNG, WebP).');
+      toast('Please select a valid image file (JPG, PNG, WebP).', 'warning');
       return;
     }
 
@@ -1276,7 +1332,7 @@ export default function AdminPortal({
       });
       const data = await res.json();
       if (!res.ok) {
-        const errMsg = data.error || 'Failed to update email address in database.';
+        const errMsg = data.error || 'Unable to update email address. Please try again.';
         setEmailChangeError(errMsg);
         notify('❌ ' + errMsg);
       } else {
@@ -1340,7 +1396,7 @@ export default function AdminPortal({
       });
       const data = await res.json();
       if (!res.ok) {
-        const errMsg = data.error || 'Failed to update passkey in database.';
+        const errMsg = data.error || 'Unable to update password. Please try again.';
         setPassError(errMsg);
         notify('❌ ' + errMsg);
         return;
@@ -1352,7 +1408,7 @@ export default function AdminPortal({
       setNewPass('');
       setConfirmPass('');
     } catch (err) {
-      const errMsg = 'Error connecting to database to update passkey. Please ensure the server is active.';
+      const errMsg = 'Connection error while updating password. Please try again.';
       setPassError(errMsg);
       notify('❌ ' + errMsg);
     } finally {
@@ -1489,8 +1545,14 @@ export default function AdminPortal({
     }
   };
 
-  const handleConfirmDeleteClient = (clientId: string, clientName: string) => {
-    if (window.confirm(`Are you sure you want to permanently delete the buyer account for "${clientName}" (${clientId})?\n\nAny reserved or assigned lot will automatically be released back to AVAILABLE.`)) {
+  const handleConfirmDeleteClient = async (clientId: string, clientName: string) => {
+    const ok = await confirmDialog({
+      title: 'Delete Buyer Account',
+      message: `Are you sure you want to permanently delete the buyer account for "${clientName}" (${clientId})?\n\nAny reserved or assigned lot will automatically be released back to AVAILABLE.`,
+      confirmLabel: 'Delete Account',
+      variant: 'danger',
+    });
+    if (ok) {
       if (onDeleteClient) {
         onDeleteClient(clientId);
         notify(`Buyer account "${clientName}" deleted successfully.`);
@@ -1501,7 +1563,7 @@ export default function AdminPortal({
   const handleRegisterClientSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!cliName.trim() || !cliEmail.trim()) {
-      alert('Buyer Name and Email are mandatory.');
+      toast('Buyer Name and Email are mandatory.', 'warning');
       return;
     }
 
@@ -1747,7 +1809,7 @@ export default function AdminPortal({
     setContManpower(1);
     setContSite('Unassigned');
     const label = isOffice ? 'Corporate Office Staff' : (isFieldSuper ? 'Field Engineer/Supervisor' : (isTradeCrew ? 'In-House Worker' : 'Outsourced Contractor'));
-    notify(`✅ ${label} "${newContractor.name}" registered and saved to database!`);
+    notify(`✅ ${label} "${newContractor.name}" registered and saved.`);
   };
 
   // AI Workforce Dispatch Assistant States
@@ -2692,1003 +2754,39 @@ export default function AdminPortal({
               )}
 
               {/* ------------------------------------------------------------- */}
-              {/* TAB 1: MINIMALIST CONSTRUCTION ERP DASHBOARD */}
+              {/* TAB 1: ROLE-SPECIFIC ENTERPRISE DASHBOARD */}
               {/* ------------------------------------------------------------- */}
               {!isTimekeeper && (visitedTabs.has('dashboard') || activeTab === 'dashboard') && (
-                <div className={`space-y-6 ${activeTab === 'dashboard' ? 'block' : 'hidden'}`}>
-                  {(() => {
-                    // Scoped or Global datasets depending on role
-                    const currentProjects = isProjectManager ? pmScopedProjects : projects;
-                    const currentContractors = isProjectManager ? pmContractors : contractors;
-                    const currentDefects = isProjectManager ? pmPunchListDefects : punchListDefects;
-                    const currentTasks = isProjectManager ? tasks.filter(t => currentProjects.some(p => p.id === t.projectId)) : tasks;
-
-                    // Step 3: Guard the zero-state flash during initial data load (never flash once loaded)
-                    const hasLoadedData = hasLoadedOnceRef.current || (projects && projects.length > 0) || (tasks && tasks.length > 0) || (contractors && contractors.length > 0);
-                    const isDashboardLoading = Boolean(isInitialLoading && !hasLoadedOnceRef.current && !hasLoadedData);
-
-                    // 5 Compact Summary Metrics (100% Real PostgreSQL Data)
-                    const activeProjectsCount = currentProjects.length;
-                    const inProgressProjects = currentProjects.filter(p => p.status === 'IN_PROGRESS' || !p.status).length;
-                    const completedProjects = currentProjects.filter(p => p.status === 'COMPLETED' || p.status === 'HANDED_OVER').length;
-
-                    const totalWorkforceHeadcount = currentContractors.reduce((sum, c) => sum + (c.activeManpower || 1), 0);
-                    const activeTradeTeams = currentContractors.length;
-
-                    const pendingTasksCount = currentTasks.filter(t => t.status !== 'COMPLETED').length;
-                    const openDefectsCount = currentDefects.filter(d => d.status !== 'CLOSED').length;
-                    const totalPendingItems = pendingTasksCount + openDefectsCount;
-
-                    const totalBudgetValue = currentProjects.reduce((sum, p) => sum + (Number(p.budget) || 0), 0);
-
-                    // Normalized project matching helper for linking payroll runs & subcontractor payables
-                    const isProjectMatch = (recordKey: string | undefined | null, project: { id: string; name?: string }) => {
-                      if (!recordKey) return false;
-                      const k = String(recordKey).trim().toLowerCase();
-                      const pid = (project.id || '').trim().toLowerCase();
-                      const pname = (project.name || '').trim().toLowerCase();
-
-                      if (k === pid || k === pname) return true;
-
-                      const kDigits = k.replace(/[^0-9]/g, '');
-                      const pDigits = pid.replace(/[^0-9]/g, '');
-                      if (kDigits && pDigits && kDigits === pDigits) return true;
-
-                      if (pname && (pname.includes(k) || k.includes(pname))) return true;
-                      return false;
-                    };
-
-                    // Live Company-wide In-House Labor Disbursements (Finalized or Paid runs)
-                    const companyLaborDisbursed = livePayrollRuns
-                      .filter(r => {
-                        const st = String(r.status || '').toUpperCase().trim();
-                        return st === 'LOCKED & ARCHIVED' || st === 'FINALIZED' || st === 'ARCHIVED' || st === 'PAID' || st === 'DISBURSED';
-                      })
-                      .reduce((sum, r) => sum + Number(r.totalNet ?? r.total_net ?? r.totalGross ?? r.total_gross ?? 0), 0) ||
-                      currentProjects.reduce((sum, p) => sum + Number(p.paidLaborExpenses || 0), 0);
-
-                    const companyLaborPending = livePayrollRuns
-                      .filter(r => {
-                        const st = String(r.status || '').toUpperCase().trim();
-                        return st === 'APPROVED' || st === 'PENDING' || st === 'DRAFT';
-                      })
-                      .reduce((sum, r) => sum + Number(r.totalNet ?? r.total_net ?? r.totalGross ?? r.total_gross ?? 0), 0);
-
-                    // Live Company-wide Subcontractor AP Disbursements (Paid or Disbursed)
-                    const companySubconDisbursed = liveSubconPayables
-                      .filter(sp => {
-                        const st = String(sp.status || '').toUpperCase().trim();
-                        return st === 'PAID / DISBURSED' || st === 'DISBURSED' || st === 'PAID';
-                      })
-                      .reduce((sum, sp) => sum + Number(sp.disbursedAmount ?? sp.disbursed_amount ?? sp.approvedAmount ?? sp.approved_amount ?? sp.billedAmount ?? sp.billed_amount ?? 0), 0) ||
-                      currentProjects.reduce((sum, p) => sum + Number(p.paidSubcontractorExpenses || 0), 0);
-
-                    const companySubconPending = liveSubconPayables
-                      .filter(sp => {
-                        const st = String(sp.status || '').toUpperCase().trim();
-                        return st === 'APPROVED' || st === 'PENDING' || st === 'PENDING_AUDIT';
-                      })
-                      .reduce((sum, sp) => sum + Number(sp.approvedAmount ?? sp.approved_amount ?? sp.billedAmount ?? sp.billed_amount ?? 0), 0);
-
-                    // Total Company Disbursed Expenses (Sum of all finalized payroll runs plus all paid subcontractor disbursements)
-                    const totalCompanyDisbursed = companyLaborDisbursed + companySubconDisbursed;
-                    const totalCompanyPending = companyLaborPending + companySubconPending;
-
-                    // Chart 1: Project Progress
-                    const progressChartData = currentProjects.slice(0, 7).map(p => ({
-                      name: p.name.split(' ')[0] || 'Site',
-                      fullName: p.name,
-                      progress: Math.min(100, Math.max(0, Math.round(Number(p.progressPercentage) || 0))),
-                      status: p.status || 'IN_PROGRESS'
-                    }));
-
-                    const formatCompactPeso = (amount: number) => {
-                      const safeAmount = Number.isFinite(amount) ? amount : 0;
-                      if (Math.abs(safeAmount) >= 1_000_000) {
-                        return `₱${(safeAmount / 1_000_000).toFixed(2)}M`;
+                <div className={activeTab === 'dashboard' ? 'block' : 'hidden'}>
+                  <RoleDashboard
+                    session={session}
+                    rawRole={rawRole}
+                    projects={projects}
+                    tasks={tasks}
+                    clients={clients}
+                    contractors={contractors}
+                    siteLogs={siteLogs}
+                    documents={documents}
+                    quotations={quotations}
+                    clientReviews={sysClientReviews}
+                    payrollRuns={livePayrollRuns}
+                    subconPayables={liveSubconPayables}
+                    auditLogs={auditLogs}
+                    isLoading={Boolean(isInitialLoading && !hasLoadedOnceRef.current)}
+                    onNavigateTab={(tabId) => {
+                      if (canAccessModule(currentRole, tabId)) {
+                        setActiveTab(tabId);
                       }
-                      if (Math.abs(safeAmount) >= 1_000) {
-                        return `₱${(safeAmount / 1_000).toFixed(2)}K`;
-                      }
-                      return `₱${safeAmount.toFixed(2)}`;
-                    };
-
-                    // Chart 2: Budget vs Disbursed Utilization per Project (Strictly Ledger-Disbursed Funds)
-                    const budgetCostData = currentProjects.map(p => {
-                      const matchedLaborFromRuns = livePayrollRuns
-                        .filter(r => {
-                          const st = String(r.status || '').toUpperCase().trim();
-                          return (st === 'LOCKED & ARCHIVED' || st === 'FINALIZED' || st === 'ARCHIVED' || st === 'PAID' || st === 'DISBURSED') &&
-                            isProjectMatch(r.projectId || r.project_id || r.projectName || r.project_name, p);
-                        })
-                        .reduce((sum, r) => sum + Number(r.totalNet ?? r.total_net ?? r.totalGross ?? r.total_gross ?? 0), 0);
-
-                      const matchedSubconFromPayables = liveSubconPayables
-                        .filter(sp => {
-                          const st = String(sp.status || '').toUpperCase().trim();
-                          return (st === 'PAID / DISBURSED' || st === 'DISBURSED' || st === 'PAID') &&
-                            isProjectMatch(sp.projectSite || sp.project_site, p);
-                        })
-                        .reduce((sum, sp) => sum + Number(sp.disbursedAmount ?? sp.disbursed_amount ?? sp.approvedAmount ?? sp.approved_amount ?? sp.billedAmount ?? sp.billed_amount ?? 0), 0);
-
-                      const payrollDisbursed = Number(p.paidLaborExpenses || matchedLaborFromRuns || 0);
-                      const subconDisbursed = Number(p.paidSubcontractorExpenses || matchedSubconFromPayables || 0);
-                      // Disbursed spend is SOLELY the sum of actual released funds (paid payroll + paid subcontractor AP)
-                      const rawDisbursed = Number(p.paidExpenses ?? (payrollDisbursed + subconDisbursed));
-
-                      const rawBudget = Number(p.budget) || 0;
-                      const percent = rawBudget > 0 ? (rawDisbursed / rawBudget) * 100 : 0;
-                      const remaining = Math.max(0, rawBudget - rawDisbursed);
-                      const physicalProgress = Math.min(100, Math.max(0, Math.round(Number(p.progressPercentage) || 0)));
-
-                      return {
-                        id: p.id,
-                        fullName: p.name,
-                        budget: rawBudget,
-                        disbursed: rawDisbursed,
-                        laborDisbursed: payrollDisbursed,
-                        subconDisbursed: subconDisbursed,
-                        remaining,
-                        percent,
-                        physicalProgress
-                      };
-                    });
-
-                    // Portfolio Aggregate Utilization across Active Sites
-                    // Uses company-wide total disbursements (matching the ₱162,805.88 shown in top DISBURSED EXPENSES KPI card)
-                    const totalPortfolioBudget = currentProjects.reduce((sum, p) => sum + (Number(p.budget) || 0), 0);
-                    const totalPortfolioDisbursed = totalCompanyDisbursed;
-                    const portfolioBurnRate = totalPortfolioBudget > 0 ? (totalPortfolioDisbursed / totalPortfolioBudget) * 100 : 0;
-
-                    // Chart 3: Monthly Money Flow (Client AR Inflow vs Labor & Subcon Outflow)
-                    const totalClientCollections = currentProjects.reduce((sum, p) => sum + Number(p.fundsCollected || 0), 0);
-                    const totalLaborSpent = companyLaborDisbursed;
-                    const totalSubconSpent = companySubconDisbursed;
-
-                    const cashFlowTrendData = [
-                      {
-                        period: 'Prior Mth',
-                        inflow: Math.round(totalClientCollections * 0.28),
-                        laborOutflow: Math.round(totalLaborSpent * 0.20),
-                        subconOutflow: Math.round(totalSubconSpent * 0.20)
-                      },
-                      {
-                        period: 'Wk 1-2',
-                        inflow: Math.round(totalClientCollections * 0.22),
-                        laborOutflow: Math.round(totalLaborSpent * 0.25),
-                        subconOutflow: Math.round(totalSubconSpent * 0.25)
-                      },
-                      {
-                        period: 'Wk 3-4',
-                        inflow: Math.round(totalClientCollections * 0.30),
-                        laborOutflow: Math.round(totalLaborSpent * 0.25),
-                        subconOutflow: Math.round(totalSubconSpent * 0.25)
-                      },
-                      {
-                        period: 'Current (Live)',
-                        inflow: Math.round(totalClientCollections * 0.20),
-                        laborOutflow: totalLaborSpent,
-                        subconOutflow: totalSubconSpent
-                      }
-                    ].map(d => ({
-                      ...d,
-                      totalOutflow: d.laborOutflow + d.subconOutflow,
-                      netLiquidity: d.inflow - (d.laborOutflow + d.subconOutflow)
-                    }));
-
-                    // Recent Activities (Latest 5 from auditLogs)
-                    const recentActivityLogs = (auditLogs || []).slice(0, 5);
-
-                    return (
-                      <div className="space-y-5">
-                        {/* Page Title & Scope Header */}
-                        <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b pb-4 ${isDark ? 'border-slate-800' : 'border-slate-200'}`}>
-                          <div>
-                            <div className="flex items-center gap-2.5">
-                              <h2 className={`text-base sm:text-lg font-bold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                                {isProjectManager ? 'Site Execution Command' : 'Construction Portfolio Overview'}
-                              </h2>
-                              <span className={`text-[10px] font-mono px-2 py-0.5 rounded border ${isDark ? 'bg-slate-800 text-slate-300 border-slate-700' : 'bg-slate-100 text-slate-700 border-slate-200'}`}>
-                                {isProjectManager ? 'Project Manager' : isFinance ? 'Finance Treasury' : 'Corporate Operations'}
-                              </span>
-                            </div>
-                            <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                              {isProjectManager
-                                ? `Monitoring ${currentProjects.length} assigned fit-out sites, field crews, and punch-list tickets.`
-                                : isDashboardLoading
-                                  ? 'Synchronizing live operational metrics from database...'
-                                  : 'Real-time operational overview driven by active database records.'}
-                            </p>
-                          </div>
-
-                          <div className="flex items-center flex-wrap gap-2">
-                            <button
-                              onClick={() => setActiveTab('site-diary')}
-                              title="Open Site Diary & Weather Telemetry (Cabuyao HQ / Active Sites)"
-                              className={`rounded-lg text-xs font-medium border transition-colors cursor-pointer flex items-center gap-1.5 px-3 py-1.5 ${
-                                isDark
-                                  ? 'bg-sky-500/10 hover:bg-sky-500/20 text-sky-300 border-sky-500/30'
-                                  : 'bg-sky-50 hover:bg-sky-100 text-sky-700 border-sky-200 shadow-2xs'
-                              }`}
-                            >
-                              <CloudSun className="w-3.5 h-3.5 text-amber-400" />
-                              <span>📍 Cabuyao HQ / Active Sites • {siteLogs?.[0]?.temperature || '30.8°C'}</span>
-                            </button>
-                            <button
-                              onClick={() => setActiveTab('projects')}
-                              className={`rounded-lg text-xs font-medium border transition-colors cursor-pointer flex items-center gap-1.5 px-3 py-1.5 ${
-                                isDark
-                                  ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                                  : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-2xs font-medium text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5'
-                              }`}
-                            >
-                              <Building2 className={`w-3.5 h-3.5 ${isDark ? 'text-amber-500' : 'text-amber-600'}`} />
-                              <span>Sites Hub</span>
-                            </button>
-                            <button
-                              onClick={() => setActiveTab('gantt')}
-                              className={`rounded-lg text-xs font-medium border transition-colors cursor-pointer flex items-center gap-1.5 px-3 py-1.5 ${
-                                isDark
-                                  ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                                  : 'bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 hover:text-slate-900 shadow-2xs font-medium text-xs px-3 py-1.5 rounded-lg flex items-center gap-1.5'
-                              }`}
-                            >
-                              <BarChart3 className={`w-3.5 h-3.5 ${isDark ? 'text-slate-300' : 'text-slate-600'}`} />
-                              <span>Master Gantt</span>
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* 1. Interactive Executive KPI Cards (Pending Tasks Removed, Hover/Expand Popovers Added) */}
-                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3.5">
-                          {/* Active Projects — Clickable to Commercial Sites Hub + Hover Mini-Dropdown */}
-                          <div
-                            onClick={() => setActiveTab('projects')}
-                            className={`group relative cursor-pointer ${
-                              isDark
-                                ? 'bg-slate-900/70 border-slate-800/80 hover:border-amber-500/50'
-                                : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-amber-400'
-                            } border rounded-xl p-3.5 flex flex-col justify-between transition-all duration-200`}
-                          >
-                            <div className={`flex items-center justify-between ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold flex items-center gap-1">
-                                Active Projects
-                                <ChevronDown className="w-3 h-3 opacity-60 group-hover:translate-y-0.5 transition-transform" />
-                              </span>
-                              <div className={`p-1.5 rounded-lg border ${isDark ? 'bg-amber-500/10 border-amber-500/20' : 'bg-amber-100/70 border-amber-200/80'}`}>
-                                <Building2 className={`w-3.5 h-3.5 ${isDark ? 'text-amber-400' : 'text-amber-700'}`} />
-                              </div>
-                            </div>
-                            <div className="mt-2">
-                              {isDashboardLoading ? (
-                                <>
-                                  <div className="h-6 w-16 rounded skeleton-shimmer mt-0.5" />
-                                  <div className="h-3 w-28 rounded skeleton-shimmer mt-2" />
-                                </>
-                              ) : (
-                                <>
-                                  <div className={`text-xl font-bold font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>{activeProjectsCount}</div>
-                                  <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'} mt-0.5 truncate`}>
-                                    {inProgressProjects} In Progress • {completedProjects} Closed
-                                  </div>
-                                </>
-                              )}
-                            </div>
-
-                            {/* Hover Mini-Dropdown listing active project names & statuses */}
-                            <div className={`hidden group-hover:block absolute left-0 top-full mt-1.5 w-72 z-50 rounded-xl border p-3 shadow-xl ${
-                              isDark ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-800'
-                            }`}>
-                              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-amber-500 font-semibold pb-1.5 mb-1.5 border-b border-slate-700/50">
-                                <span>Active Commercial Sites</span>
-                                <span>Status</span>
-                              </div>
-                              <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
-                                {currentProjects.map(proj => (
-                                  <div key={proj.id} className="flex items-center justify-between gap-2 text-xs py-1 border-b border-slate-800/40 last:border-0">
-                                    <span className="truncate font-medium">{proj.name}</span>
-                                    <span className={`px-1.5 py-0.5 rounded text-[10px] font-mono shrink-0 ${
-                                      proj.status === 'COMPLETED'
-                                        ? 'bg-emerald-500/15 text-emerald-400'
-                                        : 'bg-amber-500/15 text-amber-400'
-                                    }`}>
-                                      {proj.status || 'IN_PROGRESS'}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                              <div className="mt-2 pt-1.5 border-t border-slate-800/60 text-[10px] text-amber-400 flex items-center justify-between font-medium">
-                                <span>Click to open Commercial Sites Hub</span>
-                                <ChevronRight className="w-3 h-3" />
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Workforce — Hover Popover per project + Clickable to Labor Workforce & Artisan Trades */}
-                          <div
-                            onClick={() => setActiveTab('contractors')}
-                            className={`group relative cursor-pointer ${
-                              isDark
-                                ? 'bg-slate-900/70 border-slate-800/80 hover:border-teal-500/50'
-                                : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-teal-400'
-                            } border rounded-xl p-3.5 flex flex-col justify-between transition-all duration-200`}
-                          >
-                            <div className={`flex items-center justify-between ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold flex items-center gap-1">
-                                Workforce
-                                <ChevronDown className="w-3 h-3 opacity-60 group-hover:translate-y-0.5 transition-transform" />
-                              </span>
-                              <div className={`p-1.5 rounded-lg border ${isDark ? 'bg-teal-500/10 border-teal-500/20' : 'bg-teal-100/70 border-teal-200/80'}`}>
-                                <Users className={`w-3.5 h-3.5 ${isDark ? 'text-teal-400' : 'text-teal-700'}`} />
-                              </div>
-                            </div>
-                            <div className="mt-2">
-                              {isDashboardLoading ? (
-                                <>
-                                  <div className="h-6 w-24 rounded skeleton-shimmer mt-0.5" />
-                                  <div className="h-3 w-32 rounded skeleton-shimmer mt-2" />
-                                </>
-                              ) : (
-                                <>
-                                  <div className={`text-xl font-bold font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                                    {totalWorkforceHeadcount} <span className={`text-xs font-normal ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Workers</span>
-                                  </div>
-                                  <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'} mt-0.5 truncate`}>
-                                    {activeTradeTeams} active trade teams
-                                  </div>
-                                </>
-                              )}
-                            </div>
-
-                            {/* Hover Popover showing worker headcount distribution per project */}
-                            <div className={`hidden group-hover:block absolute left-0 top-full mt-1.5 w-72 z-50 rounded-xl border p-3 shadow-xl ${
-                              isDark ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-800'
-                            }`}>
-                              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-teal-400 font-semibold pb-1.5 mb-1.5 border-b border-slate-700/50">
-                                <span>Site Headcount Distribution</span>
-                                <span>Crew</span>
-                              </div>
-                              <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
-                                {currentProjects.map(proj => {
-                                  const siteWorkers = currentContractors.filter(c =>
-                                    c.assignedProjectId === proj.id ||
-                                    (c.activeProjectSite || '').toLowerCase() === proj.name.toLowerCase() ||
-                                    (proj.assignedContractorIds || []).includes(c.id)
-                                  ).reduce((s, c) => s + (c.activeManpower || 1), 0) || (proj.assignedWorkersCount || proj.assignedContractorIds?.length || 0);
-                                  return (
-                                    <div key={proj.id} className="flex items-center justify-between gap-2 text-xs py-1 border-b border-slate-800/40 last:border-0">
-                                      <span className="truncate font-medium">{proj.name}</span>
-                                      <span className="px-1.5 py-0.5 rounded bg-teal-500/15 text-teal-400 text-[10px] font-mono shrink-0">
-                                        {siteWorkers} pax
-                                      </span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                              <div className="mt-2 pt-1.5 border-t border-slate-800/60 text-[10px] text-teal-400 flex items-center justify-between font-medium">
-                                <span>Click for Labor Workforce & Artisan Trades</span>
-                                <ChevronRight className="w-3 h-3" />
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Project Budgets — Hover Breakdown per project + Clickable to Budgets & Expenses View */}
-                          <div
-                            onClick={() => setIsBudgetsExpensesOpen(true)}
-                            className={`group relative cursor-pointer ${
-                              isDark
-                                ? 'bg-slate-900/70 border-slate-800/80 hover:border-emerald-500/50'
-                                : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-emerald-400'
-                            } border rounded-xl p-3.5 flex flex-col justify-between transition-all duration-200`}
-                          >
-                            <div className={`flex items-center justify-between ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold flex items-center gap-1">
-                                Project Budgets
-                                <ChevronDown className="w-3 h-3 opacity-60 group-hover:translate-y-0.5 transition-transform" />
-                              </span>
-                              <div className={`p-1.5 rounded-lg border ${isDark ? 'bg-emerald-500/10 border-emerald-500/20' : 'bg-emerald-100/70 border-emerald-200/80'}`}>
-                                <DollarSign className={`w-3.5 h-3.5 ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`} />
-                              </div>
-                            </div>
-                            <div className="mt-2">
-                              {isDashboardLoading ? (
-                                <>
-                                  <div className="h-6 w-24 rounded skeleton-shimmer mt-0.5" />
-                                  <div className="h-3 w-28 rounded skeleton-shimmer mt-2" />
-                                </>
-                              ) : (
-                                <>
-                                  <div className={`text-xl font-bold font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>₱{(totalBudgetValue / 1_000_000).toFixed(2)}M</div>
-                                  <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'} mt-0.5 truncate`}>
-                                    ₱{totalBudgetValue.toLocaleString()} Total Allotted
-                                  </div>
-                                </>
-                              )}
-                            </div>
-
-                            {/* Hover Popover showing allotted budget per project */}
-                            <div className={`hidden group-hover:block absolute left-0 top-full mt-1.5 w-80 z-50 rounded-xl border p-3 shadow-xl ${
-                              isDark ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-800'
-                            }`}>
-                              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-emerald-400 font-semibold pb-1.5 mb-1.5 border-b border-slate-700/50">
-                                <span>Allotted Budget by Project</span>
-                                <span>Contract Value</span>
-                              </div>
-                              <div className="space-y-1.5 max-h-44 overflow-y-auto pr-1">
-                                {currentProjects.map(proj => (
-                                  <div key={proj.id} className="flex items-center justify-between gap-2 text-xs py-1 border-b border-slate-800/40 last:border-0">
-                                    <span className="truncate font-medium">{proj.name}</span>
-                                    <span className="font-mono text-emerald-400 font-semibold shrink-0">
-                                      ₱{Number(proj.budget || 0).toLocaleString()}
-                                    </span>
-                                  </div>
-                                ))}
-                              </div>
-                              <div className="mt-2 pt-1.5 border-t border-slate-800/60 text-[10px] text-emerald-400 flex items-center justify-between font-medium">
-                                <span>Click to open Budgets &amp; Expenses Overview</span>
-                                <ChevronRight className="w-3 h-3" />
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Disbursed Expenses — Clickable/Expandable per-project + 4-Category Cost Breakdown */}
-                          <div
-                            onClick={canAccessModule(currentRole, 'finance-payroll') ? () => setActiveTab('finance-payroll') : undefined}
-                            className={`group relative ${canAccessModule(currentRole, 'finance-payroll') ? 'cursor-pointer' : 'cursor-default'} ${
-                              isDark
-                                ? 'bg-slate-900/70 border-slate-800/80 hover:border-indigo-500/50'
-                                : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-indigo-400'
-                            } border rounded-xl p-3.5 flex flex-col justify-between transition-all duration-200`}
-                          >
-                            <div className={`flex items-center justify-between ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold flex items-center gap-1">
-                                Disbursed (Current Mth)
-                                <ChevronDown className="w-3 h-3 opacity-60 group-hover:translate-y-0.5 transition-transform" />
-                              </span>
-                              <div className={`p-1.5 rounded-lg border ${isDark ? 'bg-indigo-500/10 border-indigo-500/20' : 'bg-indigo-100/70 border-indigo-200/80'}`}>
-                                <Banknote className={`w-3.5 h-3.5 ${isDark ? 'text-indigo-400' : 'text-indigo-700'}`} />
-                              </div>
-                            </div>
-                            <div className="mt-2">
-                              {isDashboardLoading ? (
-                                <>
-                                  <div className="h-6 w-28 rounded skeleton-shimmer mt-0.5" />
-                                  <div className="h-3 w-32 rounded skeleton-shimmer mt-2" />
-                                </>
-                              ) : (
-                                <>
-                                  <div className="flex items-baseline justify-between gap-1.5">
-                                    <div className={`text-xl font-bold font-mono ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                                      ₱{totalCompanyDisbursed.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                    </div>
-                                    <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border font-bold shrink-0 ${
-                                      portfolioBurnRate > 100
-                                        ? (isDark ? 'bg-rose-950/60 text-rose-300 border-rose-800/60' : 'bg-rose-50 text-rose-700 border-rose-200')
-                                        : portfolioBurnRate >= 80
-                                        ? (isDark ? 'bg-amber-950/60 text-amber-300 border-amber-800/60' : 'bg-amber-50 text-amber-700 border-amber-200')
-                                        : (isDark ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800/60' : 'bg-emerald-50 text-emerald-700 border-emerald-200')
-                                    }`}>
-                                      {portfolioBurnRate > 0 && portfolioBurnRate < 0.1 ? '<0.1%' : `${portfolioBurnRate.toFixed(1)}%`} Burn Rate
-                                    </span>
-                                  </div>
-                                  <div className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'} mt-0.5 truncate`}>
-                                    Nov 2026 • Paid to Date (Payroll + Subcon AP)
-                                  </div>
-                                </>
-                              )}
-                            </div>
-
-                            {/* Hover/Expand Breakdown: 4 Cost Categories + Per-Project Expenses */}
-                            <div className={`hidden group-hover:block absolute right-0 top-full mt-1.5 w-80 z-50 rounded-xl border p-3.5 shadow-xl ${
-                              isDark ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-800'
-                            }`}>
-                              <div className="flex items-center justify-between text-[10px] font-mono uppercase tracking-wider text-indigo-400 font-semibold pb-1.5 mb-2 border-b border-slate-700/50">
-                                <span>Nov 2026 Cost Breakdown</span>
-                                <span>{portfolioBurnRate.toFixed(1)}% Burn</span>
-                              </div>
-                              <div className="grid grid-cols-2 gap-1.5 mb-2.5 text-[11px]">
-                                <div className="p-1.5 rounded bg-slate-800/60 border border-slate-700/60">
-                                  <div className="text-[10px] text-slate-400">1. In-House Labor</div>
-                                  <div className="font-mono font-semibold text-white">₱{companyLaborDisbursed.toLocaleString()}</div>
-                                </div>
-                                <div className="p-1.5 rounded bg-slate-800/60 border border-slate-700/60">
-                                  <div className="text-[10px] text-slate-400">2. Materials</div>
-                                  <div className="font-mono font-semibold text-amber-400">₱{Math.round(totalCompanyDisbursed * 0.42).toLocaleString()}</div>
-                                </div>
-                                <div className="p-1.5 rounded bg-slate-800/60 border border-slate-700/60">
-                                  <div className="text-[10px] text-slate-400">3. Machines/Equip</div>
-                                  <div className="font-mono font-semibold text-sky-400">₱{Math.round(totalCompanyDisbursed * 0.14).toLocaleString()}</div>
-                                </div>
-                                <div className="p-1.5 rounded bg-slate-800/60 border border-slate-700/60">
-                                  <div className="text-[10px] text-slate-400">4. Outsourced/Skilled</div>
-                                  <div className="font-mono font-semibold text-teal-400">₱{companySubconDisbursed.toLocaleString()}</div>
-                                </div>
-                              </div>
-                              <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-semibold pb-1 mb-1 border-b border-slate-700/50">
-                                Disbursed Per Project
-                              </div>
-                              <div className="space-y-1 max-h-32 overflow-y-auto pr-1">
-                                {budgetCostData.map(item => (
-                                  <div key={item.id} className="flex items-center justify-between text-xs py-0.5">
-                                    <span className="truncate">{item.fullName}</span>
-                                    <span className="font-mono text-indigo-300 shrink-0">₱{item.disbursed.toLocaleString()}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Weather & Site Telemetry Quick-Card — Redirects to Site Diary & Weather */}
-                          <div
-                            onClick={() => setActiveTab('site-diary')}
-                            className={`group relative cursor-pointer ${
-                              isDark
-                                ? 'bg-slate-900/70 border-slate-800/80 hover:border-sky-500/50'
-                                : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-sky-400'
-                            } border rounded-xl p-3.5 flex flex-col justify-between transition-all duration-200`}
-                          >
-                            <div className={`flex items-center justify-between ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                              <span className="text-[11px] font-mono uppercase tracking-wider font-semibold">Cabuyao HQ / Site Weather</span>
-                              <div className={`p-1.5 rounded-lg border ${isDark ? 'bg-sky-500/10 border-sky-500/20' : 'bg-sky-100/70 border-sky-200/80'}`}>
-                                <CloudSun className={`w-3.5 h-3.5 ${isDark ? 'text-sky-400' : 'text-sky-700'}`} />
-                              </div>
-                            </div>
-                            <div className="mt-2">
-                              <div className={`text-base font-bold font-mono truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                                {currentProjects[0]?.location?.split(',')[0] || 'Cabuyao, Laguna'} • {siteLogs?.[0]?.temperature || '30.8°C'}
-                              </div>
-                              <div className={`text-[11px] ${isDark ? 'text-sky-400' : 'text-sky-600'} mt-0.5 flex items-center gap-1 font-medium`}>
-                                <span>Open Site Diary &amp; Telemetry</span>
-                                <ChevronRight className="w-3 h-3" />
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-
-
-                        {/* 2. Visualizations Row */}
-                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
-                          {/* Project Progress Chart */}
-                          <div className={`lg:col-span-7 ${
-                            isDark
-                              ? 'bg-slate-900/70 border-slate-800/80'
-                              : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-slate-300'
-                          } border rounded-xl p-4 space-y-3 transition-all duration-200`}>
-                            <div className={`flex items-center justify-between border-b pb-2.5 ${isDark ? 'border-slate-800' : 'border-slate-100'}`}>
-                              <div>
-                                <h3 className={`text-xs font-semibold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>Project Progress Overview</h3>
-                                <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Milestone completion percentage across active commercial fit-outs</p>
-                              </div>
-                              {canAccessModule(currentRole, 'schedule') && (
-                                <button
-                                  type="button"
-                                  onClick={() => setActiveTab('schedule')}
-                                  className="text-[11px] text-amber-500 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-300 font-medium flex items-center gap-1 cursor-pointer"
-                                >
-                                  <span>Full Schedule ↗</span>
-                                </button>
-                              )}
-                            </div>
-
-                            {isDashboardLoading ? (
-                              <div className="h-52 flex items-center justify-center p-4">
-                                <div className="h-full w-full rounded-lg skeleton-shimmer" />
-                              </div>
-                            ) : progressChartData.length === 0 ? (
-                              <div className="h-52 flex items-center justify-center text-xs text-slate-500">
-                                No commercial projects available to display.
-                              </div>
-                            ) : (
-                              <div className="h-52">
-                                <ResponsiveContainer width="100%" height="100%">
-                                  <ReBarChart data={progressChartData} margin={{ top: 8, right: 10, left: -20, bottom: 0 }}>
-                                    <defs>
-                                      <linearGradient id="barAmberGrad" x1="0" y1="0" x2="0" y2="1">
-                                        <stop offset="0%" stopColor="#fbbf24" stopOpacity={1} />
-                                        <stop offset="100%" stopColor="#f59e0b" stopOpacity={0.9} />
-                                      </linearGradient>
-                                    </defs>
-                                    <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#334155' : '#e2e8f0'} strokeOpacity={isDark ? 0.35 : 0.9} vertical={false} />
-                                    <XAxis dataKey="name" stroke={isDark ? '#64748b' : '#334155'} tick={{ fill: isDark ? '#94a3b8' : '#334155', fontWeight: 600 }} fontSize={11} tickLine={false} />
-                                    <YAxis stroke={isDark ? '#64748b' : '#334155'} tick={{ fill: isDark ? '#94a3b8' : '#334155', fontWeight: 600 }} fontSize={11} tickLine={false} domain={[0, 100]} ticks={[0, 50, 100]} tickFormatter={(v) => `${v}%`} />
-                                    <Tooltip
-                                      formatter={(value) => [`${value}%`, 'Progress']}
-                                      contentStyle={{
-                                        backgroundColor: isDark ? '#020617' : '#ffffff',
-                                        borderColor: isDark ? '#334155' : '#e2e8f0',
-                                        color: isDark ? '#f8fafc' : '#0f172a',
-                                        boxShadow: isDark ? '0 10px 15px -3px rgba(0, 0, 0, 0.5)' : '0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04)',
-                                        borderRadius: '8px',
-                                        fontSize: '11px'
-                                      }}
-                                    />
-                                    <Bar dataKey="progress" fill="url(#barAmberGrad)" stroke="#d97706" strokeWidth={1} radius={[6, 6, 0, 0]} />
-                                  </ReBarChart>
-                                </ResponsiveContainer>
-                              </div>
-                            )}
-                          </div>
-
-                          {/* Budget vs Disbursed Utilization Meter */}
-                          <div className={`lg:col-span-5 ${
-                            isDark
-                              ? 'bg-slate-900/70 border-slate-800/80'
-                              : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-slate-300'
-                          } border rounded-xl p-4 space-y-3 flex flex-col justify-between transition-all duration-200`}>
-                            <div className={`flex items-center justify-between border-b pb-2.5 ${isDark ? 'border-slate-800' : 'border-slate-100'}`}>
-                              <div>
-                                <h3 className={`text-xs font-semibold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>Budget Utilization &amp; Spend</h3>
-                                <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Capital allocated vs. consumed disbursals per site</p>
-                              </div>
-                              {(canAccessModule(currentRole, 'subcontractor-payables') || canAccessModule(currentRole, 'payments')) && (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setActiveTab(
-                                      canAccessModule(currentRole, 'subcontractor-payables')
-                                        ? 'subcontractor-payables'
-                                        : 'payments'
-                                    )
-                                  }
-                                  className="text-[11px] text-amber-500 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-300 font-medium flex items-center gap-1 cursor-pointer"
-                                >
-                                  <span>Billings Hub ↗</span>
-                                </button>
-                              )}
-                            </div>
-
-                            {isDashboardLoading ? (
-                              <div className="h-56 flex flex-col justify-center space-y-3 p-1">
-                                {[...Array(3)].map((_, i) => (
-                                  <div key={i} className={`space-y-1.5 p-2 rounded-lg border animate-pulse ${isDark ? 'bg-slate-900/30 border-slate-800/40' : 'bg-slate-50 border-slate-200/60'}`}>
-                                    <div className="flex justify-between">
-                                      <div className="h-3 w-1/3 rounded skeleton-shimmer" />
-                                      <div className="h-3 w-1/4 rounded skeleton-shimmer" />
-                                    </div>
-                                    <div className="h-2 w-full rounded-full skeleton-shimmer" />
-                                    <div className="h-2.5 w-2/3 rounded skeleton-shimmer" />
-                                  </div>
-                                ))}
-                              </div>
-                            ) : budgetCostData.length === 0 ? (
-                              <div className="h-52 flex items-center justify-center text-xs text-slate-500">
-                                No commercial projects available to display.
-                              </div>
-                            ) : (
-                              <div className="flex-1 max-h-[220px] overflow-y-auto pr-1 space-y-2.5 custom-scrollbar">
-                                {budgetCostData.map((item) => {
-                                  const percent = item.percent;
-                                  const percentDisplay = percent > 0 && percent < 0.1 ? '<0.1%' : `${percent.toFixed(1)}%`;
-                                  const isOverBudget = percent > 100;
-                                  const isNearCap = percent >= 80;
-                                  const barColor = isOverBudget
-                                    ? 'bg-rose-500'
-                                    : isNearCap
-                                    ? (isDark ? 'bg-amber-400' : 'bg-amber-500')
-                                    : (isDark ? 'bg-emerald-400' : 'bg-emerald-500');
-                                  const badgeClass = isOverBudget 
-                                    ? (isDark ? 'bg-rose-950/60 text-rose-300 border-rose-800/60' : 'bg-rose-50 text-rose-700 border-rose-200')
-                                    : isNearCap 
-                                    ? (isDark ? 'bg-amber-950/60 text-amber-300 border-amber-800/60' : 'bg-amber-50 text-amber-700 border-amber-200')
-                                    : (isDark ? 'bg-emerald-950/60 text-emerald-300 border-emerald-800/60' : 'bg-emerald-50 text-emerald-700 border-emerald-200');
-
-                                  return (
-                                    <div
-                                      key={item.id}
-                                      onClick={() => setIsBudgetsExpensesOpen(true)}
-                                      className={`space-y-1.5 p-2.5 rounded-lg border transition-colors cursor-pointer ${
-                                        isDark
-                                          ? 'bg-slate-900/40 border-slate-800/60 hover:border-emerald-500/40'
-                                          : 'bg-slate-50/70 border-slate-200/80 hover:border-emerald-400 shadow-xs'
-                                      }`}
-                                    >
-                                      <div className="flex items-center justify-between text-xs gap-2">
-                                        <div className="min-w-0 flex-1">
-                                          <span className={`font-semibold truncate block ${isDark ? 'text-slate-200' : 'text-slate-800'}`} title={item.fullName}>
-                                            {item.fullName}
-                                          </span>
-                                          <div className={`text-[11px] font-mono mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                                            Physical: <span className={isDark ? 'text-amber-400 font-medium' : 'text-amber-600 font-medium'}>{item.physicalProgress}%</span>
-                                            <span className="mx-1.5 opacity-40">•</span>
-                                            <span>{formatCompactPeso(item.disbursed)} / {formatCompactPeso(item.budget)}</span>
-                                          </div>
-                                        </div>
-                                        <span className={`text-[10px] font-mono px-2 py-0.5 rounded border font-semibold shrink-0 ${badgeClass}`}>
-                                          {percentDisplay} Burn Rate
-                                        </span>
-                                      </div>
-
-                                      {/* Horizontal Progress Track */}
-                                      <div className={`h-2 w-full rounded-full overflow-hidden border ${
-                                        isDark
-                                          ? 'bg-slate-800/80 border-slate-700/50'
-                                          : 'bg-slate-100 border-slate-200/60'
-                                      }`}>
-                                        <div 
-                                          className={`h-full rounded-full transition-all duration-500 ${barColor}`}
-                                          style={{ width: `${Math.min(100, Math.max(item.disbursed > 0 ? 2 : 0, percent))}%` }}
-                                        />
-                                      </div>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-
-
-                        {/* Money Flow Timeline: Client Collections vs In-House Payroll & Subcon Outflow */}
-                        <div className={`${
-                          isDark
-                            ? 'bg-slate-900/70 border-slate-800/80'
-                            : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-slate-300'
-                        } border rounded-xl p-4 space-y-3 transition-all duration-200`}>
-                          <div className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b pb-2.5 ${isDark ? 'border-slate-800' : 'border-slate-100'}`}>
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <TrendingUp className={`w-4 h-4 ${isDark ? 'text-emerald-400' : 'text-emerald-600'}`} />
-                                <h3 className={`text-xs font-semibold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>Money Flow &amp; Disbursal Treasury Trend</h3>
-                              </div>
-                              <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                                Cash Inflow (Client Milestone Collections) vs. Cash Outflow (In-House Labor Payroll &amp; Subcontractor AP)
-                              </p>
-                            </div>
-                            <div className="flex items-center gap-3 text-[11px] font-mono">
-                              <span className={`flex items-center gap-1.5 ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}>
-                                <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500"></span> Inflow: {formatCompactPeso(totalClientCollections)}
-                              </span>
-                              <span className={`flex items-center gap-1.5 ${isDark ? 'text-sky-400' : 'text-sky-700'}`}>
-                                <span className="w-2.5 h-2.5 rounded-sm bg-sky-500"></span> In-House Payroll: {formatCompactPeso(totalLaborSpent)}
-                              </span>
-                              <span className={`flex items-center gap-1.5 ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>
-                                <span className="w-2.5 h-2.5 rounded-sm bg-purple-500"></span> Subcontractor AP: {formatCompactPeso(totalSubconSpent)}
-                              </span>
-                            </div>
-                          </div>
-
-                          {isDashboardLoading ? (
-                            <div className="h-56 flex items-center justify-center p-4">
-                              <div className="h-full w-full rounded-lg skeleton-shimmer" />
-                            </div>
-                          ) : (
-                            <div className="h-56">
-                              <ResponsiveContainer width="100%" height="100%">
-                                <AreaChart data={cashFlowTrendData} margin={{ top: 10, right: 12, left: -10, bottom: 0 }}>
-                                  <defs>
-                                    <linearGradient id="colorInflow" x1="0" y1="0" x2="0" y2="1">
-                                      <stop offset="5%" stopColor="#10b981" stopOpacity={isDark ? 0.4 : 0.12}/>
-                                      <stop offset="95%" stopColor="#10b981" stopOpacity={0.0}/>
-                                    </linearGradient>
-                                    <linearGradient id="colorLabor" x1="0" y1="0" x2="0" y2="1">
-                                      <stop offset="5%" stopColor="#0ea5e9" stopOpacity={isDark ? 0.4 : 0.12}/>
-                                      <stop offset="95%" stopColor="#0ea5e9" stopOpacity={0.0}/>
-                                    </linearGradient>
-                                    <linearGradient id="colorSubcon" x1="0" y1="0" x2="0" y2="1">
-                                      <stop offset="5%" stopColor="#a855f7" stopOpacity={isDark ? 0.4 : 0.12}/>
-                                      <stop offset="95%" stopColor="#a855f7" stopOpacity={0.0}/>
-                                    </linearGradient>
-                                  </defs>
-                                  <CartesianGrid strokeDasharray="3 3" stroke={isDark ? '#334155' : '#f1f5f9'} strokeOpacity={isDark ? 0.35 : 0.4} vertical={false} />
-                                  <XAxis dataKey="period" stroke={isDark ? '#64748b' : '#94a3b8'} tick={{ fill: isDark ? '#94a3b8' : '#64748b' }} fontSize={11} tickLine={false} />
-                                  <YAxis stroke={isDark ? '#64748b' : '#94a3b8'} tick={{ fill: isDark ? '#94a3b8' : '#64748b' }} fontSize={11} tickLine={false} tickCount={4} tickFormatter={(v) => formatCompactPeso(v)} />
-                                  <Tooltip
-                                    formatter={(value: any, name: any) => [
-                                      `₱${Number(value).toLocaleString()}`,
-                                      name === 'inflow' ? 'Client Collections (AR)' : name === 'laborOutflow' ? 'In-House Labor (Payroll)' : 'Subcontractor (AP)'
-                                    ]}
-                                    contentStyle={{
-                                      backgroundColor: isDark ? '#020617' : '#ffffff',
-                                      borderColor: isDark ? '#334155' : '#e2e8f0',
-                                      color: isDark ? '#f8fafc' : '#0f172a',
-                                      boxShadow: isDark ? '0 10px 15px -3px rgba(0, 0, 0, 0.5)' : '0 4px 6px -1px rgba(0, 0, 0, 0.08), 0 2px 4px -1px rgba(0, 0, 0, 0.04)',
-                                      borderRadius: '8px',
-                                      fontSize: '11px'
-                                    }}
-                                  />
-                                  <Legend
-                                    formatter={(val) => val === 'inflow' ? 'Client Inflow (AR)' : val === 'laborOutflow' ? 'In-House Payroll' : 'Subcontractor AP'}
-                                    wrapperStyle={{ fontSize: '11px', paddingTop: '8px', color: isDark ? '#94a3b8' : '#475569' }}
-                                  />
-                                  <Area type="monotone" dataKey="inflow" stroke="#10b981" strokeWidth={2} fillOpacity={1} fill="url(#colorInflow)" />
-                                  <Area type="monotone" dataKey="laborOutflow" stroke="#0ea5e9" strokeWidth={2} fillOpacity={1} fill="url(#colorLabor)" />
-                                  <Area type="monotone" dataKey="subconOutflow" stroke="#a855f7" strokeWidth={2} fillOpacity={1} fill="url(#colorSubcon)" />
-                                </AreaChart>
-                              </ResponsiveContainer>
-                            </div>
-                          )}
-                        </div>
-
-                        {/* 3. Operational Activities Row */}
-                        <div className={`${
-                          isDark
-                            ? 'bg-slate-900/70 border-slate-800/80'
-                            : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-slate-300'
-                        } border rounded-xl p-4 space-y-3 transition-all duration-200`}>
-                          <div className={`flex items-center justify-between border-b pb-2.5 ${isDark ? 'border-slate-800' : 'border-slate-100'}`}>
-                            <div className="flex items-center gap-2">
-                              <History className={`w-4 h-4 ${isDark ? 'text-slate-400' : 'text-slate-500'}`} />
-                              <h3 className={`text-xs font-semibold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>Recent Operations Activity</h3>
-                            </div>
-                            <button
-                              onClick={() => setActiveTab('audit-trail')}
-                              className="text-[11px] text-amber-500 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-300 font-medium flex items-center gap-1 cursor-pointer"
-                            >
-                              <span>Full Audit Trail</span>
-                              <ChevronRight className="w-3 h-3" />
-                            </button>
-                          </div>
-
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left text-xs">
-                              <thead>
-                                <tr className={`border-b text-[11px] font-medium ${isDark ? 'border-slate-800/80 text-slate-400' : 'border-slate-200 text-slate-500 bg-slate-50/50'}`}>
-                                  <th className="py-2 px-2.5">Time</th>
-                                  <th className="py-2 px-2.5">User</th>
-                                  <th className="py-2 px-2.5">Action</th>
-                                  <th className="py-2 px-2.5">Details</th>
-                                </tr>
-                              </thead>
-                              <tbody className={`divide-y ${isDark ? 'divide-slate-800/50' : 'divide-slate-100'}`}>
-                                {isDashboardLoading ? (
-                                  [...Array(4)].map((_, i) => (
-                                    <tr key={i} className="animate-pulse">
-                                      <td className="py-2.5 px-2.5"><div className="h-3.5 w-20 rounded skeleton-shimmer" /></td>
-                                      <td className="py-2.5 px-2.5"><div className="h-3.5 w-24 rounded skeleton-shimmer" /></td>
-                                      <td className="py-2.5 px-2.5"><div className="h-3.5 w-16 rounded skeleton-shimmer" /></td>
-                                      <td className="py-2.5 px-2.5"><div className="h-3.5 w-48 rounded skeleton-shimmer" /></td>
-                                    </tr>
-                                  ))
-                                ) : recentActivityLogs.length === 0 ? (
-                                  <tr>
-                                    <td colSpan={4} className="py-6 text-center text-slate-500 text-xs">
-                                      No recent activities logged in audit ledger.
-                                    </td>
-                                  </tr>
-                                ) : (
-                                  recentActivityLogs.map((log) => (
-                                    <tr key={log.id} className={`${isDark ? 'hover:bg-slate-900/50' : 'hover:bg-slate-50/80'} transition-colors`}>
-                                      <td className={`py-2 px-2.5 font-mono text-[11px] whitespace-nowrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                                        {log.createdAt ? new Date(log.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'Recent'}
-                                      </td>
-                                      <td className={`py-2 px-2.5 font-medium whitespace-nowrap ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
-                                        {log.actorName || 'System'}
-                                      </td>
-                                      <td className="py-2 px-2.5">
-                                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${isDark ? 'bg-slate-900 text-slate-300 border-slate-800' : 'bg-slate-100 text-slate-700 border-slate-200'}`}>
-                                          {log.action}
-                                        </span>
-                                      </td>
-                                      <td className={`py-2 px-2.5 text-[11px] truncate max-w-xs ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                                        {log.details || log.entityType}
-                                      </td>
-                                    </tr>
-                                  ))
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-
-                        {/* 4. Active Commercial Fit-Out Sites Table */}
-                        <div className={`${
-                          isDark
-                            ? 'bg-slate-900/70 border-slate-800/80'
-                            : 'bg-white border-slate-200/80 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_1px_3px_rgba(0,0,0,0.02)] hover:shadow-md hover:border-slate-300'
-                        } border rounded-xl p-4 space-y-3 transition-all duration-200`}>
-                          <div className={`flex items-center justify-between border-b pb-2.5 ${isDark ? 'border-slate-800' : 'border-slate-100'}`}>
-                            <div>
-                              <h3 className={`text-xs font-semibold tracking-tight ${isDark ? 'text-white' : 'text-slate-900'}`}>
-                                Commercial Fit-Out Sites ({currentProjects.length})
-                              </h3>
-                              <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Ongoing fit-outs, budget allocations, and execution pace</p>
-                            </div>
-                            <button
-                              onClick={() => setActiveTab('projects')}
-                              className="text-[11px] text-amber-500 hover:text-amber-600 dark:text-amber-400 dark:hover:text-amber-300 font-medium flex items-center gap-1 cursor-pointer"
-                            >
-                              <span>Manage Sites</span>
-                              <ChevronRight className="w-3 h-3" />
-                            </button>
-                          </div>
-
-                          <div className="overflow-x-auto">
-                            <table className="w-full text-left text-xs">
-                              <thead>
-                                <tr className={`border-b text-[11px] font-medium ${isDark ? 'border-slate-800/80 text-slate-400' : 'border-slate-200 text-slate-500 bg-slate-50/50'}`}>
-                                  <th className="py-2 px-3">Site / Project</th>
-                                  <th className="py-2 px-3">Client & Location</th>
-                                  <th className="py-2 px-3">Status</th>
-                                  <th className="py-2 px-3">Milestone Progress</th>
-                                  <th className="py-2 px-3">Budget</th>
-                                  <th className="py-2 px-3 text-right">Actions</th>
-                                </tr>
-                              </thead>
-                              <tbody className={`divide-y ${isDark ? 'divide-slate-800/50' : 'divide-slate-100'}`}>
-                                {isDashboardLoading ? (
-                                  [...Array(4)].map((_, i) => (
-                                    <tr key={i} className="animate-pulse">
-                                      <td className="py-3 px-3"><div className="h-4 w-32 rounded skeleton-shimmer" /></td>
-                                      <td className="py-3 px-3"><div className="h-4 w-28 rounded skeleton-shimmer" /></td>
-                                      <td className="py-3 px-3"><div className="h-4 w-16 rounded skeleton-shimmer" /></td>
-                                      <td className="py-3 px-3"><div className="h-4 w-24 rounded skeleton-shimmer" /></td>
-                                      <td className="py-3 px-3"><div className="h-4 w-20 rounded skeleton-shimmer" /></td>
-                                      <td className="py-3 px-3 text-right"><div className="h-4 w-12 rounded skeleton-shimmer ml-auto" /></td>
-                                    </tr>
-                                  ))
-                                ) : currentProjects.length === 0 ? (
-                                  <tr>
-                                    <td colSpan={6} className="py-8 text-center text-slate-500 text-xs">
-                                      No commercial projects configured.
-                                    </td>
-                                  </tr>
-                                ) : (
-                                  currentProjects.map((p) => {
-                                    const prog = Math.min(100, Math.max(0, Math.round(Number(p.progressPercentage) || 0)));
-                                    return (
-                                      <tr key={p.id} className={`${isDark ? 'hover:bg-slate-900/50' : 'hover:bg-slate-50/80'} transition-colors`}>
-                                        <td className="py-2.5 px-3">
-                                          <div className={`font-semibold ${isDark ? 'text-white' : 'text-slate-900'}`}>{p.name}</div>
-                                          <div className={`text-[10px] font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{p.id}</div>
-                                        </td>
-                                        <td className={`py-2.5 px-3 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                                          <div className="truncate max-w-[160px]">{p.clientName || 'Commercial Client'}</div>
-                                          <div className={`text-[10px] ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{p.location || 'Site Location'}</div>
-                                        </td>
-                                        <td className="py-2.5 px-3">
-                                          <span className={`text-[10px] font-mono font-medium px-2 py-0.5 rounded border ${p.status === 'COMPLETED' || p.status === 'HANDED_OVER'
-                                              ? (isDark ? 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' : 'bg-emerald-50 text-emerald-700 border-emerald-200')
-                                              : p.status === 'IN_PROGRESS'
-                                                ? (isDark ? 'bg-blue-500/10 text-blue-300 border-blue-500/30' : 'bg-blue-50 text-blue-700 border-blue-200')
-                                                : (isDark ? 'bg-amber-500/10 text-amber-300 border-amber-500/30' : 'bg-amber-50 text-amber-700 border-amber-200')
-                                            }`}>
-                                            {(p.status || 'IN_PROGRESS').replace('_', ' ')}
-                                          </span>
-                                        </td>
-                                        <td className="py-2.5 px-3">
-                                          <div className="w-36 space-y-1">
-                                            <div className="flex items-center justify-between text-[11px] font-mono">
-                                              <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>Progress</span>
-                                              <span className={`font-semibold ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{prog}%</span>
-                                            </div>
-                                            <div className={`w-full rounded-full h-1.5 overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-slate-100 border border-slate-200/60'}`}>
-                                              <div
-                                                className="bg-amber-500 h-full rounded-full transition-all duration-300"
-                                                style={{ width: `${prog}%` }}
-                                              />
-                                            </div>
-                                          </div>
-                                        </td>
-                                        <td className={`py-2.5 px-3 font-mono font-medium ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
-                                          ₱{Number(p.budget || 0).toLocaleString()}
-                                        </td>
-                                        <td className="py-2.5 px-3 text-right">
-                                          <button
-                                            onClick={() => setActiveTab('projects')}
-                                            className={`px-2.5 py-1 rounded text-xs font-medium border transition-colors cursor-pointer ${
-                                              isDark
-                                                ? 'bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-white border-slate-800'
-                                                : 'bg-slate-100 hover:bg-slate-200 text-slate-700 hover:text-slate-900 border-slate-200'
-                                            }`}
-                                          >
-                                            View Details
-                                          </button>
-                                        </td>
-                                      </tr>
-                                    );
-                                  })
-                                )}
-                              </tbody>
-                            </table>
-                          </div>
-                        </div>
-                      </div>
-
-                    );
-                  })()}
+                    }}
+                    onOpenBudgetsModal={() => setIsBudgetsExpensesOpen(true)}
+                    onOpenStaffSettings={() => {
+                      setOpsSettingsSubTab('staff');
+                      setActiveTab('operations-settings');
+                      if (staffList.length === 0) fetchStaff();
+                    }}
+                  />
                 </div>
               )}
-
               {/* ------------------------------------------------------------- */}
               {/* TAB 5.1: COMMERCIAL SITES HUB */}
               {/* ------------------------------------------------------------- */}
@@ -3697,6 +2795,7 @@ export default function AdminPortal({
                   <ProjectProfileHub
                     projects={pmScopedProjects.length > 0 ? pmScopedProjects : projects}
                     tasks={tasks}
+                    clients={clients}
                     contractors={pmContractors}
                     rfis={rfis}
                     changeOrders={changeOrders}
@@ -3997,8 +3096,29 @@ export default function AdminPortal({
               {/* ------------------------------------------------------------- */}
               {/* TAB: OPERATIONS & SYSTEM SETTINGS */}
               {/* ------------------------------------------------------------- */}
-              {isOperationsManager && (visitedTabs.has('operations-settings') || activeTab === 'operations-settings') && (
-                <div className={`space-y-6 max-w-5xl ${activeTab === 'operations-settings' ? 'block' : 'hidden'}`}>
+              {isOperationsManager && (visitedTabs.has('operations-settings') || activeTab === 'operations-settings') && (() => {
+                const pendingReviewsCount = sysClientReviews.filter((r) => r.status === 'Pending').length;
+                const filteredStaffList = staffList.filter((staff) => {
+                  const q = staffSearchQuery.trim().toLowerCase();
+                  if (!q) return true;
+                  const roleKey = String(staff.role || '').toUpperCase();
+                  const roleDisplay = roleKey === 'ADMIN'
+                    ? 'admin'
+                    : roleKey === 'FINANCE'
+                      ? 'finance controller'
+                      : roleKey === 'TIMEKEEPER'
+                        ? 'site timekeeper'
+                        : 'project manager engineer';
+                  return (
+                    String(staff.name || '').toLowerCase().includes(q) ||
+                    String(staff.email || '').toLowerCase().includes(q) ||
+                    roleDisplay.includes(q) ||
+                    roleKey.toLowerCase().includes(q)
+                  );
+                });
+
+                return (
+                <div className={`space-y-6 w-full max-w-7xl mx-auto ${activeTab === 'operations-settings' ? 'block' : 'hidden'}`}>
                   {/* Header banner */}
                   <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-md flex flex-col md:flex-row md:items-center justify-between gap-4">
                     <div className="flex items-center gap-4">
@@ -4007,7 +3127,7 @@ export default function AdminPortal({
                       </div>
                       <div>
                         <div className="flex items-center gap-2">
-                          <h2 className="text-xl font-bold text-white tracking-tight">Operations & System Settings</h2>
+                          <h2 className="text-xl font-bold text-white tracking-tight">Operations &amp; System Settings</h2>
                           <span className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-mono px-2 py-0.5 rounded-full uppercase font-bold">
                             ENTERPRISE ENGINE
                           </span>
@@ -4018,19 +3138,94 @@ export default function AdminPortal({
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => persistSettingsToStorageAndDb()}
-                        disabled={isSavingProfile}
-                        className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20 transition-all cursor-pointer disabled:opacity-50"
-                      >
-                        <Save className="w-4 h-4" />
-                        <span>{isSavingProfile ? 'Saving...' : 'Save Operational Defaults'}</span>
-                      </button>
-                    </div>
+                    {opsSettingsSubTab === 'general' && (
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => persistSettingsToStorageAndDb()}
+                          disabled={isSavingProfile}
+                          className="px-4 py-2.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/20 transition-all cursor-pointer disabled:opacity-50"
+                        >
+                          <Save className="w-4 h-4" />
+                          <span>{isSavingProfile ? 'Saving...' : 'Save Operational Defaults'}</span>
+                        </button>
+                      </div>
+                    )}
                   </div>
 
+                  {/* 4-Tab Settings Navigation */}
+                  <div className="flex flex-wrap items-center gap-2 bg-slate-950/90 border border-slate-800 rounded-2xl p-2">
+                    <button
+                      type="button"
+                      onClick={() => setOpsSettingsSubTab('general')}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                        opsSettingsSubTab === 'general'
+                          ? 'bg-amber-500 text-slate-950 shadow-sm shadow-amber-500/20'
+                          : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                      }`}
+                    >
+                      <Bell className="w-3.5 h-3.5" />
+                      <span>General &amp; Alerts</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setOpsSettingsSubTab('estimator')}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                        opsSettingsSubTab === 'estimator'
+                          ? 'bg-cyan-500 text-slate-950 shadow-sm shadow-cyan-500/20'
+                          : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                      }`}
+                    >
+                      <Sliders className="w-3.5 h-3.5" />
+                      <span>Cost Estimator</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setOpsSettingsSubTab('reviews')}
+                      className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                        opsSettingsSubTab === 'reviews'
+                          ? 'bg-amber-500 text-slate-950 shadow-sm shadow-amber-500/20'
+                          : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                      }`}
+                    >
+                      <Award className="w-3.5 h-3.5" />
+                      <span>Reviews Queue</span>
+                      <span
+                        className={`px-1.5 py-0.5 rounded-full text-[10px] font-mono font-bold ${
+                          opsSettingsSubTab === 'reviews'
+                            ? 'bg-slate-950/20 text-slate-950'
+                            : pendingReviewsCount > 0
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                              : 'bg-slate-800 text-slate-400'
+                        }`}
+                      >
+                        {pendingReviewsCount}
+                      </span>
+                    </button>
+
+                    {session?.role === 'Admin' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setOpsSettingsSubTab('staff');
+                          if (staffList.length === 0) fetchStaff();
+                        }}
+                        className={`px-4 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all cursor-pointer ${
+                          opsSettingsSubTab === 'staff'
+                            ? 'bg-violet-500 text-white shadow-sm shadow-violet-500/25'
+                            : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                        }`}
+                      >
+                        <UserCog className="w-3.5 h-3.5" />
+                        <span>Staff Accounts</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {/* TAB 1: GENERAL & ALERTS */}
+                  {opsSettingsSubTab === 'general' && (
                   <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                     {/* Left Column: Enterprise Profile & PMS Workspace Defaults */}
                     <div className="space-y-6">
@@ -4056,13 +3251,13 @@ export default function AdminPortal({
                           </div>
 
                           <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-xl">
-                            <span className="text-[10px] font-mono text-slate-400 block uppercase font-bold">Licensing & Accreditations</span>
+                            <span className="text-[10px] font-mono text-slate-400 block uppercase font-bold">Licensing &amp; Accreditations</span>
                             <div className="mt-1 space-y-1">
                               <span className="inline-block bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] font-mono px-2 py-0.5 rounded font-bold mr-1 mb-1">
                                 PCAB Category AAA (#94821)
                               </span>
                               <span className="inline-block bg-blue-500/10 border border-blue-500/30 text-blue-300 text-[10px] font-mono px-2 py-0.5 rounded font-bold mr-1 mb-1">
-                                LGU & Building Permits Specialist
+                                LGU &amp; Building Permits Specialist
                               </span>
                               <span className="inline-block bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-[10px] font-mono px-2 py-0.5 rounded font-bold">
                                 Subdivision Board Qualified
@@ -4117,14 +3312,9 @@ export default function AdminPortal({
                           <span className="text-[11px] text-emerald-400 font-mono flex items-center gap-1">
                             <CheckCircle2 className="w-3.5 h-3.5" /> Synchronized across enterprise clients
                           </span>
-                          <button
-                            type="button"
-                            onClick={() => persistSettingsToStorageAndDb()}
-                            disabled={isSavingProfile}
-                            className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-xs font-semibold cursor-pointer transition-colors"
-                          >
-                            {isSavingProfile ? 'Saving...' : 'Save Defaults'}
-                          </button>
+                          <span className="text-[10px] text-slate-500 font-mono">
+                            Use &ldquo;Save Operational Defaults&rdquo; above
+                          </span>
                         </div>
                       </div>
 
@@ -4204,17 +3394,19 @@ export default function AdminPortal({
 
                     </div>
                   </div>
+                  )}
 
-                  {/* ── Landing Page Estimator Pricing & Tier Configuration ─────────────────── */}
+                  {/* TAB 2: COST ESTIMATOR */}
+                  {opsSettingsSubTab === 'estimator' && (
                   <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 space-y-5">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
                       <div>
                         <div className="flex items-center gap-2 text-white font-bold text-sm">
                           <Sliders className="w-4 h-4 text-cyan-400" />
-                          <span>Landing Page Cost Estimator Rate & Finish Tier Configuration</span>
+                          <span>Landing Page Cost Estimator Rate &amp; Finish Tier Configuration</span>
                         </div>
                         <p className="text-[11px] text-slate-400 mt-0.5">
-                          Control base <span className="font-mono text-cyan-300">₱/sqm</span> rates per Project Category and multipliers per Specification & Finish Tier on the public Landing Page.
+                          Control base <span className="font-mono text-cyan-300">₱/sqm</span> rates per Project Category and multipliers per Specification &amp; Finish Tier on the public Landing Page.
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
@@ -4294,7 +3486,7 @@ export default function AdminPortal({
 
                       <div className="space-y-2.5">
                         <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold">
-                          Specification & Finish Tier Multipliers
+                          Specification &amp; Finish Tier Multipliers
                         </div>
                         {(Object.keys(sysEstimatorConfig.tierMultipliers) as FinishTierKey[]).map((key) => {
                           const mult = sysEstimatorConfig.tierMultipliers[key];
@@ -4343,16 +3535,18 @@ export default function AdminPortal({
                       </div>
                     </div>
                   </div>
+                  )}
 
-                  {/* ── Client Reviews & Inquiries Moderation Queue ─────────────────── */}
+                  {/* TAB 3: REVIEWS QUEUE */}
+                  {opsSettingsSubTab === 'reviews' && (
                   <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 space-y-4">
                     <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
                       <div>
                         <div className="flex items-center gap-2 text-white font-bold text-sm">
                           <Award className="w-4 h-4 text-amber-400" />
-                          <span>Client Reviews & Inquiries Moderation Queue</span>
+                          <span>Client Reviews &amp; Inquiries Moderation Queue</span>
                           <span className="px-2 py-0.5 rounded-md bg-amber-500/20 border border-amber-500/40 text-amber-300 text-[10px] font-mono">
-                            {sysClientReviews.filter((r) => r.status === 'Pending').length} Pending
+                            {pendingReviewsCount} Pending
                           </span>
                         </div>
                         <p className="text-[11px] text-slate-400 mt-0.5">
@@ -4361,7 +3555,7 @@ export default function AdminPortal({
                       </div>
                     </div>
 
-                    <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1 custom-scrollbar">
+                    <div className="space-y-2.5 max-h-[32rem] overflow-y-auto pr-1 custom-scrollbar">
                       {sysClientReviews.map((rev) => (
                         <div key={rev.id} className="bg-slate-900/70 border border-slate-800 rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                           <div className="space-y-1 flex-1">
@@ -4374,8 +3568,8 @@ export default function AdminPortal({
                                   rev.status === 'Approved'
                                     ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
                                     : rev.status === 'Rejected'
-                                    ? 'bg-rose-500/15 text-rose-300 border-rose-500/30'
-                                    : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                    ? 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                                    : 'bg-sky-500/15 text-sky-300 border-sky-500/30'
                                 }`}
                               >
                                 {rev.status.toUpperCase()}
@@ -4392,7 +3586,7 @@ export default function AdminPortal({
                                   setSysClientReviews(updated);
                                   notify(`Approved review by ${rev.clientName}. Published live on Landing Page.`);
                                 }}
-                                className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold cursor-pointer"
+                                className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold cursor-pointer transition-colors"
                               >
                                 Approve
                               </button>
@@ -4405,19 +3599,26 @@ export default function AdminPortal({
                                   setSysClientReviews(updated);
                                   notify(`Rejected review by ${rev.clientName}.`);
                                 }}
-                                className="px-2.5 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-500/30 text-[11px] font-bold cursor-pointer"
+                                className="px-2.5 py-1 rounded-lg bg-transparent hover:bg-amber-500/15 text-amber-400 border border-amber-500/60 text-[11px] font-semibold cursor-pointer transition-colors"
                               >
                                 Reject
                               </button>
                             )}
                             <button
                               type="button"
-                              onClick={() => {
+                              onClick={async () => {
+                                const ok = await confirmDialog({
+                                  title: 'Delete Client Review',
+                                  message: `Permanently delete the review by "${rev.clientName}"? This action cannot be undone.`,
+                                  confirmLabel: 'Delete Review',
+                                  variant: 'danger',
+                                });
+                                if (!ok) return;
                                 const updated = deleteClientReview(rev.id);
                                 setSysClientReviews(updated);
                                 notify(`Deleted review ${rev.id}.`);
                               }}
-                              className="px-2.5 py-1 rounded-lg bg-rose-600/15 hover:bg-rose-600/25 text-rose-300 border border-rose-500/30 text-[11px] font-semibold cursor-pointer"
+                              className="px-2.5 py-1 rounded-lg bg-rose-600/20 hover:bg-rose-600/35 text-rose-300 border border-rose-500/40 text-[11px] font-bold cursor-pointer transition-colors"
                             >
                               Delete
                             </button>
@@ -4426,11 +3627,12 @@ export default function AdminPortal({
                       ))}
                     </div>
                   </div>
+                  )}
 
-                  {/* ── Staff Account Management (Admin only) ─────────────────── */}
-                  {session?.role === 'Admin' && (
+                  {/* TAB 4: STAFF ACCOUNTS (Admin only) */}
+                  {opsSettingsSubTab === 'staff' && session?.role === 'Admin' && (
                     <div className="bg-slate-950 border border-slate-800 rounded-2xl p-6 space-y-4">
-                      <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800 pb-3">
                         <div className="flex items-center gap-2 text-white font-bold text-sm">
                           <UserCog className="w-4 h-4 text-violet-400" />
                           <span>Staff Account Management</span>
@@ -4439,7 +3641,7 @@ export default function AdminPortal({
                           <button
                             type="button"
                             onClick={() => { fetchStaff(); }}
-                            className="text-[10px] font-semibold text-slate-400 hover:text-white px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer"
+                            className="text-[10px] font-semibold text-slate-400 hover:text-white px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors cursor-pointer"
                           >
                             Refresh
                           </button>
@@ -4450,22 +3652,23 @@ export default function AdminPortal({
                               setNewStaffName('');
                               setNewStaffEmail('');
                               setNewStaffPassword('');
+                              setNewStaffRole('ProjectManager');
                               setStaffError('');
-                              fetchStaff();
+                              if (staffList.length === 0) fetchStaff();
                             }}
                             className="text-[10px] font-bold px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white border border-violet-500/50 transition-colors cursor-pointer flex items-center gap-1.5"
                           >
                             <UserPlus className="w-3 h-3" />
-                            Add Staff Account
+                            <span>+ Add Staff Account</span>
                           </button>
                         </div>
                       </div>
 
                       <p className="text-[11px] text-slate-400">
-                        Manage login accounts for <span className="text-violet-400 font-semibold">Admin</span> and <span className="text-teal-400 font-semibold">Project Manager</span> portal access. Client accounts are created through the Client Management module.
+                        Manage login accounts for <span className="text-violet-400 font-semibold">Admin</span>, <span className="text-teal-400 font-semibold">Project Manager</span>, <span className="text-emerald-400 font-semibold">Finance Controller</span>, and <span className="text-sky-400 font-semibold">Site Timekeeper</span> portal access. Client accounts are created through the Client Management module.
                       </p>
 
-                      {/* Add Staff Form */}
+                      {/* Add Staff Form (closed by default until "+ Add Staff Account" is clicked) */}
                       {showAddStaff && (
                         <form onSubmit={handleAddStaff} autoComplete="off" className="bg-slate-900/80 border border-violet-800/40 rounded-xl p-4 space-y-3">
                           <div className="text-xs font-bold text-violet-300 mb-2">New Staff Account</div>
@@ -4501,11 +3704,15 @@ export default function AdminPortal({
                               <label className="block text-[10px] text-slate-400 font-semibold mb-1">Access Role</label>
                               <select
                                 value={newStaffRole}
-                                onChange={e => setNewStaffRole(e.target.value as any)}
+                                onChange={e => setNewStaffRole(e.target.value as StaffAccountRoleOption)}
                                 className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-xs focus:outline-none focus:border-violet-500 cursor-pointer"
                               >
                                 <option value="ProjectManager">Project Manager (Field Access)</option>
-                                <option value="Admin">Admin (Full Access)</option>
+                                <option value="Finance">Finance Controller (Payroll &amp; Billing)</option>
+                                <option value="Timekeeper">Site Timekeeper (Roll-Call &amp; Attendance)</option>
+                                {canCreateAdminStaff && (
+                                  <option value="Admin">Admin (Full Access)</option>
+                                )}
                               </select>
                             </div>
                           </div>
@@ -4525,6 +3732,28 @@ export default function AdminPortal({
                         </form>
                       )}
 
+                      {/* Staff Search Filter */}
+                      <div className="relative">
+                        <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                        <input
+                          type="text"
+                          value={staffSearchQuery}
+                          onChange={(e) => setStaffSearchQuery(e.target.value)}
+                          placeholder="Search staff by name, email, or role..."
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-8 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-violet-500"
+                        />
+                        {staffSearchQuery && (
+                          <button
+                            type="button"
+                            onClick={() => setStaffSearchQuery('')}
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 cursor-pointer"
+                            title="Clear search"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+
                       {/* Staff List */}
                       <div className="space-y-2" onClick={() => { if (staffList.length === 0) fetchStaff(); }}>
                         {staffLoading ? (
@@ -4537,13 +3766,42 @@ export default function AdminPortal({
                           >
                             Click to load staff accounts
                           </button>
+                        ) : filteredStaffList.length === 0 ? (
+                          <div className="text-center py-6 text-slate-500 text-xs">
+                            No staff accounts match &ldquo;{staffSearchQuery}&rdquo;.
+                          </div>
                         ) : (
-                          staffList.map(staff => (
-                            <div key={staff.id} className="flex items-center justify-between gap-3 p-3 bg-slate-900/60 border border-slate-800 rounded-xl hover:border-slate-700 transition-colors">
+                          filteredStaffList.map(staff => {
+                            const roleKey = String(staff.role || '').toUpperCase();
+                            const isStaffAdmin = roleKey === 'ADMIN';
+                            const isStaffFinance = roleKey === 'FINANCE';
+                            const isStaffTimekeeper = roleKey === 'TIMEKEEPER';
+                            const isEditingRow = editingStaffId === staff.id;
+                            const avatarClasses = isStaffAdmin
+                              ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
+                              : isStaffFinance
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                                : isStaffTimekeeper
+                                  ? 'bg-sky-500/20 text-sky-400 border border-sky-500/30'
+                                  : 'bg-teal-500/20 text-teal-400 border border-teal-500/30';
+                            const badgeClasses = isStaffAdmin
+                              ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                              : isStaffFinance
+                                ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
+                                : isStaffTimekeeper
+                                  ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20'
+                                  : 'bg-teal-500/10 text-teal-400 border border-teal-500/20';
+                            const roleLabel = isStaffAdmin
+                              ? 'ADMIN'
+                              : isStaffFinance
+                                ? 'FINANCE CONTROLLER'
+                                : isStaffTimekeeper
+                                  ? 'TIMEKEEPER'
+                                  : 'PROJECT MANAGER';
+                            return (
+                            <div key={staff.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3 bg-slate-900/60 border border-slate-800 rounded-xl hover:border-slate-700 transition-colors">
                               <div className="flex items-center gap-3">
-                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-xs ${staff.role === 'Admin' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                                    : 'bg-teal-500/20 text-teal-400 border border-teal-500/30'
-                                  }`}>
+                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-xs shrink-0 ${avatarClasses}`}>
                                   {staff.name?.charAt(0) || '?'}
                                 </div>
                                 <div>
@@ -4551,24 +3809,68 @@ export default function AdminPortal({
                                   <div className="text-slate-400 text-[10px]">{staff.email}</div>
                                 </div>
                               </div>
-                              <div className="flex items-center gap-2">
-                                <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full ${staff.role === 'Admin'
-                                    ? 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                                    : 'bg-teal-500/10 text-teal-400 border border-teal-500/20'
-                                  }`}>
-                                  {staff.role === 'Admin' ? 'ADMIN' : 'PROJECT MANAGER'}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteStaff(staff.id, staff.name)}
-                                  className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 border border-slate-700 hover:border-rose-700/50 text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
-                                  title="Remove account"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
+                              <div className="flex flex-wrap items-center gap-2">
+                                {isEditingRow ? (
+                                  <>
+                                    <select
+                                      value={editingStaffRole}
+                                      onChange={(e) => setEditingStaffRole(e.target.value as StaffAccountRoleOption)}
+                                      className="bg-slate-800 border border-violet-500/60 rounded-lg px-2.5 py-1 text-white text-[11px] focus:outline-none cursor-pointer"
+                                    >
+                                      <option value="ProjectManager">Project Manager</option>
+                                      <option value="Finance">Finance Controller</option>
+                                      <option value="Timekeeper">Site Timekeeper</option>
+                                      {canCreateAdminStaff && (
+                                        <option value="Admin">Admin (Full Access)</option>
+                                      )}
+                                    </select>
+                                    <button
+                                      type="button"
+                                      disabled={editingStaffSaving}
+                                      onClick={() => handleUpdateStaffRole(staff.id)}
+                                      className="px-2.5 py-1 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                                    >
+                                      {editingStaffSaving ? 'Saving...' : 'Save'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setEditingStaffId(null)}
+                                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition-colors cursor-pointer"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    <span className={`text-[9px] font-mono font-bold px-2 py-0.5 rounded-full ${badgeClasses}`}>
+                                      {roleLabel}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setEditingStaffId(staff.id);
+                                        setEditingStaffRole(normalizeStaffRoleToOption(staff.role));
+                                      }}
+                                      className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-violet-950/60 border border-slate-700 hover:border-violet-600/50 text-slate-300 hover:text-violet-300 text-[10px] font-semibold transition-colors cursor-pointer flex items-center gap-1"
+                                      title="Edit access role"
+                                    >
+                                      <Edit3 className="w-3 h-3" />
+                                      <span>Edit</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteStaff(staff.id, staff.name)}
+                                      className="p-1.5 rounded-lg bg-slate-800 hover:bg-rose-950/60 border border-slate-700 hover:border-rose-700/50 text-slate-500 hover:text-rose-400 transition-colors cursor-pointer"
+                                      title="Remove account"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             </div>
-                          ))
+                            );
+                          })
                         )}
                       </div>
 
@@ -4576,7 +3878,8 @@ export default function AdminPortal({
                   )}
 
                 </div>
-              )}
+                );
+              })()}
 
         </main>
       </div>
@@ -4797,7 +4100,7 @@ export default function AdminPortal({
                 type="button"
                 onClick={() => {
                   if (!newDefectTitle || !newDefectDesc) {
-                    alert('Please enter defect title and description.');
+                    toast('Please enter defect title and description.', 'warning');
                     return;
                   }
                   onCreateDefect({
@@ -6122,7 +5425,7 @@ export default function AdminPortal({
               onSubmit={(e) => {
                 e.preventDefault();
                 if (!parcelName.trim() || !parcelLoc.trim()) {
-                  alert('Please enter parcel name and location.');
+                  toast('Please enter parcel name and location.', 'warning');
                   return;
                 }
                 const newId = `PARCEL-${Date.now().toString().slice(-4)}`;
@@ -6240,6 +5543,8 @@ export default function AdminPortal({
         isOpen={isBudgetsExpensesOpen}
         onClose={() => setIsBudgetsExpensesOpen(false)}
         projects={projects || []}
+        tasks={tasks || []}
+        clients={clients || []}
         totalLaborFallback={(extendedPayroll || [])
           .filter((pr: any) => pr.status === 'PAID' || pr.status === 'DISBURSED')
           .reduce((sum: number, pr: any) => sum + (Number(pr.netPay || pr.totalAmount || pr.grossPay || 0) || 0), 0)}

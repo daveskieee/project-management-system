@@ -246,13 +246,13 @@ export function calculateProjectBomProfitSync(params: {
     return sum + qty * Number(m.unitCostPhp || 0);
   }, 0);
 
-  // If no phases stored yet for this project, still detect overruns if material spend exceeds baseline threshold
-  const baselineProfit = computedBomProfit > 0 ? Math.round(computedBomProfit) : DEFAULT_BASELINE_PROFIT;
+  // Derive baseline profit strictly from active BOM phases (0 when no phases exist)
+  const baselineProfit = phases && phases.length > 0 ? Math.round(computedBomProfit) : 0;
   const remainingProfit = Math.max(0, baselineProfit - totalOverrun);
   const profitMarginPct =
     baselineProfit > 0
       ? Math.max(0, Math.round((remainingProfit / baselineProfit) * 1000) / 10)
-      : 100;
+      : 0;
 
   return {
     baselineProfit,

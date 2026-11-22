@@ -4,9 +4,10 @@
  */
 
 import React, { useState, useEffect, useMemo } from 'react';
-import { 
-  DollarSign, CheckCircle2, Clock, Users, Building2, 
-  ArrowUpRight, Download, Filter, Search, Plus, ShieldCheck, 
+import { useConfirm } from '../context/ConfirmDialogContext';
+import {
+  DollarSign, CheckCircle2, Clock, Users, Building2,
+  ArrowUpRight, Download, Filter, Search, Plus, ShieldCheck,
   AlertCircle, X, Check, Edit3, Trash2, Printer, FileText,
   BadgeDollarSign, UserCheck
 } from 'lucide-react';
@@ -35,6 +36,7 @@ export default function PayrollManager({
   onUpdateWageEntry,
   onDeleteWageEntry
 }: PayrollManagerProps) {
+  const { confirm: confirmDialog } = useConfirm();
   const [items, setItems] = useState<ExtendedPayrollItem[]>(initialPayroll || []);
 
   useEffect(() => {
@@ -59,7 +61,7 @@ export default function PayrollManager({
   const [projectFilter, setProjectFilter] = useState<string>('ALL');
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
-  
+
   // Modals
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [editingItem, setEditingItem] = useState<ExtendedPayrollItem | null>(null);
@@ -288,7 +290,13 @@ export default function PayrollManager({
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this wage record?')) return;
+    const ok = await confirmDialog({
+      title: 'Delete Wage Record',
+      message: 'Are you sure you want to delete this wage record?',
+      confirmLabel: 'Delete Record',
+      variant: 'danger',
+    });
+    if (!ok) return;
     try {
       if (onDeleteWageEntry) {
         await onDeleteWageEntry(id);
@@ -1026,11 +1034,10 @@ export default function PayrollManager({
                   <h4 className="text-base font-black text-white">CTVILL REALTY & DEVELOPMENT CORP.</h4>
                   <div className="text-[11px] text-slate-400">Field Artisan Compensation Voucher</div>
                 </div>
-                <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${
-                  payslipItem.status === 'Disbursed' 
-                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800' 
+                <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded border ${payslipItem.status === 'Disbursed'
+                    ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
                     : 'bg-amber-950 text-amber-300 border-amber-800'
-                }`}>
+                  }`}>
                   {payslipItem.status.toUpperCase()}
                 </span>
               </div>

@@ -1,12 +1,13 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { 
-  Users, Search, ShieldCheck, Trash2, Plus, 
-  MapPin, Award, Radio, ChevronRight, 
+import {
+  Users, Search, ShieldCheck, Trash2, Plus,
+  MapPin, Award, Radio, ChevronRight,
   X, LayoutGrid, CheckCircle2, Sliders, Check,
   ArrowRightLeft, Phone, HardHat, Building2, User
 } from 'lucide-react';
 import { Contractor, DailyManpowerAudit, ProjectProfile, isOfficeOrExecutive, isIndividualStaffOrEngineer } from '../types';
 import { useTheme } from '../context/ThemeContext';
+import { useConfirm } from '../context/ConfirmDialogContext';
 import { normalizeRole, UserRole } from '../utils/rbac';
 
 export interface WorkerReallocationRequest {
@@ -66,6 +67,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
   notify = console.log
 }) => {
   const { isDark } = useTheme();
+  const { confirm: confirmDialog } = useConfirm();
 
   const currentRole = normalizeRole(userRole);
   const isOM = currentRole === UserRole.OM || isAdmin;
@@ -87,7 +89,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed) && parsed.length > 0) return parsed;
       }
-    } catch {}
+    } catch { }
     return [
       {
         id: 'REAL-01',
@@ -296,7 +298,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ workerId: selectedContractor.id, action: 'remove' })
-            }).catch(() => {});
+            }).catch(() => { });
           }
         }
       }
@@ -401,8 +403,8 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
   // Recent audits for selected worker
   const workerAudits = useMemo(() => {
     if (!selectedContractor) return [];
-    return manpowerAudits.filter(a => 
-      a.contractorId === selectedContractor.id || 
+    return manpowerAudits.filter(a =>
+      a.contractorId === selectedContractor.id ||
       a.contractorName?.toLowerCase() === selectedContractor.name?.toLowerCase()
     );
   }, [selectedContractor, manpowerAudits]);
@@ -498,11 +500,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
               <button
                 type="button"
                 onClick={() => setStatusFilter(statusFilter === 'ONLINE' ? 'ALL' : 'ONLINE')}
-                className={`px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer text-[11px] ${
-                  statusFilter === 'ONLINE' 
-                    ? 'bg-emerald-950 border border-emerald-700 text-emerald-300 font-bold' 
+                className={`px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer text-[11px] ${statusFilter === 'ONLINE'
+                    ? 'bg-emerald-950 border border-emerald-700 text-emerald-300 font-bold'
                     : 'text-slate-400 hover:text-emerald-400'
-                }`}
+                  }`}
               >
                 <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
                 <span>{counts.online} Active</span>
@@ -511,11 +512,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
               <button
                 type="button"
                 onClick={() => setStatusFilter(statusFilter === 'BREAK' ? 'ALL' : 'BREAK')}
-                className={`px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer text-[11px] ${
-                  statusFilter === 'BREAK' 
-                    ? 'bg-amber-950 border border-amber-700 text-amber-300 font-bold' 
+                className={`px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer text-[11px] ${statusFilter === 'BREAK'
+                    ? 'bg-amber-950 border border-amber-700 text-amber-300 font-bold'
                     : 'text-slate-400 hover:text-amber-400'
-                }`}
+                  }`}
               >
                 <span className="w-2 h-2 rounded-full bg-amber-400"></span>
                 <span>{counts.onBreak} Break</span>
@@ -524,11 +524,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
               <button
                 type="button"
                 onClick={() => setStatusFilter(statusFilter === 'OFFLINE' ? 'ALL' : 'OFFLINE')}
-                className={`px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer text-[11px] ${
-                  statusFilter === 'OFFLINE' 
-                    ? 'bg-slate-800 border border-slate-700 text-white font-bold' 
+                className={`px-2 py-0.5 rounded-md flex items-center gap-1.5 transition-colors cursor-pointer text-[11px] ${statusFilter === 'OFFLINE'
+                    ? 'bg-slate-800 border border-slate-700 text-white font-bold'
                     : 'text-slate-400 hover:text-white'
-                }`}
+                  }`}
               >
                 <span className="w-2 h-2 rounded-full bg-slate-500"></span>
                 <span>{counts.offline} Off</span>
@@ -542,11 +541,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
               <button
                 type="button"
                 onClick={() => setViewMode('MESSENGER')}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 cursor-pointer ${
-                  viewMode === 'MESSENGER' 
-                    ? 'bg-slate-800 text-white shadow-xs' 
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 cursor-pointer ${viewMode === 'MESSENGER'
+                    ? 'bg-slate-800 text-white shadow-xs'
                     : 'text-slate-400 hover:text-white'
-                }`}
+                  }`}
                 title="Roster View"
               >
                 <Users className="w-3.5 h-3.5" />
@@ -555,11 +553,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
               <button
                 type="button"
                 onClick={() => setViewMode('GRID')}
-                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 cursor-pointer ${
-                  viewMode === 'GRID' 
-                    ? 'bg-slate-800 text-white shadow-xs' 
+                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-all flex items-center gap-1 cursor-pointer ${viewMode === 'GRID'
+                    ? 'bg-slate-800 text-white shadow-xs'
                     : 'text-slate-400 hover:text-white'
-                }`}
+                  }`}
                 title="Grid Cards"
               >
                 <LayoutGrid className="w-3.5 h-3.5" />
@@ -624,9 +621,8 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
             <button
               type="button"
               onClick={() => setEmploymentFilter(employmentFilter === 'INTERNAL' ? 'ALL' : 'INTERNAL')}
-              className={`px-2 py-1 rounded-lg transition-colors cursor-pointer ${
-                employmentFilter === 'INTERNAL' ? 'bg-teal-950 border border-teal-700 text-teal-300 font-bold' : 'text-slate-400 hover:text-white'
-              }`}
+              className={`px-2 py-1 rounded-lg transition-colors cursor-pointer ${employmentFilter === 'INTERNAL' ? 'bg-teal-950 border border-teal-700 text-teal-300 font-bold' : 'text-slate-400 hover:text-white'
+                }`}
               title="Show In-House Only"
             >
               In-House
@@ -634,9 +630,8 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
             <button
               type="button"
               onClick={() => setEmploymentFilter(employmentFilter === 'OUTSOURCED' ? 'ALL' : 'OUTSOURCED')}
-              className={`px-2 py-1 rounded-lg transition-colors cursor-pointer ${
-                employmentFilter === 'OUTSOURCED' ? 'bg-amber-950 border border-amber-700 text-amber-300 font-bold' : 'text-slate-400 hover:text-white'
-              }`}
+              className={`px-2 py-1 rounded-lg transition-colors cursor-pointer ${employmentFilter === 'OUTSOURCED' ? 'bg-amber-950 border border-amber-700 text-amber-300 font-bold' : 'text-slate-400 hover:text-white'
+                }`}
               title="Show Partners Only"
             >
               Partners
@@ -687,11 +682,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                     <div
                       key={c.id}
                       onClick={() => setSelectedId(c.id)}
-                      className={`p-3 rounded-xl transition-all cursor-pointer flex items-center gap-3 relative ${
-                        isSelected 
-                          ? 'bg-slate-900 border border-teal-500/40 shadow-xs' 
+                      className={`p-3 rounded-xl transition-all cursor-pointer flex items-center gap-3 relative ${isSelected
+                          ? 'bg-slate-900 border border-teal-500/40 shadow-xs'
                           : 'hover:bg-slate-900/60 border border-transparent'
-                      }`}
+                        }`}
                     >
                       {/* Avatar with Presence Indicator */}
                       <div className="relative shrink-0">
@@ -706,7 +700,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                             {getWorkerInitials(c.name)}
                           </div>
                         )}
-                        <span 
+                        <span
                           className={`absolute bottom-0 right-0 w-3 h-3 rounded-full border-2 border-slate-950 ${presenceConfig.dot}`}
                           title={presenceConfig.text}
                         />
@@ -719,11 +713,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                             {c.name}
                           </h4>
                           {/* Live Project Location Pill */}
-                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md truncate max-w-[140px] shrink-0 ${
-                            siteName === 'Standby' 
-                              ? 'bg-slate-900 border border-slate-800 text-slate-400' 
+                          <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md truncate max-w-[140px] shrink-0 ${siteName === 'Standby'
+                              ? 'bg-slate-900 border border-slate-800 text-slate-400'
                               : 'bg-teal-950/80 border border-teal-800/80 text-teal-300 font-semibold'
-                          }`}>
+                            }`}>
                             📍 {siteName}
                           </span>
                         </div>
@@ -741,9 +734,8 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                       </div>
 
                       {/* Right indicator arrow */}
-                      <ChevronRight className={`w-3.5 h-3.5 shrink-0 transition-transform ${
-                        isSelected ? 'text-teal-400 translate-x-0.5' : 'text-slate-700'
-                      }`} />
+                      <ChevronRight className={`w-3.5 h-3.5 shrink-0 transition-transform ${isSelected ? 'text-teal-400 translate-x-0.5' : 'text-slate-700'
+                        }`} />
                     </div>
                   );
                 })
@@ -772,10 +764,9 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                             {getWorkerInitials(selectedContractor.name)}
                           </div>
                         )}
-                        <span 
-                          className={`absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-slate-950 ${
-                            getPresenceLabel(selectedPresence).dot
-                          }`}
+                        <span
+                          className={`absolute bottom-0 right-0 w-3.5 h-3.5 rounded-full border-2 border-slate-950 ${getPresenceLabel(selectedPresence).dot
+                            }`}
                         />
                       </div>
 
@@ -813,11 +804,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                       <button
                         type="button"
                         onClick={() => handleToggleStatus('ONLINE')}
-                        className={`px-2 py-1 rounded-lg text-xs font-mono font-medium transition-all flex items-center gap-1 cursor-pointer ${
-                          selectedPresence === 'ONLINE'
+                        className={`px-2 py-1 rounded-lg text-xs font-mono font-medium transition-all flex items-center gap-1 cursor-pointer ${selectedPresence === 'ONLINE'
                             ? 'bg-emerald-600 text-white font-bold'
                             : 'text-slate-400 hover:text-white'
-                        }`}
+                          }`}
                       >
                         <span className="w-2 h-2 rounded-full bg-emerald-300"></span>
                         <span>Active</span>
@@ -825,11 +815,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                       <button
                         type="button"
                         onClick={() => handleToggleStatus('BREAK')}
-                        className={`px-2 py-1 rounded-lg text-xs font-mono font-medium transition-all flex items-center gap-1 cursor-pointer ${
-                          selectedPresence === 'BREAK'
+                        className={`px-2 py-1 rounded-lg text-xs font-mono font-medium transition-all flex items-center gap-1 cursor-pointer ${selectedPresence === 'BREAK'
                             ? 'bg-amber-600 text-white font-bold'
                             : 'text-slate-400 hover:text-white'
-                        }`}
+                          }`}
                       >
                         <span className="w-2 h-2 rounded-full bg-amber-300"></span>
                         <span>Break</span>
@@ -837,11 +826,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                       <button
                         type="button"
                         onClick={() => handleToggleStatus('OFFLINE')}
-                        className={`px-2 py-1 rounded-lg text-xs font-mono font-medium transition-all flex items-center gap-1 cursor-pointer ${
-                          selectedPresence === 'OFFLINE'
+                        className={`px-2 py-1 rounded-lg text-xs font-mono font-medium transition-all flex items-center gap-1 cursor-pointer ${selectedPresence === 'OFFLINE'
                             ? 'bg-slate-700 text-white font-bold'
                             : 'text-slate-400 hover:text-white'
-                        }`}
+                          }`}
                       >
                         <span className="w-2 h-2 rounded-full bg-slate-400"></span>
                         <span>Off</span>
@@ -854,11 +842,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                     <button
                       type="button"
                       onClick={() => setDossierTab('DEPLOYMENT')}
-                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
-                        dossierTab === 'DEPLOYMENT'
+                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${dossierTab === 'DEPLOYMENT'
                           ? 'bg-teal-600 text-white font-bold shadow-xs'
                           : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
-                      }`}
+                        }`}
                     >
                       <MapPin className="w-3.5 h-3.5" />
                       <span>Jobsite &amp; Monitoring</span>
@@ -866,11 +853,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                     <button
                       type="button"
                       onClick={() => setDossierTab('PERFORMANCE')}
-                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
-                        dossierTab === 'PERFORMANCE'
+                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${dossierTab === 'PERFORMANCE'
                           ? 'bg-teal-600 text-white font-bold shadow-xs'
                           : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
-                      }`}
+                        }`}
                     >
                       <Award className="w-3.5 h-3.5" />
                       <span>Compensation &amp; QA</span>
@@ -878,11 +864,10 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                     <button
                       type="button"
                       onClick={() => setDossierTab('CREDENTIALS')}
-                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${
-                        dossierTab === 'CREDENTIALS'
+                      className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer flex items-center gap-1.5 ${dossierTab === 'CREDENTIALS'
                           ? 'bg-teal-600 text-white font-bold shadow-xs'
                           : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
-                      }`}
+                        }`}
                     >
                       <ShieldCheck className="w-3.5 h-3.5" />
                       <span>Roll-Call History ({workerAudits.length})</span>
@@ -1045,7 +1030,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                                 ⭐ {selectedContractor.rating.toFixed(1)} / 5.0
                               </strong>
                               <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                                <div 
+                                <div
                                   className="h-full bg-amber-400 rounded-full"
                                   style={{ width: `${(selectedContractor.rating / 5) * 100}%` }}
                                 />
@@ -1064,7 +1049,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                                 {selectedContractor.milestoneProgress}%
                               </strong>
                               <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                                <div 
+                                <div
                                   className="h-full bg-blue-500 rounded-full"
                                   style={{ width: `${Math.min(100, selectedContractor.milestoneProgress)}%` }}
                                 />
@@ -1128,13 +1113,12 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
             const presenceConfig = getPresenceLabel(presence);
 
             return (
-              <div 
-                key={c.id} 
-                className={`${
-                  isDark
+              <div
+                key={c.id}
+                className={`${isDark
                     ? 'bg-slate-950 border-slate-800 hover:border-slate-700'
                     : 'bg-white border-slate-200/80 hover:border-slate-300 shadow-xs'
-                } border rounded-xl p-4 space-y-3 transition-all`}
+                  } border rounded-xl p-4 space-y-3 transition-all`}
               >
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex items-center gap-2.5">
@@ -1158,9 +1142,8 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                   </span>
                 </div>
 
-                <div className={`text-[11px] font-mono p-2 rounded-lg border flex items-center justify-between ${
-                  isDark ? 'text-slate-300 bg-slate-900 border-slate-800' : 'text-slate-700 bg-slate-50 border-slate-200'
-                }`}>
+                <div className={`text-[11px] font-mono p-2 rounded-lg border flex items-center justify-between ${isDark ? 'text-slate-300 bg-slate-900 border-slate-800' : 'text-slate-700 bg-slate-50 border-slate-200'
+                  }`}>
                   <span className={isDark ? 'text-slate-500' : 'text-slate-500'}>Current Site:</span>
                   <span className={`${isDark ? 'text-teal-300' : 'text-slate-800 font-semibold'} truncate max-w-[150px]`}>📍 {c.activeProjectSite || 'Standby'}</span>
                 </div>
@@ -1172,19 +1155,24 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                       setSelectedId(c.id);
                       setViewMode('MESSENGER');
                     }}
-                    className={`flex-1 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors text-center ${
-                      isDark
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-semibold cursor-pointer transition-colors text-center ${isDark
                         ? 'bg-teal-950 hover:bg-teal-900 border border-teal-800/80 text-teal-300 font-mono font-bold'
                         : 'bg-slate-100 hover:bg-slate-200 border border-slate-300/80 text-slate-800 shadow-2xs'
-                    }`}
+                      }`}
                   >
                     Transfer / Profile
                   </button>
                   {onDeleteContractor && (
                     <button
                       type="button"
-                      onClick={() => {
-                        if (confirm(`Remove "${c.name}" from roster?`)) {
+                      onClick={async () => {
+                        const ok = await confirmDialog({
+                          title: 'Remove Worker from Roster',
+                          message: `Remove "${c.name}" from the workforce roster?`,
+                          confirmLabel: 'Remove Worker',
+                          variant: 'danger',
+                        });
+                        if (ok) {
                           onDeleteContractor(c.id);
                           notify(`Removed ${c.name}`);
                         }
@@ -1208,7 +1196,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
           <div className="bg-slate-950 border border-slate-800 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl">
             <div className="p-4 bg-slate-900 border-b border-slate-800 flex justify-between items-center">
               <h3 className="font-bold text-white text-sm">Site &amp; Zone Allocation</h3>
-              <button 
+              <button
                 type="button"
                 onClick={() => setIsAllocModalOpen(false)}
                 className="text-slate-400 hover:text-white p-1 rounded-lg"
