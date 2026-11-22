@@ -103,7 +103,6 @@ export async function ensureSeedDocuments() {
 // GET /api/documents or /documents
 documentsRouter.get('/documents', async (req: Request, res: Response) => {
   try {
-    await ensureSeedDocuments();
     const docs = await prisma.projectDocument.findMany({ orderBy: { createdAt: 'desc' } });
     res.json(docs);
   } catch (error) {
@@ -115,7 +114,6 @@ documentsRouter.get('/documents', async (req: Request, res: Response) => {
 // GET / when mounted under /api/documents
 documentsRouter.get('/', async (req: Request, res: Response) => {
   try {
-    await ensureSeedDocuments();
     const docs = await prisma.projectDocument.findMany({ orderBy: { createdAt: 'desc' } });
     res.json(docs);
   } catch (error) {

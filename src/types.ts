@@ -522,7 +522,7 @@ export interface DailySiteLog {
 export interface ProjectDocument {
   id: string;
   title: string;
-  category: 'CAD_DRAWING' | 'PERMIT_DHSUD' | 'LGU_CLEARANCE' | 'STRUCTURAL_PLAN' | 'DEED_LEGAL' | 'SPECIFICATIONS' | 'ARCHITECTURAL' | 'OTHER';
+  category: 'CAD_DRAWING' | 'PERMIT_DHSUD' | 'LGU_CLEARANCE' | 'STRUCTURAL_PLAN' | 'DEED_LEGAL' | 'SPECIFICATIONS' | 'ARCHITECTURAL' | 'OTHER' | (string & {});
   fileUrl?: string;
   fileName?: string;
   mimeType?: string;

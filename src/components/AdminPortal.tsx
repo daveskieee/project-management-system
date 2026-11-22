@@ -261,7 +261,7 @@ interface AdminPortalProps {
   onAddSiteLog?: (log: Omit<DailySiteLog, 'id' | 'createdAt'>) => void;
   onAddDocument?: (doc: Omit<ProjectDocument, 'id' | 'createdAt'>) => void;
   onUpdateDocument?: (id: string, doc: Partial<ProjectDocument>) => void;
-  onDeleteDocument?: (id: string) => void;
+  onDeleteDocument?: (id: string) => void | Promise<boolean | void>;
   onSyncSchedule?: (tasks: any[]) => void;
   onAddRisk?: (risk: Omit<ProjectRisk, 'id' | 'createdAt'>) => void;
   onImportCADLots?: (lots: CADParsedLot[]) => void;

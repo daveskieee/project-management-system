@@ -181,8 +181,6 @@ engineeringRouter.delete('/permits/:id', requireRole(['ADMIN']), async (req: Req
 // GET /api/documents
 engineeringRouter.get('/documents', async (req: Request, res: Response) => {
   try {
-    const { ensureSeedDocuments } = await import('./documents');
-    await ensureSeedDocuments();
     const docs = await prisma.projectDocument.findMany({ orderBy: { createdAt: 'desc' } });
     res.json(docs);
   } catch (error) {
@@ -206,15 +204,16 @@ engineeringRouter.post('/documents', requireRole(['ADMIN', 'ENGINEER']), async (
   }
 
   try {
+    const cleanCategory = typeof category === 'string' && category.trim() ? category.trim().slice(0, 80) : 'CAD_DRAWING';
     const doc = await prisma.projectDocument.create({
       data: {
         title,
-        category: category || 'CAD_DRAWING',
+        category: cleanCategory,
         fileUrl,
         fileSize: fileSize || '2.4 MB',
         version: version || '1.0',
-        status: status || 'APPROVED',
-        uploadedBy: uploadedBy || 'Mauro R. Principe Jr.',
+        status: status || 'IN_REVIEW',
+        uploadedBy: uploadedBy || req.user?.name || 'Operations Manager',
         notes,
       }
     });
@@ -224,12 +223,13 @@ engineeringRouter.post('/documents', requireRole(['ADMIN', 'ENGINEER']), async (
         entityType: 'TITLING',
         entityId: doc.id,
         action: 'DOCUMENT_UPLOADED',
-        actorName: uploadedBy || 'Mauro R. Principe Jr.',
-        actorRole: 'ADMIN',
+        actorName: uploadedBy || req.user?.name || 'Operations Manager',
+        actorRole: req.user?.role || 'ADMIN',
         details: `Uploaded ${doc.category} document: "${doc.title}" (v${doc.version}).`,
       }
     });
 
+    invalidateAllDataCache();
     broadcastChange('documents');
     broadcastChange('auditLogs');
     res.json(doc);
@@ -278,25 +278,41 @@ engineeringRouter.put('/documents/:id', requireRole(['ADMIN', 'ENGINEER']), asyn
 });
 
 // DELETE /api/documents/:id
-engineeringRouter.delete('/documents/:id', requireRole(['ADMIN']), async (req: Request, res: Response) => {
+engineeringRouter.delete('/documents/:id', requireRole(['ADMIN', 'ENGINEER']), async (req: Request, res: Response) => {
   const { id } = req.params;
   try {
-    await prisma.projectDocument.delete({ where: { id } });
+    const existing = await prisma.projectDocument.findUnique({ where: { id } });
+    await prisma.projectDocument.deleteMany({ where: { id } });
+
+    // Best-effort cleanup of local uploaded file if stored under /uploads/
+    if (existing?.fileUrl && existing.fileUrl.startsWith('/uploads/')) {
+      try {
+        const fs = await import('fs');
+        const path = await import('path');
+        const relPath = existing.fileUrl.replace(/^\/+/, '');
+        const fullPath = path.resolve(process.cwd(), 'public', relPath);
+        const uploadsRoot = path.resolve(process.cwd(), 'public', 'uploads');
+        if (fullPath.startsWith(uploadsRoot) && fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+        }
+      } catch { /* non-fatal file cleanup */ }
+    }
 
     await prisma.processAuditLog.create({
       data: {
         entityType: 'TITLING',
         entityId: id,
         action: 'DOCUMENT_DELETED',
-        actorName: 'Mauro R. Principe Jr.',
-        actorRole: 'ADMIN',
-        details: `Deleted project document ${id}.`,
+        actorName: req.user?.name || 'Operations Manager',
+        actorRole: req.user?.role || 'ADMIN',
+        details: `Deleted project document "${existing?.title || id}".`,
       }
     }).catch(() => {});
 
+    invalidateAllDataCache();
     broadcastChange('documents');
     broadcastChange('auditLogs');
-    res.json({ success: true });
+    res.json({ success: true, id });
   } catch (error) {
     console.error('Error deleting document:', error);
     res.status(500).json({ error: 'Internal Server Error' });

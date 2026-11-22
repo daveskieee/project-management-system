@@ -419,7 +419,7 @@ export default function App() {
 
   const fetchDocuments = useCallback(async () => {
     try {
-      const res = await fetch('/api/documents');
+      const res = await fetch('/api/documents', { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         setDocuments(Array.isArray(data) ? data.filter((d: any) => !isTombstoned(d.id)) : []);
@@ -1540,13 +1540,21 @@ export default function App() {
     }
   };
 
-  const handleDeleteDocument = async (id: string) => {
+  const handleDeleteDocument = async (id: string): Promise<boolean> => {
     tombstoneId(id);
     setDocuments(prev => prev.filter(d => d.id !== id));
     try {
-      await fetch(`/api/documents/${id}`, { method: 'DELETE' });
+      const res = await fetch(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        console.error('Failed to delete document:', res.status);
+        await fetchDocuments();
+        return false;
+      }
+      return true;
     } catch (e) {
       console.error('Failed to delete document:', e);
+      await fetchDocuments();
+      return false;
     }
   };
 

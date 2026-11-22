@@ -23,7 +23,7 @@ interface DocumentManagerProps {
   documents: ProjectDocument[];
   onUploadDocument: (doc: Omit<ProjectDocument, 'id' | 'createdAt'>) => void;
   onUpdateDocument?: (id: string, doc: Partial<ProjectDocument>) => void;
-  onDeleteDocument?: (id: string) => void;
+  onDeleteDocument?: (id: string) => void | Promise<boolean | void>;
   milestones?: CivilWorksMilestone[];
   onUpdateMilestone?: (milestoneId: string, currentPercentage: number, status: string, inspectorSignOff: boolean, remarks?: string) => void;
   onSyncSchedule?: (tasks: any[]) => void;
@@ -200,8 +200,9 @@ export default function DocumentManager({
   // Upload Form State
   const [uploadTitle, setUploadTitle] = useState<string>('');
   const [uploadCategory, setUploadCategory] = useState<ProjectDocument['category']>('CAD_DRAWING');
+  const [uploadCustomCategory, setUploadCustomCategory] = useState<string>('');
   const [uploadVersion, setUploadVersion] = useState<string>('1.0');
-  const [uploadStatus, setUploadStatus] = useState<ProjectDocument['status']>('APPROVED');
+  const [uploadStatus, setUploadStatus] = useState<ProjectDocument['status']>('IN_REVIEW');
   const [uploadFileSize, setUploadFileSize] = useState<string>('3.2 MB');
   const [uploadNotes, setUploadNotes] = useState<string>('');
   const [selectedFileName, setSelectedFileName] = useState<string>('');
@@ -215,8 +216,9 @@ export default function DocumentManager({
   // Edit Form State
   const [editTitle, setEditTitle] = useState<string>('');
   const [editCategory, setEditCategory] = useState<ProjectDocument['category']>('CAD_DRAWING');
+  const [editCustomCategory, setEditCustomCategory] = useState<string>('');
   const [editVersion, setEditVersion] = useState<string>('1.0');
-  const [editStatus, setEditStatus] = useState<ProjectDocument['status']>('APPROVED');
+  const [editStatus, setEditStatus] = useState<ProjectDocument['status']>('IN_REVIEW');
   const [editNotes, setEditNotes] = useState<string>('');
 
   // CAD Preview Controls State
@@ -259,14 +261,33 @@ export default function DocumentManager({
 
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
-  const categories = [
+  const PRESET_CATEGORIES = useMemo(() => [
     { id: 'ALL', label: 'All Documents' },
     { id: 'CAD_DRAWING', label: 'CAD & Floor Plans' },
     { id: 'ARCHITECTURAL', label: 'Architectural & Interior' },
     { id: 'STRUCTURAL_PLAN', label: 'MEPFS & Engineering' },
     { id: 'SPECIFICATIONS', label: 'Excel Schedules & BOQ' },
     { id: 'LGU_CLEARANCE', label: 'Permits & Clearances' },
-  ];
+  ], []);
+
+  const PRESET_CATEGORY_IDS = useMemo(
+    () => new Set(PRESET_CATEGORIES.filter(c => c.id !== 'ALL').map(c => c.id)),
+    [PRESET_CATEGORIES]
+  );
+
+  const categories = useMemo(() => {
+    const customMap = new Map<string, string>();
+    (documents || []).forEach(doc => {
+      const cat = (doc.category || '').trim();
+      if (cat && !PRESET_CATEGORY_IDS.has(cat) && !customMap.has(cat)) {
+        customMap.set(cat, cat.replace(/_/g, ' '));
+      }
+    });
+    return [
+      ...PRESET_CATEGORIES,
+      ...Array.from(customMap.entries()).map(([id, label]) => ({ id, label }))
+    ];
+  }, [documents, PRESET_CATEGORIES, PRESET_CATEGORY_IDS]);
 
   const showToast = (msg: string) => {
     setToastNotification(msg);
@@ -450,10 +471,14 @@ export default function DocumentManager({
     }
 
     const uploadedAtIso = new Date().toISOString();
+    const resolvedUploadCategory =
+      uploadCategory === '__CUSTOM__'
+        ? uploadCustomCategory.trim() || 'OTHER'
+        : uploadCategory;
 
     onUploadDocument({
       title: uploadTitle.trim(),
-      category: uploadCategory,
+      category: resolvedUploadCategory,
       version: uploadVersion.trim() || '1.0',
       status: uploadStatus,
       uploadedBy: 'Operations Director',
@@ -466,6 +491,9 @@ export default function DocumentManager({
     });
 
     setUploadTitle('');
+    setUploadCategory('CAD_DRAWING');
+    setUploadCustomCategory('');
+    setUploadStatus('IN_REVIEW');
     setUploadNotes('');
     setSelectedFileName('');
     setSelectedFileMimeType('');
@@ -481,7 +509,13 @@ export default function DocumentManager({
   const handleOpenEdit = (doc: ProjectDocument) => {
     setEditDoc(doc);
     setEditTitle(doc.title);
-    setEditCategory(doc.category);
+    if (PRESET_CATEGORY_IDS.has(doc.category)) {
+      setEditCategory(doc.category);
+      setEditCustomCategory('');
+    } else {
+      setEditCategory('__CUSTOM__');
+      setEditCustomCategory(doc.category || '');
+    }
     setEditVersion(doc.version);
     setEditStatus(doc.status);
     setEditNotes(doc.notes || '');
@@ -492,9 +526,14 @@ export default function DocumentManager({
     e.preventDefault();
     if (!editDoc || !onUpdateDocument) return;
 
+    const resolvedEditCategory =
+      editCategory === '__CUSTOM__'
+        ? editCustomCategory.trim() || editDoc.category || 'OTHER'
+        : editCategory;
+
     onUpdateDocument(editDoc.id, {
       title: editTitle.trim(),
-      category: editCategory,
+      category: resolvedEditCategory,
       version: editVersion.trim(),
       status: editStatus,
       notes: editNotes.trim(),
@@ -505,11 +544,22 @@ export default function DocumentManager({
   };
 
   // Confirm Delete
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     if (deleteConfirmDoc && onDeleteDocument) {
-      onDeleteDocument(deleteConfirmDoc.id);
-      showToast(`Deleted document "${deleteConfirmDoc.title}"`);
+      const targetDoc = deleteConfirmDoc;
       setDeleteConfirmDoc(null);
+      setSelectedDocIds(prev => {
+        if (!prev.has(targetDoc.id)) return prev;
+        const next = new Set(prev);
+        next.delete(targetDoc.id);
+        return next;
+      });
+      const result = await onDeleteDocument(targetDoc.id);
+      if (result === false) {
+        showToast(`Failed to delete document "${targetDoc.title}"`);
+      } else {
+        showToast(`Deleted document "${targetDoc.title}"`);
+      }
     }
   };
 
@@ -543,16 +593,9 @@ export default function DocumentManager({
     }
   };
 
-  // Merge seed documents if not present
+  // Use authoritative database documents directly (never re-inject static mock/seed rows after deletion)
   const effectiveDocuments = useMemo(() => {
-    const list = [...(documents || [])];
-    for (const seed of DEFAULT_SEED_DOCUMENTS) {
-      const exists = list.some(d => d.id === seed.id || d.category === seed.category || d.title.toLowerCase() === seed.title.toLowerCase());
-      if (!exists) {
-        list.push(seed);
-      }
-    }
-    return list;
+    return [...(documents || [])];
   }, [documents]);
 
   // Total Storage Metric Calculation (Used, Maximum Quota, Available)
@@ -858,8 +901,8 @@ export default function DocumentManager({
             <button
               onClick={() => handleToggleViewMode('list')}
               className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${viewMode === 'list'
-                  ? 'bg-teal-500 text-slate-950 font-bold shadow-sm'
-                  : 'text-slate-400 hover:text-white'
+                ? 'bg-teal-500 text-slate-950 font-bold shadow-sm'
+                : 'text-slate-400 hover:text-white'
                 }`}
               title="OneDrive Table / List View"
             >
@@ -868,8 +911,8 @@ export default function DocumentManager({
             <button
               onClick={() => handleToggleViewMode('grid')}
               className={`p-1.5 rounded-lg text-xs font-semibold flex items-center gap-1 transition-colors cursor-pointer ${viewMode === 'grid'
-                  ? 'bg-teal-500 text-slate-950 font-bold shadow-sm'
-                  : 'text-slate-400 hover:text-white'
+                ? 'bg-teal-500 text-slate-950 font-bold shadow-sm'
+                : 'text-slate-400 hover:text-white'
                 }`}
               title="OneDrive Tiles / Grid View"
             >
@@ -904,8 +947,8 @@ export default function DocumentManager({
                 key={cat.id}
                 onClick={() => setActiveCategory(cat.id)}
                 className={`px-3 py-1.5 rounded-xl text-xs font-medium whitespace-nowrap transition-colors cursor-pointer flex items-center gap-1.5 ${activeCategory === cat.id
-                    ? 'bg-teal-500 text-slate-950 font-bold shadow-sm shadow-teal-500/20'
-                    : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800/80'
+                  ? 'bg-teal-500 text-slate-950 font-bold shadow-sm shadow-teal-500/20'
+                  : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800/80'
                   }`}
               >
                 <span>{cat.label}</span>
@@ -1142,8 +1185,8 @@ export default function DocumentManager({
                       {/* Status */}
                       <td className="py-3 px-3 text-center hidden md:table-cell">
                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold inline-block ${doc.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                            doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
-                              'bg-slate-800 text-slate-300 border border-slate-700'
+                          doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                            'bg-slate-800 text-slate-300 border border-slate-700'
                           }`}>
                           {doc.status}
                         </span>
@@ -1247,15 +1290,21 @@ export default function DocumentManager({
                       </div>
                       <div>
                         <span className="text-[10px] font-mono text-teal-400 font-bold uppercase block">
-                          {isCad ? 'CAD BLUEPRINT' : isExcel ? 'EXCEL SCHEDULE' : doc.category.replace(/_/g, ' ')}
+                          {!PRESET_CATEGORY_IDS.has(doc.category)
+                            ? doc.category.replace(/_/g, ' ')
+                            : isCad
+                              ? 'CAD BLUEPRINT'
+                              : isExcel
+                                ? 'EXCEL SCHEDULE'
+                                : doc.category.replace(/_/g, ' ')}
                         </span>
                         <span className="text-[10px] text-slate-500 font-mono">v{doc.version} • {doc.fileSize || '2.5 MB'}</span>
                       </div>
                     </div>
 
                     <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${doc.status === 'APPROVED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                        doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
-                          'bg-slate-800 text-slate-300 border border-slate-700'
+                      doc.status === 'IN_REVIEW' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                        'bg-slate-800 text-slate-300 border border-slate-700'
                       }`}>
                       {doc.status}
                     </span>
@@ -1385,10 +1434,10 @@ export default function DocumentManager({
                 </div>
 
                 <div className={`border border-dashed rounded-xl p-3.5 text-center bg-slate-950/60 cursor-pointer relative transition-all ${fileSizeError
-                    ? 'border-rose-500/80 bg-rose-950/20'
-                    : selectedFileName
-                      ? 'border-teal-500/80 bg-teal-950/10'
-                      : 'border-slate-700 hover:border-teal-500/80'
+                  ? 'border-rose-500/80 bg-rose-950/20'
+                  : selectedFileName
+                    ? 'border-teal-500/80 bg-teal-950/10'
+                    : 'border-slate-700 hover:border-teal-500/80'
                   }`}>
                   <input
                     type="file"
@@ -1440,8 +1489,8 @@ export default function DocumentManager({
                     <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
                       <div
                         className={`h-1.5 rounded-full transition-all duration-300 ${(selectedFileSizeBytes / MAX_UPLOAD_SIZE_BYTES) > 0.8
-                            ? 'bg-amber-400'
-                            : 'bg-teal-400'
+                          ? 'bg-amber-400'
+                          : 'bg-teal-400'
                           }`}
                         style={{ width: `${Math.min(100, (selectedFileSizeBytes / MAX_UPLOAD_SIZE_BYTES) * 100)}%` }}
                       />
@@ -1486,10 +1535,11 @@ export default function DocumentManager({
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2 py-2 text-xs text-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
                   >
                     <option value="CAD_DRAWING">CAD & Floor Plans</option>
-                    <option value="SPECIFICATIONS">Excel Schedule & BOQ</option>
+                    <option value="SPECIFICATIONS">Excel Schedules & BOQ</option>
                     <option value="ARCHITECTURAL">Architectural & Interior</option>
                     <option value="STRUCTURAL_PLAN">MEPFS & Engineering</option>
                     <option value="LGU_CLEARANCE">Permits & Clearances</option>
+                    <option value="__CUSTOM__">Custom Category...</option>
                   </select>
                 </div>
 
@@ -1505,6 +1555,21 @@ export default function DocumentManager({
                 </div>
               </div>
 
+              {uploadCategory === '__CUSTOM__' && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Custom Category Name *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={60}
+                    placeholder="e.g. Structural Calculations, Site Inspection Reports"
+                    value={uploadCustomCategory}
+                    onChange={(e) => setUploadCustomCategory(e.target.value)}
+                    className="w-full bg-slate-950 border border-teal-500/60 rounded-xl px-3 py-2 text-xs text-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
+                  />
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Approval Status</label>
                 <select
@@ -1512,9 +1577,9 @@ export default function DocumentManager({
                   onChange={(e) => setUploadStatus(e.target.value as any)}
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2 py-2 text-xs text-white focus:ring-2 focus:ring-teal-500 focus:outline-none"
                 >
-                  <option value="APPROVED">APPROVED (Official As-Built)</option>
                   <option value="IN_REVIEW">IN_REVIEW (Pending Sign-Off)</option>
                   <option value="DRAFT">DRAFT (Preliminary)</option>
+                  <option value="APPROVED">APPROVED (Official As-Built)</option>
                 </select>
               </div>
 
@@ -1546,8 +1611,8 @@ export default function DocumentManager({
                   type="submit"
                   disabled={Boolean(isUploading || fileSizeError || selectedFileSizeBytes > MAX_UPLOAD_SIZE_BYTES)}
                   className={`px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${isUploading || fileSizeError || selectedFileSizeBytes > MAX_UPLOAD_SIZE_BYTES
-                      ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed opacity-60'
-                      : 'text-white bg-teal-600 hover:bg-teal-500 shadow-lg shadow-teal-950 cursor-pointer'
+                    ? 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed opacity-60'
+                    : 'text-white bg-teal-600 hover:bg-teal-500 shadow-lg shadow-teal-950 cursor-pointer'
                     }`}
                 >
                   {isUploading ? (
@@ -1612,10 +1677,11 @@ export default function DocumentManager({
                     className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2 py-2 text-xs text-white focus:ring-2 focus:ring-amber-500 focus:outline-none"
                   >
                     <option value="CAD_DRAWING">CAD & Floor Plans</option>
-                    <option value="SPECIFICATIONS">Excel Schedule & BOQ</option>
+                    <option value="SPECIFICATIONS">Excel Schedules & BOQ</option>
                     <option value="ARCHITECTURAL">Architectural & Interior</option>
                     <option value="STRUCTURAL_PLAN">MEPFS & Engineering</option>
                     <option value="LGU_CLEARANCE">Permits & Clearances</option>
+                    <option value="__CUSTOM__">Custom Category...</option>
                   </select>
                 </div>
 
@@ -1629,6 +1695,21 @@ export default function DocumentManager({
                   />
                 </div>
               </div>
+
+              {editCategory === '__CUSTOM__' && (
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Custom Category Name *</label>
+                  <input
+                    type="text"
+                    required
+                    maxLength={60}
+                    placeholder="e.g. Structural Calculations, Site Inspection Reports"
+                    value={editCustomCategory}
+                    onChange={(e) => setEditCustomCategory(e.target.value)}
+                    className="w-full bg-slate-950 border border-amber-500/60 rounded-xl px-3 py-2 text-xs text-white focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block text-xs font-semibold text-slate-300 mb-1">Approval Status</label>
@@ -1719,8 +1800,8 @@ export default function DocumentManager({
             <div className="p-4 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 shrink-0">
               <div className="flex items-center gap-3">
                 <div className={`w-9 h-9 rounded-xl flex items-center justify-center font-bold border ${isCadDocument(previewDoc) ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' :
-                    isExcelScheduleDocument(previewDoc) ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' :
-                      'bg-teal-500/10 border-teal-500/30 text-teal-400'
+                  isExcelScheduleDocument(previewDoc) ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' :
+                    'bg-teal-500/10 border-teal-500/30 text-teal-400'
                   }`}>
                   {isCadDocument(previewDoc) ? <FileCode className="w-5 h-5" /> :
                     isExcelScheduleDocument(previewDoc) ? <FileSpreadsheet className="w-5 h-5" /> :
@@ -2028,8 +2109,8 @@ export default function DocumentManager({
                             </td>
                             <td className="py-2.5 px-3">
                               <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${row.status === 'COMPLETED' ? 'bg-emerald-950 text-emerald-400 border border-emerald-800' :
-                                  row.status === 'IN_PROGRESS' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
-                                    'bg-slate-800 text-slate-400'
+                                row.status === 'IN_PROGRESS' ? 'bg-amber-950 text-amber-400 border border-amber-800' :
+                                  'bg-slate-800 text-slate-400'
                                 }`}>
                                 {row.status}
                               </span>
