@@ -188,10 +188,32 @@ export function computeUnifiedProjectProgress(taskList: UnifiedGanttTaskLike[]):
   const targetList = getLeafGanttTasks(taskList);
   const hasExplicitWeights = targetList.some(t => typeof t.weight === 'number' && t.weight > 0);
 
+  // Hierarchical weighting: if parent phases carry explicit weights (e.g. RN-01 = 12%, RN-03 = 25%)
+  // and their child sub-phases carry relative weights summing to 100% per phase, scale each child
+  // by (parent.weight * child.weight / siblingWeightSum).
+  const byId = new Map<string, UnifiedGanttTaskLike>(taskList.map(t => [String(t.id), t]));
+  const siblingWeightTotals = new Map<string, number>();
+  if (hasExplicitWeights) {
+    for (const t of targetList) {
+      const pid = t.parentTaskId ? String(t.parentTaskId) : '';
+      if (!pid) continue;
+      const w = Math.max(0, Number(t.weight ?? 0));
+      siblingWeightTotals.set(pid, (siblingWeightTotals.get(pid) || 0) + w);
+    }
+  }
+
   let totalWeight = 0;
   let weightedSum = 0;
   for (const t of targetList) {
-    const w = resolveTaskWeight(t, hasExplicitWeights);
+    let w = resolveTaskWeight(t, hasExplicitWeights);
+    if (hasExplicitWeights && t.parentTaskId) {
+      const parent = byId.get(String(t.parentTaskId));
+      const parentWeight = typeof parent?.weight === 'number' && parent.weight > 0 ? parent.weight : 0;
+      const sibSum = siblingWeightTotals.get(String(t.parentTaskId)) || 0;
+      if (parentWeight > 0 && sibSum > 0) {
+        w = parentWeight * (Math.max(0, Number(t.weight ?? 0)) / sibSum);
+      }
+    }
     totalWeight += w;
     weightedSum += normalizeTaskProgressFraction(t) * w;
   }

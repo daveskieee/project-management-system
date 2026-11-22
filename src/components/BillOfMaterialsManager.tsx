@@ -399,6 +399,63 @@ export default function BillOfMaterialsManager({
     }
   }, [activeProject]);
 
+  // Normalize any flat or partial BOM phase records into canonical BomPhase -> BomSubPhase -> BomLineItem shape
+  const normalizeBomPhases = useCallback((raw: any): BomPhase[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((p): p is Record<string, any> => Boolean(p && typeof p === 'object'))
+      .map((p, pIdx) => {
+        const defaultProfitPct = Number(p.defaultProfitPct ?? 20) || 20;
+        const defaultOverheadPct = Number(p.defaultOverheadPct ?? 5) || 5;
+        const title = String(p.title ?? p.name ?? `Phase ${pIdx + 1}`);
+        const code = String(p.code ?? String.fromCharCode(65 + (pIdx % 26)));
+        const mapItem = (it: any, iIdx: number): BomLineItem => {
+          const unitCost = Number(
+            it?.unitCost ??
+              ((Number(it?.materialUnitCost || 0) + Number(it?.laborUnitCost || 0)) || 0)
+          ) || 0;
+          return {
+            id: String(it?.id ?? `item-${pIdx}-${iIdx}`),
+            scopeOfWork: String(it?.scopeOfWork ?? it?.description ?? 'Scope Item'),
+            noOfUnits: Number(it?.noOfUnits ?? it?.qty ?? 1) || 0,
+            unit: String(it?.unit ?? 'lot'),
+            unitCost,
+            profitPct: Number(it?.profitPct ?? defaultProfitPct) || 0,
+            overheadPct: Number(it?.overheadPct ?? defaultOverheadPct) || 0,
+            designCost: Number(it?.designCost ?? 0) || 0,
+          };
+        };
+
+        let subPhases: BomSubPhase[] = [];
+        if (Array.isArray(p.subPhases) && p.subPhases.length > 0) {
+          subPhases = p.subPhases
+            .filter((sp: any) => Boolean(sp && typeof sp === 'object'))
+            .map((sp: any, sIdx: number) => ({
+              id: String(sp.id ?? `sub-${pIdx}-${sIdx}`),
+              title: String(sp.title ?? sp.name ?? 'Work Package'),
+              items: Array.isArray(sp.items) ? sp.items.filter(Boolean).map(mapItem) : [],
+            }));
+        } else if (Array.isArray(p.items)) {
+          subPhases = [
+            {
+              id: `sub-${String(p.id ?? pIdx)}-1`,
+              title,
+              items: p.items.filter(Boolean).map(mapItem),
+            },
+          ];
+        }
+
+        return {
+          id: String(p.id ?? `phase-${pIdx}`),
+          code,
+          title,
+          defaultProfitPct,
+          defaultOverheadPct,
+          subPhases,
+        };
+      });
+  }, []);
+
   // BOM Phases State — strictly start blank ([]) when no saved BOM exists for the project
   const storageKey = `ldm_bom_${selectedProjectId}`;
   const [phases, setPhases] = useState<BomPhase[]>(() => {
@@ -406,7 +463,7 @@ export default function BillOfMaterialsManager({
       const saved = localStorage.getItem(storageKey);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed)) return normalizeBomPhases(parsed);
       }
     } catch { }
     return [];
@@ -419,22 +476,25 @@ export default function BillOfMaterialsManager({
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          setPhases(parsed);
+          const normalized = normalizeBomPhases(parsed);
+          setPhases(normalized);
+          localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(normalized));
           return;
         }
       }
     } catch { }
     const serverPhases = Array.isArray((activeProject as any)?.bomPhases) ? (activeProject as any).bomPhases : [];
     if (serverPhases.length > 0) {
-      setPhases(serverPhases);
+      const normalized = normalizeBomPhases(serverPhases);
+      setPhases(normalized);
       try {
-        localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(serverPhases));
+        localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(normalized));
       } catch { }
       return;
     }
     setPhases([]);
     setProjectType('');
-  }, [selectedProjectId, activeProject]);
+  }, [selectedProjectId, activeProject, normalizeBomPhases]);
 
   const [materialSyncTick, setMaterialSyncTick] = useState(0);
 
@@ -760,15 +820,19 @@ export default function BillOfMaterialsManager({
     let grandTotalCost = 0;
     let totalLineItemsCount = 0;
 
-    const phaseSummaries = phases.map(phase => {
+    const safePhasesList = Array.isArray(phases) ? phases.filter(Boolean) : [];
+    const phaseSummaries = safePhasesList.map(phase => {
       let phaseDirect = 0;
       let phaseProfit = 0;
       let phaseOverhead = 0;
       let phaseDesign = 0;
       let phaseTotal = 0;
 
-      phase.subPhases.forEach(sp => {
-        sp.items.forEach(item => {
+      const subList = Array.isArray(phase?.subPhases) ? phase.subPhases : [];
+      subList.forEach(sp => {
+        const itemList = Array.isArray(sp?.items) ? sp.items : [];
+        itemList.forEach(item => {
+          if (!item) return;
           totalLineItemsCount++;
           const computed = calculateLineItemCosts(item);
           phaseDirect += computed.directTotalCost;

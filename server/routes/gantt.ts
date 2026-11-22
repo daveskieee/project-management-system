@@ -8,6 +8,17 @@ import { PrismaClient } from '@prisma/client';
 import { broadcastChange, invalidateAllDataCache } from '../events';
 import { requireAuth, requireRole, checkUserProjectAccess, hasProjectManagementAccess } from '../middleware/auth';
 
+const GANTT_CACHE_TTL_MS = 60_000;
+const ganttCache = new Map<string, { data: any[]; links: any[]; ts: number }>();
+
+export function invalidateGanttCache(projectId?: string) {
+  if (projectId) {
+    ganttCache.delete(projectId);
+  } else {
+    ganttCache.clear();
+  }
+}
+
 export function createGanttRouter(prisma: PrismaClient) {
   const router = Router();
 
@@ -54,6 +65,12 @@ export function createGanttRouter(prisma: PrismaClient) {
         return res.status(403).json({ error: 'Forbidden: You do not have access to this project.' });
       }
 
+      // Fast-path in-memory cache hit (<5ms)
+      const cached = ganttCache.get(projectId);
+      if (cached && Date.now() - cached.ts < GANTT_CACHE_TTL_MS && req.query.fresh !== '1') {
+        return res.json({ data: cached.data, links: cached.links });
+      }
+
       const existingProject = await prisma.commercialProject.findUnique({ where: { id: projectId } });
       if (!existingProject) {
         return res.json({ data: [], links: [] });
@@ -82,6 +99,7 @@ export function createGanttRouter(prisma: PrismaClient) {
           end_date: formatGanttDate(t.endDate),
           duration: t.duration,
           progress: typeof t.progress === 'number' ? t.progress : 0,
+          weight: typeof (t as any).weight === 'number' ? (t as any).weight : null,
           status: t.status || ((typeof t.progress === 'number' && t.progress >= 1.0) ? 'COMPLETED' : (typeof t.progress === 'number' && t.progress > 0) ? 'IN_PROGRESS' : 'TODO'),
           parent: t.parentTaskId || 0,
           type: isMilestone ? 'milestone' : t.type || 'task',
@@ -102,6 +120,12 @@ export function createGanttRouter(prisma: PrismaClient) {
         type: l.type || '0',
         lag: l.lagDays || 0
       }));
+
+      ganttCache.set(projectId, {
+        data,
+        links: formattedLinks,
+        ts: Date.now(),
+      });
 
       res.json({
         data,
@@ -202,6 +226,7 @@ export function createGanttRouter(prisma: PrismaClient) {
                   endDate,
                   duration,
                   progress,
+                  ...(typeof effectiveData?.weight === 'number' ? { weight: effectiveData.weight } : {}),
                   status,
                   type,
                   parentTaskId: safeParentId,
@@ -277,6 +302,7 @@ export function createGanttRouter(prisma: PrismaClient) {
                     ...(endRaw && !isNaN(parsedEnd.getTime()) ? { endDate } : {}),
                     ...(effectiveData?.duration !== undefined ? { duration } : {}),
                     ...(progress !== undefined ? { progress } : {}),
+                    ...(effectiveData?.weight !== undefined && effectiveData?.weight !== null ? { weight: Number(effectiveData.weight) } : {}),
                     ...(derivedStatus !== undefined ? { status: derivedStatus } : {}),
                     ...(effectiveData?.type !== undefined ? { type } : {}),
                     ...(safeParentId !== undefined ? { parentTaskId: safeParentId } : {}),
@@ -429,6 +455,7 @@ export function createGanttRouter(prisma: PrismaClient) {
                 end_date: formatGanttDate(t.endDate),
                 duration: t.duration,
                 progress: typeof t.progress === 'number' ? t.progress : 0,
+                weight: typeof (t as any).weight === 'number' ? (t as any).weight : null,
                 status: t.status || ((typeof t.progress === 'number' && t.progress >= 1.0) ? 'COMPLETED' : (typeof t.progress === 'number' && t.progress > 0) ? 'IN_PROGRESS' : 'TODO'),
                 parent: t.parentTaskId || 0,
                 type: isMilestone ? 'milestone' : t.type || 'task',
@@ -451,6 +478,11 @@ export function createGanttRouter(prisma: PrismaClient) {
           };
         });
 
+        ganttCache.set(projectId, {
+          data: opResult.data,
+          links: opResult.links,
+          ts: Date.now(),
+        });
         broadcastChange('tasks');
         broadcastChange('projects');
         invalidateAllDataCache();
@@ -577,6 +609,7 @@ export function createGanttRouter(prisma: PrismaClient) {
             baselineEnd,
             duration,
             progress,
+            ...(t.weight !== undefined && t.weight !== null ? { weight: Number(t.weight) } : {}),
             status,
             type,
             parentTaskId: safeParentId,
@@ -702,6 +735,7 @@ export function createGanttRouter(prisma: PrismaClient) {
               end_date: formatGanttDate(t.endDate),
               duration: t.duration,
               progress: typeof t.progress === 'number' ? t.progress : 0,
+              weight: typeof (t as any).weight === 'number' ? (t as any).weight : null,
               status: t.status || ((typeof t.progress === 'number' && t.progress >= 1.0) ? 'COMPLETED' : (typeof t.progress === 'number' && t.progress > 0) ? 'IN_PROGRESS' : 'TODO'),
               parent: t.parentTaskId || 0,
               type: isMilestone ? 'milestone' : t.type || 'task',
@@ -724,6 +758,11 @@ export function createGanttRouter(prisma: PrismaClient) {
         };
       }, { maxWait: 15000, timeout: 30000 });
 
+      ganttCache.set(projectId, {
+        data: result.data,
+        links: result.links,
+        ts: Date.now(),
+      });
       broadcastChange('tasks');
       broadcastChange('projects');
       invalidateAllDataCache();

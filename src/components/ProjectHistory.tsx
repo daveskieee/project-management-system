@@ -62,33 +62,62 @@ export default function ProjectHistory({
   const [markingId, setMarkingId] = useState<string | null>(null);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
+  const safeProjects = useMemo(
+    () => (Array.isArray(projects) ? projects.filter((p): p is ProjectProfile => Boolean(p && p.id)) : []),
+    [projects]
+  );
+  const safeTasks = useMemo(() => (Array.isArray(tasks) ? tasks.filter(Boolean) : []), [tasks]);
+  const safeContractors = useMemo(() => (Array.isArray(contractors) ? contractors.filter(Boolean) : []), [contractors]);
+  const safeSiteLogs = useMemo(() => (Array.isArray(siteLogs) ? siteLogs.filter(Boolean) : []), [siteLogs]);
+  const safeChangeOrders = useMemo(() => (Array.isArray(changeOrders) ? changeOrders.filter(Boolean) : []), [changeOrders]);
+  const safeRfis = useMemo(() => (Array.isArray(rfis) ? rfis.filter(Boolean) : []), [rfis]);
+  const safeAuditLogs = useMemo(() => (Array.isArray(auditLogs) ? auditLogs.filter(Boolean) : []), [auditLogs]);
+
+  const safeProfitSync = (proj: ProjectProfile) => {
+    try {
+      const res = calculateProjectBomProfitSync({
+        projectId: proj?.id ?? '',
+        projectName: proj?.name ?? '',
+        phases: Array.isArray(proj?.bomPhases) ? proj.bomPhases : undefined,
+      });
+      return {
+        ...res,
+        profitMarginPct: Number(res?.profitMarginPct ?? 0) || 0,
+        remainingProfit: Number(res?.remainingProfit ?? 0) || 0,
+      };
+    } catch {
+      return { profitMarginPct: 0, remainingProfit: 0 };
+    }
+  };
+
   const completedProjects = useMemo(
     () =>
-      projects.filter((p) => {
-        const st = (p.status || '').toUpperCase();
+      safeProjects.filter((p) => {
+        const st = String(p?.status ?? '').toUpperCase();
         return st === 'COMPLETED' || st === 'HANDED_OVER';
       }),
-    [projects]
+    [safeProjects]
   );
 
   const activeFinishableProjects = useMemo(
     () =>
-      projects.filter((p) => {
-        const st = (p.status || '').toUpperCase();
+      safeProjects.filter((p) => {
+        const st = String(p?.status ?? '').toUpperCase();
         return st !== 'COMPLETED' && st !== 'HANDED_OVER';
       }),
-    [projects]
+    [safeProjects]
   );
 
   const filteredCompleted = useMemo(() => {
-    if (!searchQuery.trim()) return completedProjects;
-    const q = searchQuery.toLowerCase();
+    const trimmed = String(searchQuery ?? '').trim();
+    if (!trimmed) return completedProjects;
+    const q = trimmed.toLowerCase();
     return completedProjects.filter(
       (p) =>
-        p.name.toLowerCase().includes(q) ||
-        (p.clientName || '').toLowerCase().includes(q) ||
-        (p.location || '').toLowerCase().includes(q) ||
-        p.id.toLowerCase().includes(q)
+        String(p?.name ?? '').toLowerCase().includes(q) ||
+        String(p?.clientName ?? '').toLowerCase().includes(q) ||
+        String(p?.location ?? '').toLowerCase().includes(q) ||
+        String(p?.id ?? '').toLowerCase().includes(q)
     );
   }, [completedProjects, searchQuery]);
 
@@ -146,69 +175,69 @@ export default function ProjectHistory({
   // Compute full dossier metrics for the currently selected completed project
   const dossierData = useMemo(() => {
     if (!selectedProject) return null;
-    const projNameLower = (selectedProject.name || '').toLowerCase();
+    const projId = String(selectedProject?.id ?? '');
+    const projName = String(selectedProject?.name ?? '');
+    const projNameLower = projName.toLowerCase();
 
-    const approvedCOs = changeOrders.filter(
+    const approvedCOs = safeChangeOrders.filter(
       (co) =>
-        (co.projectId === selectedProject.id ||
-          (co.projectName || '').toLowerCase() === projNameLower) &&
-        (co.status || '').toUpperCase() === 'APPROVED'
+        (String(co?.projectId ?? '') === projId ||
+          String(co?.projectName ?? '').toLowerCase() === projNameLower) &&
+        String(co?.status ?? '').toUpperCase() === 'APPROVED'
     );
     const approvedCOValue = approvedCOs.reduce(
-      (sum, co) => sum + (Number(co.approvedAmount ?? co.requestedAmount ?? co.amount ?? 0) || 0),
+      (sum, co) => sum + (Number(co?.approvedAmount ?? co?.requestedAmount ?? (co as any)?.amount ?? 0) || 0),
       0
     );
 
-    const allMaterials = getStoredMaterialDirectory();
-    const projectMaterials = allMaterials.filter((m) => {
-      const mp = (m.projectName || '').toLowerCase();
-      return mp && (mp === projNameLower || mp.includes(projNameLower) || projNameLower.includes(mp));
+    const allMaterials = getStoredMaterialDirectory() ?? [];
+    const projectMaterials = (Array.isArray(allMaterials) ? allMaterials : []).filter((m) => {
+      const mp = String(m?.projectName ?? '').toLowerCase();
+      return Boolean(mp && projNameLower && (mp === projNameLower || mp.includes(projNameLower) || projNameLower.includes(mp)));
     });
-    const totalMaterialCost = getProjectMaterialSpend(selectedProject.name, allMaterials);
+    const totalMaterialCost = Number(getProjectMaterialSpend(projName, allMaterials) ?? 0) || 0;
 
-    const deployedWorkers = contractors.filter(
+    const assignedIds = Array.isArray(selectedProject?.assignedContractorIds) ? selectedProject.assignedContractorIds : [];
+    const deployedWorkers = safeContractors.filter(
       (c) =>
-        (selectedProject.assignedContractorIds || []).includes(c.id) ||
-        c.assignedProjectId === selectedProject.id ||
-        (c.activeProjectSite || '').toLowerCase() === projNameLower
+        assignedIds.includes(c?.id) ||
+        String(c?.assignedProjectId ?? '') === projId ||
+        (projNameLower !== '' && String(c?.activeProjectSite ?? '').toLowerCase() === projNameLower)
     );
     const totalLaborCost = deployedWorkers.reduce(
-      (sum, w) => sum + (Number(w.paidAmount || 0) || Number(w.dailyRate || 0) * 22),
+      (sum, w) => sum + (Number(w?.paidAmount || 0) || Number(w?.dailyRate || 0) * 22),
       0
     );
 
-    const profitSync = calculateProjectBomProfitSync({
-      projectId: selectedProject.id,
-      projectName: selectedProject.name,
-    });
+    const profitSync = safeProfitSync(selectedProject);
 
-    const projectRfis = rfis.filter(
+    const projectRfis = safeRfis.filter(
       (r) =>
-        r.projectId === selectedProject.id ||
-        (r.projectName || '').toLowerCase() === projNameLower
+        String(r?.projectId ?? '') === projId ||
+        (projNameLower !== '' && String(r?.projectName ?? '').toLowerCase() === projNameLower)
     );
 
-    const projectSiteLogs = siteLogs.filter(
+    const projectSiteLogs = safeSiteLogs.filter(
       (log) =>
-        (log as any).projectId === selectedProject.id ||
-        ((log as any).projectName || '').toLowerCase() === projNameLower ||
-        (log.workCompleted || '').toLowerCase().includes(projNameLower)
+        String((log as any)?.projectId ?? '') === projId ||
+        (projNameLower !== '' && String((log as any)?.projectName ?? '').toLowerCase() === projNameLower) ||
+        (projNameLower !== '' && String(log?.workCompleted ?? '').toLowerCase().includes(projNameLower))
     );
 
-    const projectAuditLogs = auditLogs.filter(
+    const projectAuditLogs = safeAuditLogs.filter(
       (a) =>
-        a.entityId === selectedProject.id ||
-        (a.details || '').toLowerCase().includes(projNameLower)
+        String(a?.entityId ?? '') === projId ||
+        (projNameLower !== '' && String(a?.details ?? '').toLowerCase().includes(projNameLower))
     );
 
-    const fallbackTasks = tasks.filter((t) => t.projectId === selectedProject.id);
-    const finalTasks = dossierGanttTasks.length > 0 ? dossierGanttTasks : fallbackTasks;
+    const fallbackTasks = safeTasks.filter((t) => String(t?.projectId ?? '') === projId);
+    const finalTasks = Array.isArray(dossierGanttTasks) && dossierGanttTasks.length > 0 ? dossierGanttTasks : fallbackTasks;
 
     return {
-      contractAmount: Number(selectedProject.budget || 0),
+      contractAmount: Number(selectedProject?.budget ?? 0) || 0,
       approvedCOs,
       approvedCOValue,
-      totalFundsCollected: Number(selectedProject.fundsCollected || 0),
+      totalFundsCollected: Number(selectedProject?.fundsCollected ?? 0) || 0,
       totalMaterialCost,
       totalLaborCost,
       profitSync,
@@ -219,7 +248,7 @@ export default function ProjectHistory({
       projectAuditLogs,
       finalTasks,
     };
-  }, [selectedProject, changeOrders, contractors, rfis, siteLogs, auditLogs, tasks, dossierGanttTasks]);
+  }, [selectedProject, safeChangeOrders, safeContractors, safeRfis, safeSiteLogs, safeAuditLogs, safeTasks, dossierGanttTasks]);
 
   const handlePrintDossier = () => {
     if (!selectedProject || !dossierData) return;
@@ -328,7 +357,7 @@ export default function ProjectHistory({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {filteredCompleted.map((proj) => {
-            const profitSync = calculateProjectBomProfitSync({ projectId: proj.id, projectName: proj.name });
+            const profitSync = safeProfitSync(proj);
             return (
               <div
                 key={proj.id}
@@ -672,12 +701,12 @@ export default function ProjectHistory({
                     </div>
                   ) : (
                     dossierData.projectSiteLogs.map((log) => (
-                      <div key={log.id} className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
+                      <div key={log?.id ?? String(log?.date ?? '')} className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-1">
                         <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
-                          <span className="text-amber-400 font-bold">{String(log.date).slice(0, 10)} • {log.weather}</span>
-                          <span>Supervisor: {log.supervisorName} • {log.activeHeadcount} pax</span>
+                          <span className="text-amber-400 font-bold">{String(log?.date ?? '').slice(0, 10) || '—'} • {log?.weather ?? 'Clear'}</span>
+                          <span>Supervisor: {log?.supervisorName ?? 'Site Lead'} • {Number(log?.activeHeadcount ?? 0)} pax</span>
                         </div>
-                        <p className="text-slate-200">{log.workCompleted}</p>
+                        <p className="text-slate-200">{log?.workCompleted ?? ''}</p>
                       </div>
                     ))
                   )}

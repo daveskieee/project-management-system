@@ -104,31 +104,31 @@ async function cleanExistingData() {
     const targetProjIds = targetProjsRes.rows.map(r => r.id);
 
     if (targetProjIds.length > 0) {
-      await pool.query(`DELETE FROM payroll_items WHERE payroll_run_id IN (SELECT id FROM payroll_runs WHERE project_id = ANY($1::text[]))`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM payroll_runs WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM attendance_logs WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM cash_advances WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM project_worker_assignments WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM task_links WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM project_tasks WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM "TaskLink" WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM "ProjectTask" WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM punch_list_defects WHERE slot_id = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM project_bom_phases WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => {});
-      await pool.query(`DELETE FROM commercial_projects WHERE id = ANY($1::text[])`, [targetProjIds]).catch(() => {});
+      await pool.query(`DELETE FROM payroll_items WHERE payroll_run_id IN (SELECT id FROM payroll_runs WHERE project_id = ANY($1::text[]))`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM payroll_runs WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM attendance_logs WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM cash_advances WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM project_worker_assignments WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM task_links WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM project_tasks WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM "TaskLink" WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM "ProjectTask" WHERE "projectId" = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM punch_list_defects WHERE slot_id = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM project_bom_phases WHERE project_id = ANY($1::text[])`, [targetProjIds]).catch(() => { });
+      await pool.query(`DELETE FROM commercial_projects WHERE id = ANY($1::text[])`, [targetProjIds]).catch(() => { });
     }
 
     // Purge legacy/orphaned financial & compliance records (Sereno ₱1 test, PRJ-0650, Rodolfo alonte, Brent, Paul, Lizter, etc.)
-    await pool.query(`DELETE FROM installment_ledgers`).catch(() => {});
-    await pool.query(`DELETE FROM client_packages`).catch(() => {});
-    await pool.query(`DELETE FROM users WHERE role = 'CLIENT'`).catch(() => {});
-    await pool.query(`DELETE FROM subcontractor_payables`).catch(() => {});
-    await pool.query(`DELETE FROM daily_manpower_audits`).catch(() => {});
-    await pool.query(`DELETE FROM payroll_items`).catch(() => {});
-    await pool.query(`DELETE FROM payroll_runs`).catch(() => {});
-    await pool.query(`DELETE FROM government_permits`).catch(() => {});
-    await pool.query(`DELETE FROM change_orders`).catch(() => {});
-    await pool.query(`DELETE FROM project_bom_phases`).catch(() => {});
+    await pool.query(`DELETE FROM installment_ledgers`).catch(() => { });
+    await pool.query(`DELETE FROM client_packages`).catch(() => { });
+    await pool.query(`DELETE FROM users WHERE role = 'CLIENT'`).catch(() => { });
+    await pool.query(`DELETE FROM subcontractor_payables`).catch(() => { });
+    await pool.query(`DELETE FROM daily_manpower_audits`).catch(() => { });
+    await pool.query(`DELETE FROM payroll_items`).catch(() => { });
+    await pool.query(`DELETE FROM payroll_runs`).catch(() => { });
+    await pool.query(`DELETE FROM government_permits`).catch(() => { });
+    await pool.query(`DELETE FROM change_orders`).catch(() => { });
+    await pool.query(`DELETE FROM project_bom_phases`).catch(() => { });
 
     // Purge legacy subcontractors & test workers (Rodolfo alonte, Brent, Paul, Lizter, etc.)
     const defenseWorkerNames = WORKERS_CATALOG.map(w => w.name);
@@ -145,11 +145,11 @@ async function cleanExistingData() {
     `, [defenseWorkerNames]);
     const targetWorkerIds = targetWorkersRes.rows.map(r => r.id);
     if (targetWorkerIds.length > 0) {
-      await pool.query(`DELETE FROM attendance_logs WHERE worker_id = ANY($1::text[])`, [targetWorkerIds]).catch(() => {});
-      await pool.query(`DELETE FROM cash_advances WHERE worker_id = ANY($1::text[])`, [targetWorkerIds]).catch(() => {});
-      await pool.query(`DELETE FROM project_worker_assignments WHERE worker_id = ANY($1::text[])`, [targetWorkerIds]).catch(() => {});
-      await pool.query(`DELETE FROM workers WHERE id = ANY($1::text[])`, [targetWorkerIds]).catch(() => {});
-      await pool.query(`DELETE FROM contractors WHERE id = ANY($1::text[])`, [targetWorkerIds]).catch(() => {});
+      await pool.query(`DELETE FROM attendance_logs WHERE worker_id = ANY($1::text[])`, [targetWorkerIds]).catch(() => { });
+      await pool.query(`DELETE FROM cash_advances WHERE worker_id = ANY($1::text[])`, [targetWorkerIds]).catch(() => { });
+      await pool.query(`DELETE FROM project_worker_assignments WHERE worker_id = ANY($1::text[])`, [targetWorkerIds]).catch(() => { });
+      await pool.query(`DELETE FROM workers WHERE id = ANY($1::text[])`, [targetWorkerIds]).catch(() => { });
+      await pool.query(`DELETE FROM contractors WHERE id = ANY($1::text[])`, [targetWorkerIds]).catch(() => { });
     }
     await pool.query(`
       DELETE FROM contractors
@@ -159,10 +159,10 @@ async function cleanExistingData() {
          OR name ILIKE '%Paul%'
          OR name ILIKE '%Lizter%'
          OR name = ANY($1::text[])
-    `, [defenseWorkerNames]).catch(() => {});
+    `, [defenseWorkerNames]).catch(() => { });
 
     // Clean stress test & legacy audit logs
-    await pool.query(`DELETE FROM process_audit_logs WHERE details ILIKE '%[STRESS_TEST]%' OR details ILIKE '%Sereno%' OR details ILIKE '%Brent%' OR details ILIKE '%Lizter%'`).catch(() => {});
+    await pool.query(`DELETE FROM process_audit_logs WHERE details ILIKE '%[STRESS_TEST]%' OR details ILIKE '%Sereno%' OR details ILIKE '%Brent%' OR details ILIKE '%Lizter%'`).catch(() => { });
     console.log(`   Purged ${targetProjIds.length} prior/legacy project(s), ${targetWorkerIds.length} prior/legacy worker(s), and all legacy payables/ledgers.`);
   } finally {
     await pool.end();
@@ -953,36 +953,90 @@ async function run() {
   }
   console.log(`   + Seeded ${subconCount} Subcontractor Payables (3 Paid / Disbursed, 2 Approved ready for live disbursement).`);
 
-  // Seed realistic BOM Phases for all 3 projects so Finance Dashboard shows live BOM phases instead of 0 BOM PHASES (BLANK)
+  // Seed realistic BOM Phases for all 3 projects using canonical BomPhase -> subPhases -> items schema
+  const makeBomPhase = (id, code, title, subTitle, items) => ({
+    id,
+    code,
+    title,
+    defaultProfitPct: 20,
+    defaultOverheadPct: 5,
+    subPhases: [
+      {
+        id: `${id}-sub-1`,
+        title: subTitle,
+        items: items.map((it) => ({
+          id: it.id,
+          scopeOfWork: it.scopeOfWork,
+          noOfUnits: it.noOfUnits,
+          unit: it.unit,
+          unitCost: it.unitCost,
+          profitPct: 20,
+          overheadPct: 5,
+          designCost: 0,
+        })),
+      },
+    ],
+  });
+
   const bomTemplates = [
     {
       project: seededProjects[0],
       phases: [
-        { id: 'bom-nuv-1', code: 'DIV 01', name: 'Preliminaries, Mobilization & LGU Permits', items: [{ id: 'i1', description: 'Temporary Board-Up, Field Office & OBO/BFP Permits', unit: 'lot', qty: 1, materialUnitCost: 185000, laborUnitCost: 95000 }] },
-        { id: 'bom-nuv-2', code: 'DIV 02', name: 'Earthworks, Excavation & Foundation', items: [{ id: 'i2', description: 'Footing Excavation, Soil Poisoning & Gravel Bedding', unit: 'cu.m', qty: 85, materialUnitCost: 2400, laborUnitCost: 1100 }] },
-        { id: 'bom-nuv-3', code: 'DIV 03', name: 'Structural Concrete, Rebars & Steel Trusses', items: [{ id: 'i3', description: '3500 PSI Ready-Mix Concrete & Grade 60 Deformed Bars', unit: 'lot', qty: 1, materialUnitCost: 1650000, laborUnitCost: 620000 }] },
-        { id: 'bom-nuv-4', code: 'DIV 04', name: 'Masonry, Plastering & Long-Span Roofing', items: [{ id: 'i4', description: 'CHB 6" Exterior / 4" Interior Walls & Pre-Painted Roofing', unit: 'sq.m', qty: 420, materialUnitCost: 1850, laborUnitCost: 850 }] },
-        { id: 'bom-nuv-5', code: 'DIV 05', name: 'MEPFS Rough-In, Panel Board & Sanitary', items: [{ id: 'i5', description: '200A Panel Board, THHN Wiring & PPR Plumbing Lines', unit: 'lot', qty: 1, materialUnitCost: 580000, laborUnitCost: 290000 }] },
-        { id: 'bom-nuv-6', code: 'DIV 06', name: 'Architectural Finishes, Glazing & Painting', items: [{ id: 'i6', description: 'Porcelain Tiles, Low-E Aluminum Windows & Elastomeric Paint', unit: 'lot', qty: 1, materialUnitCost: 920000, laborUnitCost: 410000 }] },
+        makeBomPhase('bom-nuv-1', 'A', 'PRELIMINARIES & PERMITS', 'Mobilization & Statutory Permits', [
+          { id: 'nuv-i1', scopeOfWork: 'Temporary Board-Up, Field Office & OBO/BFP Permits', noOfUnits: 1, unit: 'lot', unitCost: 280000 },
+        ]),
+        makeBomPhase('bom-nuv-2', 'B', 'EARTHWORKS & FOUNDATION', 'Excavation, Backfill & Bedding', [
+          { id: 'nuv-i2', scopeOfWork: 'Footing Excavation, Soil Poisoning & Gravel Bedding', noOfUnits: 85, unit: 'cu.m', unitCost: 3500 },
+        ]),
+        makeBomPhase('bom-nuv-3', 'C', 'STRUCTURAL CONCRETE & STEEL', 'Concrete Pouring, Rebars & Roof Trusses', [
+          { id: 'nuv-i3', scopeOfWork: '3500 PSI Ready-Mix Concrete & Grade 60 Deformed Bars', noOfUnits: 1, unit: 'lot', unitCost: 2270000 },
+        ]),
+        makeBomPhase('bom-nuv-4', 'D', 'MASONRY & ROOFING WORKS', 'CHB Walls, Plastering & Long-Span Roofing', [
+          { id: 'nuv-i4', scopeOfWork: 'CHB 6" Exterior / 4" Interior Walls & Pre-Painted Roofing', noOfUnits: 420, unit: 'sq.m', unitCost: 2700 },
+        ]),
+        makeBomPhase('bom-nuv-5', 'E', 'MEPFS ROUGH-INS & FIXTURES', 'Electrical Panel Board & Sanitary Rough-In', [
+          { id: 'nuv-i5', scopeOfWork: '200A Panel Board, THHN Wiring & PPR Plumbing Lines', noOfUnits: 1, unit: 'lot', unitCost: 870000 },
+        ]),
+        makeBomPhase('bom-nuv-6', 'F', 'ARCHITECTURAL FINISHES & GLAZING', 'Tiling, Low-E Windows & Painting', [
+          { id: 'nuv-i6', scopeOfWork: 'Porcelain Tiles, Low-E Aluminum Windows & Elastomeric Paint', noOfUnits: 1, unit: 'lot', unitCost: 1330000 },
+        ]),
       ],
     },
     {
       project: seededProjects[1],
       phases: [
-        { id: 'bom-cal-1', code: 'DIV 01', name: 'Building Admin Clearances & Site Protection', items: [{ id: 'c1', description: 'Fit-Out Bond, Floor Protection & Temporary Power', unit: 'lot', qty: 1, materialUnitCost: 120000, laborUnitCost: 65000 }] },
-        { id: 'bom-cal-2', code: 'DIV 02', name: 'Drywall Partitions & Acoustic Insulation', items: [{ id: 'c2', description: '12mm Gypsum Board on Metal Studs w/ Rockwool STC-50', unit: 'sq.m', qty: 260, materialUnitCost: 1950, laborUnitCost: 820 }] },
-        { id: 'bom-cal-3', code: 'DIV 03', name: 'Acoustic Ceiling Grid & LED Lighting', items: [{ id: 'c3', description: '600x600 Acoustic Boards & 40W Recessed LED Troffers', unit: 'sq.m', qty: 310, materialUnitCost: 1650, laborUnitCost: 680 }] },
-        { id: 'bom-cal-4', code: 'DIV 04', name: 'VRF HVAC, Fire Sprinklers & Structured Cabling', items: [{ id: 'c4', description: 'Inverter VRF Cassettes, FDAS Loops & Cat6A Data Drops', unit: 'lot', qty: 1, materialUnitCost: 1180000, laborUnitCost: 460000 }] },
-        { id: 'bom-cal-5', code: 'DIV 05', name: 'Modular Carpet, Glass Partitions & Reception Millwork', items: [{ id: 'c5', description: '12mm Tempered Glass Conference Walls & Executive Flooring', unit: 'lot', qty: 1, materialUnitCost: 780000, laborUnitCost: 310000 }] },
+        makeBomPhase('bom-cal-1', 'A', 'MOBILIZATION & SITE PROTECTION', 'Building Admin Clearances & Protection', [
+          { id: 'cal-i1', scopeOfWork: 'Fit-Out Bond, Floor Protection & Temporary Power', noOfUnits: 1, unit: 'lot', unitCost: 185000 },
+        ]),
+        makeBomPhase('bom-cal-2', 'B', 'DRYWALL PARTITIONS & ACOUSTICS', 'Gypsum Partition Framing & Rockwool', [
+          { id: 'cal-i2', scopeOfWork: '12mm Gypsum Board on Metal Studs w/ Rockwool STC-50', noOfUnits: 260, unit: 'sq.m', unitCost: 2770 },
+        ]),
+        makeBomPhase('bom-cal-3', 'C', 'CEILING GRID & LIGHTING', 'Acoustic Ceiling & LED Troffers', [
+          { id: 'cal-i3', scopeOfWork: '600x600 Acoustic Boards & 40W Recessed LED Troffers', noOfUnits: 310, unit: 'sq.m', unitCost: 2330 },
+        ]),
+        makeBomPhase('bom-cal-4', 'D', 'VRF HVAC & FIRE PROTECTION', 'HVAC Cassettes, FDAS & Structured Cabling', [
+          { id: 'cal-i4', scopeOfWork: 'Inverter VRF Cassettes, FDAS Loops & Cat6A Data Drops', noOfUnits: 1, unit: 'lot', unitCost: 1640000 },
+        ]),
+        makeBomPhase('bom-cal-5', 'E', 'FLOORING, GLASS & MILLWORK', 'Modular Carpet, Glass Walls & Reception', [
+          { id: 'cal-i5', scopeOfWork: '12mm Tempered Glass Conference Walls & Executive Flooring', noOfUnits: 1, unit: 'lot', unitCost: 1090000 },
+        ]),
       ],
     },
     {
       project: seededProjects[2],
       phases: [
-        { id: 'bom-ala-1', code: 'DIV 01', name: 'PMO Clearances, Stripping & Debris Hauling', items: [{ id: 'a1', description: 'Condo Work Permit, Tile Chipping & Night-Shift Hauling', unit: 'lot', qty: 1, materialUnitCost: 85000, laborUnitCost: 95000 }] },
-        { id: 'bom-ala-2', code: 'DIV 02', name: 'Waterproofing & Large-Format Porcelain Tiling', items: [{ id: 'a2', description: 'Elastomeric Wet-Area Membrane & 600x1200 Porcelain Slabs', unit: 'sq.m', qty: 115, materialUnitCost: 3400, laborUnitCost: 1350 }] },
-        { id: 'bom-ala-3', code: 'DIV 03', name: 'Electrical Cove Lighting & Plumbing Fixtures', items: [{ id: 'a3', description: 'Dimmer Circuits, Warm LED Cove Strips & Kohler Sanitaryware', unit: 'lot', qty: 1, materialUnitCost: 440000, laborUnitCost: 195000 }] },
-        { id: 'bom-ala-4', code: 'DIV 04', name: 'Bespoke White Oak Millwork & Low-VOC Painting', items: [{ id: 'a4', description: 'Modular Kitchen, Walk-In Closet & Low-VOC Interior Paint', unit: 'lot', qty: 1, materialUnitCost: 690000, laborUnitCost: 265000 }] },
+        makeBomPhase('bom-ala-1', 'A', 'PMO CLEARANCES & DEMOLITION', 'Tile Stripping & Debris Hauling', [
+          { id: 'ala-i1', scopeOfWork: 'Condo Work Permit, Tile Chipping & Night-Shift Hauling', noOfUnits: 1, unit: 'lot', unitCost: 180000 },
+        ]),
+        makeBomPhase('bom-ala-2', 'B', 'WATERPROOFING & PORCELAIN TILING', 'Wet-Area Membrane & Floor Tiling', [
+          { id: 'ala-i2', scopeOfWork: 'Elastomeric Wet-Area Membrane & 600x1200 Porcelain Slabs', noOfUnits: 115, unit: 'sq.m', unitCost: 4750 },
+        ]),
+        makeBomPhase('bom-ala-3', 'C', 'ELECTRICAL & PLUMBING FIXTURES', 'Cove Lighting & Sanitaryware', [
+          { id: 'ala-i3', scopeOfWork: 'Dimmer Circuits, Warm LED Cove Strips & Kohler Sanitaryware', noOfUnits: 1, unit: 'lot', unitCost: 635000 },
+        ]),
+        makeBomPhase('bom-ala-4', 'D', 'BESPOKE MILLWORK & PAINTING', 'White Oak Joinery & Low-VOC Paint', [
+          { id: 'ala-i4', scopeOfWork: 'Modular Kitchen, Walk-In Closet & Low-VOC Interior Paint', noOfUnits: 1, unit: 'lot', unitCost: 955000 },
+        ]),
       ],
     },
   ];

@@ -68,15 +68,25 @@ export default function WorkerMasterlistManager({
   const isOM = currentRole === UserRole.OM;
   const canEditWageRates = isFinance;
 
-  // Modal State for New Worker
+  // Modal State for New Worker (supports single OR comma/newline-separated bulk registration)
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
-  const [firstName, setFirstName] = useState<string>('');
-  const [lastName, setLastName] = useState<string>('');
+  const [workerNamesInput, setWorkerNamesInput] = useState<string>('');
   const [position, setPosition] = useState<string>('General Laborer');
   const [dailyRate, setDailyRate] = useState<string>('600');
   const [hourlyOtRate, setHourlyOtRate] = useState<string>('93.75');
   const [selectedProjectIds, setSelectedProjectIds] = useState<string[]>([]);
   const [isSaving, setIsSaving] = useState<boolean>(false);
+
+  const parsedBulkNames = useMemo(
+    () =>
+      workerNamesInput
+        .split(/[,\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean),
+    [workerNamesInput]
+  );
+  const numericDailyRate = parseFloat(dailyRate) || 0;
+  const estBulkDailyPayroll = parsedBulkNames.length * numericDailyRate;
 
   // Edit State
   const [editingWorker, setEditingWorker] = useState<SiteWorker | null>(null);
@@ -136,24 +146,25 @@ export default function WorkerMasterlistManager({
     fetchWorkers();
   }, []);
 
-  // Save New Worker
+  // Save New Worker (Single or Bulk)
   const handleCreateWorker = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!firstName.trim() || !lastName.trim() || parseFloat(dailyRate) <= 0) {
-      toast('Please fill in first name, last name, and daily wage rate.', 'warning');
+    if (parsedBulkNames.length === 0 || parseFloat(dailyRate) <= 0) {
+      toast('Please enter at least one worker name and a valid daily wage rate.', 'warning');
       return;
     }
 
     setIsSaving(true);
     try {
-      const res = await fetch('/api/workers', {
+      const endpoint = parsedBulkNames.length > 1 ? '/api/workers/bulk' : '/api/workers';
+      const res = await fetch(endpoint, {
         method: 'POST',
-        headers: { 
+        headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
+          names: parsedBulkNames,
+          name: parsedBulkNames.join(', '),
           position: position.trim(),
           dailyRate: parseFloat(dailyRate),
           hourlyOtRate: parseFloat(hourlyOtRate),
@@ -167,10 +178,16 @@ export default function WorkerMasterlistManager({
         throw new Error(err.error || 'Failed to create worker');
       }
 
-      setToastMessage({ text: 'Worker successfully registered into Labor Masterlist!', type: 'success' });
+      const data = await res.json();
+      const createdCount = Number(data?.count || parsedBulkNames.length);
+      setToastMessage({
+        text: createdCount > 1
+          ? `${createdCount} individual workers registered into Labor Masterlist!`
+          : 'Worker successfully registered into Labor Masterlist!',
+        type: 'success'
+      });
       setIsAddModalOpen(false);
-      setFirstName('');
-      setLastName('');
+      setWorkerNamesInput('');
       setDailyRate('600');
       setSelectedProjectIds([]);
       await fetchWorkers();
@@ -199,10 +216,14 @@ export default function WorkerMasterlistManager({
         })
       });
 
-      if (!res.ok) throw new Error('Failed to update worker');
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(errData?.error || `Failed to update worker (HTTP ${res.status})`);
+      }
       setToastMessage({ text: 'Worker details updated successfully!', type: 'success' });
       setEditingWorker(null);
       await fetchWorkers();
+      if (onRefreshData) onRefreshData();
     } catch (err: any) {
       toast(err.message || 'Failed to update worker', 'error');
     }
@@ -495,29 +516,29 @@ export default function WorkerMasterlistManager({
             </div>
 
             <form onSubmit={handleCreateWorker} className="space-y-3.5 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">First Name *</label>
-                  <input
-                    type="text"
-                    required
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    placeholder="e.g. Danilo"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-300 font-semibold mb-1">Last Name *</label>
-                  <input
-                    type="text"
-                    required
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                    placeholder="e.g. Mercado"
-                    className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500"
-                  />
-                </div>
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">Worker Name(s) *</label>
+                <textarea
+                  rows={2}
+                  required
+                  value={workerNamesInput}
+                  onChange={(e) => setWorkerNamesInput(e.target.value)}
+                  placeholder="e.g. Juan Cruz, Pedro Santos, Mario Reyes"
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-white focus:outline-none focus:border-amber-500 resize-none"
+                />
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Tip: Separate multiple names with commas or new lines to bulk-add a crew with the same trade &amp; daily rate.
+                </p>
+                {parsedBulkNames.length > 1 && (
+                  <div className="mt-2 px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/35 text-amber-300 text-[11px] font-medium flex flex-wrap items-center justify-between gap-1">
+                    <span>
+                      <strong className="text-amber-200">Bulk Mode:</strong> {parsedBulkNames.length} individual workers will be created
+                    </span>
+                    <span className="font-mono font-bold text-emerald-300">
+                      Est. Daily Payroll: ₱{estBulkDailyPayroll.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/day ({parsedBulkNames.length} × ₱{numericDailyRate.toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })})
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div>
@@ -593,10 +614,12 @@ export default function WorkerMasterlistManager({
                 </button>
                 <button
                   type="submit"
-                  disabled={isSaving}
-                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs rounded-xl font-bold cursor-pointer"
+                  disabled={isSaving || parsedBulkNames.length === 0}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 text-xs rounded-xl font-bold cursor-pointer"
                 >
-                  {isSaving ? 'Registering...' : 'Save Worker Profile'}
+                  {isSaving
+                    ? (parsedBulkNames.length > 1 ? `Adding ${parsedBulkNames.length} Workers...` : 'Registering...')
+                    : (parsedBulkNames.length > 1 ? `Add ${parsedBulkNames.length} Workers` : 'Add Worker')}
                 </button>
               </div>
             </form>

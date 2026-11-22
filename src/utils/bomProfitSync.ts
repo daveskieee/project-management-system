@@ -193,16 +193,22 @@ export function calculateProjectBomProfitSync(params: {
   let fulfilledCount = 0;
   let overrunCount = 0;
 
-  if (phases && phases.length > 0) {
+  if (Array.isArray(phases) && phases.length > 0) {
     for (const phase of phases) {
+      if (!phase || typeof phase !== 'object') continue;
+      const phaseTitle = String(phase.title ?? phase.name ?? '');
       const subPhases = Array.isArray(phase.subPhases) ? phase.subPhases : [];
       const phaseItems: any[] = [
         ...(Array.isArray(phase.items) ? phase.items : []),
-        ...subPhases.flatMap((sp: any) => (Array.isArray(sp.items) ? sp.items : [])),
+        ...subPhases.flatMap((sp: any) => (sp && Array.isArray(sp.items) ? sp.items : [])),
       ];
       for (const item of phaseItems) {
-        const directCost = Number(item.noOfUnits || 0) * Number(item.unitCost || 0);
-        const profitAmt = directCost * (Number(item.profitPct || 0) / 100);
+        if (!item || typeof item !== 'object') continue;
+        const scopeLabel = String(item.scopeOfWork ?? item.description ?? '');
+        const qty = Number(item.noOfUnits ?? item.qty ?? 0) || 0;
+        const unitPrice = Number(item.unitCost ?? ((Number(item.materialUnitCost || 0) + Number(item.laborUnitCost || 0)) || 0)) || 0;
+        const directCost = qty * unitPrice;
+        const profitAmt = directCost * (Number(item.profitPct ?? 15) / 100);
         computedBomProfit += profitAmt;
         totalAllocatedBomMaterial += directCost;
 
@@ -210,10 +216,10 @@ export function calculateProjectBomProfitSync(params: {
         let actualSpend = 0;
         let matchedCount = 0;
         for (const mat of projectMaterials) {
-          if (consumedMaterialIds.has(mat.id)) continue;
-          if (doesMaterialMatchBomItem(mat, item.scopeOfWork, phase.title)) {
-            const qty = Math.max(Number(mat.received || 0), Number(mat.ordered || 0));
-            actualSpend += qty * Number(mat.unitCostPhp || 0);
+          if (!mat || consumedMaterialIds.has(mat.id)) continue;
+          if (doesMaterialMatchBomItem(mat, scopeLabel, phaseTitle)) {
+            const matQty = Math.max(Number(mat.received || 0), Number(mat.ordered || 0));
+            actualSpend += matQty * Number(mat.unitCostPhp || 0);
             matchedCount++;
             consumedMaterialIds.add(mat.id);
           }
@@ -228,9 +234,10 @@ export function calculateProjectBomProfitSync(params: {
           totalOverrun += overrunAmount;
         }
 
-        lineItemStatuses[item.id] = {
-          itemId: item.id,
-          scopeOfWork: item.scopeOfWork,
+        const itemKey = String(item.id ?? `${phaseTitle}-${scopeLabel}`);
+        lineItemStatuses[itemKey] = {
+          itemId: itemKey,
+          scopeOfWork: scopeLabel,
           allocatedCost: directCost,
           actualMaterialSpend: actualSpend,
           isBudgetFulfilled,

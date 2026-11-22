@@ -449,6 +449,7 @@ model ProjectTask {
   endDate               DateTime
   duration              Int
   progress              Float             @default(0.0)
+  weight                Float?
   baselineStart         DateTime?
   baselineEnd           DateTime?
   type                  String            @default("task")

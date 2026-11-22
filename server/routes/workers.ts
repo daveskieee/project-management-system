@@ -6,7 +6,7 @@
 import { Router, Request, Response } from 'express';
 import { prisma, pool } from '../db';
 import { authenticateRequest, requireRole, requireExactRole, checkUserProjectAccess } from '../middleware/auth';
-import { broadcastChange } from '../events';
+import { broadcastChange, invalidateAllDataCache } from '../events';
 import { computeDefaultHourlyOtRate } from '../services/payrollCalculation';
 
 export const workersRouter = Router();
@@ -182,31 +182,46 @@ workersRouter.get('/', async (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// POST /api/workers — Create new worker
-// Allowed: ADMIN
 // ============================================================================
-workersRouter.post('/', requireRole(['ADMIN']), async (req: Request, res: Response) => {
+// POST /api/workers & POST /api/workers/bulk — Create single or batch workers
+// Allowed: ADMIN, FINANCE
+// ============================================================================
+const handleCreateWorkers = async (req: Request, res: Response) => {
   try {
-    const { name, firstName, first_name, lastName, last_name, dailyRate, daily_rate, hourlyOtRate, hourly_ot_rate, position, trade, status, projectIds, assignedProjectId, assigned_project_id } = req.body;
+    const {
+      names, name, firstName, first_name, lastName, last_name,
+      dailyRate, daily_rate, hourlyOtRate, hourly_ot_rate,
+      position, trade, status, projectIds, assignedProjectId, assigned_project_id
+    } = req.body;
 
-    let trimmedName = (name || '').trim();
-    let fName = (firstName || first_name || '').trim();
-    let lName = (lastName || last_name || '').trim();
-
-    if (!trimmedName && (fName || lName)) {
-      trimmedName = `${fName} ${lName}`.trim();
-    } else if (trimmedName && !fName) {
-      const parts = trimmedName.split(' ');
-      fName = parts[0] || trimmedName;
-      lName = parts.slice(1).join(' ') || fName;
+    let individualNames: string[] = [];
+    if (Array.isArray(names) && names.length > 0) {
+      individualNames = names.map((s: any) => String(s || '').trim()).filter(Boolean);
+    } else {
+      let trimmedName = String(name || '').trim();
+      const fName = String(firstName || first_name || '').trim();
+      const lName = String(lastName || last_name || '').trim();
+      if (!trimmedName && (fName || lName)) {
+        trimmedName = `${fName} ${lName}`.trim();
+      }
+      if (trimmedName) {
+        individualNames = trimmedName.includes(',') || trimmedName.includes('\n')
+          ? trimmedName.split(/[,\n]+/).map((s: string) => s.trim()).filter(Boolean)
+          : [trimmedName];
+      }
     }
 
-    const pos = (trade || position || 'Artisan').trim();
-    const rate = Number(dailyRate || daily_rate || 0);
+    const pos = String(trade || position || 'Artisan').trim();
+    const rate = Number(dailyRate ?? daily_rate ?? 0);
 
-    if (!trimmedName || !Number.isFinite(rate) || rate <= 0 || rate > 100000) {
+    if (individualNames.length === 0 || !Number.isFinite(rate) || rate <= 0 || rate > 100000) {
       return res.status(400).json({
-        error: 'Worker name and valid daily rate (₱1 – ₱100,000) are required.'
+        error: 'At least one worker name and a valid daily rate (₱1 – ₱100,000) are required.'
+      });
+    }
+    if (individualNames.length > 100) {
+      return res.status(400).json({
+        error: 'Bulk registration is limited to 100 workers per batch.'
       });
     }
 
@@ -225,47 +240,22 @@ workersRouter.post('/', requireRole(['ADMIN']), async (req: Request, res: Respon
     const targetProjectIds = Array.from(new Set([
       ...(primaryProjId ? [primaryProjId] : []),
       ...(Array.isArray(projectIds) ? projectIds : [])
-    ]));
+    ])).filter(Boolean);
 
-    // Support comma-separated bulk worker registration (creates separate individual records in PostgreSQL)
-    const individualNames = trimmedName.includes(',') || trimmedName.includes('\n')
-      ? trimmedName.split(/[,\n]+/).map((s: string) => s.trim()).filter(Boolean)
-      : [trimmedName];
+    const fNameSingle = String(firstName || first_name || '').trim();
+    const lNameSingle = String(lastName || last_name || '').trim();
+    const workerStatus = status || 'Active';
 
     const createdWorkers: any[] = [];
+    const contractorRows: any[] = [];
+    const nowStamp = Date.now().toString(36).toUpperCase();
+
     for (let i = 0; i < individualNames.length; i++) {
       const fullName = individualNames[i];
       const nameParts = fullName.split(/\s+/);
-      const indFirst = individualNames.length === 1 && fName ? fName : (nameParts[0] || fullName);
-      const indLast = individualNames.length === 1 && lName ? lName : (nameParts.slice(1).join(' ') || indFirst);
-      const workerId = `CONT-${Date.now().toString(36).toUpperCase()}-${i + 1}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
-
-      await pool.query(`
-        INSERT INTO workers (id, name, first_name, last_name, trade, position, daily_rate, hourly_ot_rate, assigned_project_id, status, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      `, [workerId, fullName, indFirst, indLast, pos, pos, rate, otRate, primaryProjId, status || 'Active']);
-
-      await prisma.contractor.create({
-        data: {
-          id: workerId,
-          name: fullName,
-          company: 'LDM Construction Corporation',
-          specialty: pos,
-          roleTitle: pos,
-          dailyRate: rate,
-          activeManpower: primaryProjId ? 1 : 0,
-          activeProjectSite: projSiteName,
-          status: (status || 'Active').toUpperCase(),
-        }
-      }).catch(e => console.error('Error syncing to contractors table:', e));
-
-      for (const pId of targetProjectIds) {
-        await pool.query(`
-          INSERT INTO project_worker_assignments (id, project_id, worker_id, assigned_at, status)
-          VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 'ACTIVE')
-          ON CONFLICT (project_id, worker_id) DO UPDATE SET status = 'ACTIVE'
-        `, [`PWA-${workerId.slice(-5)}-${pId.slice(-4)}`, pId, workerId]);
-      }
+      const indFirst = individualNames.length === 1 && fNameSingle ? fNameSingle : (nameParts[0] || fullName);
+      const indLast = individualNames.length === 1 && lNameSingle ? lNameSingle : (nameParts.slice(1).join(' ') || indFirst);
+      const workerId = `CONT-${nowStamp}-${i + 1}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
 
       createdWorkers.push({
         id: workerId,
@@ -277,12 +267,69 @@ workersRouter.post('/', requireRole(['ADMIN']), async (req: Request, res: Respon
         position: pos,
         trade: pos,
         assignedProjectId: primaryProjId,
-        status: status || 'Active'
+        status: workerStatus
+      });
+
+      contractorRows.push({
+        id: workerId,
+        name: fullName,
+        company: 'LDM Construction Corporation',
+        specialty: pos,
+        roleTitle: pos,
+        dailyRate: rate,
+        activeManpower: primaryProjId ? 1 : 0,
+        activeProjectSite: projSiteName,
+        status: String(workerStatus).toUpperCase(),
       });
     }
 
+    // Atomic batch persistence inside a single transaction
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const w of createdWorkers) {
+        await client.query(`
+          INSERT INTO workers (id, name, first_name, last_name, trade, position, daily_rate, hourly_ot_rate, assigned_project_id, status, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        `, [w.id, w.name, w.firstName, w.lastName, w.trade, w.position, w.dailyRate, w.hourlyOtRate, w.assignedProjectId, w.status]);
+
+        for (const pId of targetProjectIds) {
+          await client.query(`
+            INSERT INTO project_worker_assignments (id, project_id, worker_id, assigned_at, status)
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP, 'ACTIVE')
+            ON CONFLICT (project_id, worker_id) DO UPDATE SET status = 'ACTIVE'
+          `, [`PWA-${w.id.slice(-6)}-${String(pId).slice(-4)}`, pId, w.id]);
+        }
+      }
+
+      for (const pId of targetProjectIds) {
+        await client.query(`
+          UPDATE commercial_projects
+          SET assigned_workers_count = (
+            SELECT COUNT(DISTINCT worker_id)::int FROM project_worker_assignments
+            WHERE project_id = $1 AND UPPER(status) = 'ACTIVE'
+          )
+          WHERE id = $1
+        `, [pId]);
+      }
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw txErr;
+    } finally {
+      client.release();
+    }
+
+    // Batch mirror to contractors table via Prisma createMany
+    await prisma.contractor.createMany({
+      data: contractorRows,
+      skipDuplicates: true,
+    }).catch(e => console.error('Error syncing batch to contractors table:', e));
+
     broadcastChange('workers');
     broadcastChange('contractors');
+    if (targetProjectIds.length > 0) broadcastChange('projects');
+    invalidateAllDataCache();
 
     res.status(201).json({
       success: true,
@@ -291,45 +338,56 @@ workersRouter.post('/', requireRole(['ADMIN']), async (req: Request, res: Respon
       workers: createdWorkers
     });
   } catch (error) {
-    console.error('Error creating worker:', error);
-    res.status(500).json({ error: 'Failed to create worker' });
+    console.error('Error creating worker(s):', error);
+    res.status(500).json({ error: 'Failed to create worker(s)' });
   }
-});
+};
+
+workersRouter.post('/bulk', requireRole(['ADMIN', 'FINANCE']), handleCreateWorkers);
+workersRouter.post('/', requireRole(['ADMIN', 'FINANCE']), handleCreateWorkers);
 
 // ============================================================================
-// PATCH /api/workers/:id — Update worker
-// Allowed: ADMIN
+// PATCH / PUT /api/workers/:id — Update worker profile & wage rates
+// Allowed: ADMIN, FINANCE (wage rate changes restricted to FINANCE)
 // ============================================================================
-workersRouter.patch('/:id', requireRole(['ADMIN']), async (req: Request, res: Response) => {
+const handleUpdateWorkerRoute = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const { firstName, first_name, lastName, last_name, dailyRate, daily_rate, hourlyOtRate, hourly_ot_rate, position, status } = req.body;
+    const {
+      firstName, first_name, lastName, last_name,
+      dailyRate, daily_rate,
+      hourlyOtRate, hourly_ot_rate, hourlyOvertimeRate,
+      position, trade, status
+    } = req.body;
 
     const updates: string[] = [];
     const values: any[] = [];
     let pIdx = 1;
 
-    const fName = firstName || first_name;
+    const fName = firstName ?? first_name;
     if (fName !== undefined) {
       updates.push(`first_name = $${pIdx++}`);
-      values.push(fName.trim());
+      values.push(String(fName).trim());
     }
 
-    const lName = lastName || last_name;
+    const lName = lastName ?? last_name;
     if (lName !== undefined) {
       updates.push(`last_name = $${pIdx++}`);
-      values.push(lName.trim());
+      values.push(String(lName).trim());
     }
 
-    const pos = position;
+    const pos = position ?? trade;
     if (pos !== undefined) {
+      const cleanPos = String(pos).trim();
       updates.push(`position = $${pIdx++}`);
-      values.push(pos.trim());
+      values.push(cleanPos);
+      updates.push(`trade = $${pIdx++}`);
+      values.push(cleanPos);
     }
 
     const isFinance = req.user?.role === 'FINANCE';
     const rate = dailyRate !== undefined ? dailyRate : daily_rate;
-    const otRate = hourlyOtRate !== undefined ? hourlyOtRate : hourly_ot_rate;
+    const otRate = hourlyOtRate !== undefined ? hourlyOtRate : (hourly_ot_rate !== undefined ? hourly_ot_rate : hourlyOvertimeRate);
 
     if (rate !== undefined && (!Number.isFinite(Number(rate)) || Number(rate) <= 0 || Number(rate) > 100000)) {
       return res.status(400).json({ error: 'Invalid daily rate: must be between ₱1 and ₱100,000.' });
@@ -351,20 +409,25 @@ workersRouter.patch('/:id', requireRole(['ADMIN']), async (req: Request, res: Re
       }
     }
 
-    if (rate !== undefined && isFinance) {
-      const numRate = Number(rate);
-      updates.push(`daily_rate = $${pIdx++}`);
-      values.push(numRate);
+    let finalRate: number | undefined;
+    let finalOtRate: number | undefined;
 
-      if (hourlyOtRate === undefined && hourly_ot_rate === undefined) {
+    if (rate !== undefined && isFinance) {
+      finalRate = Number(rate);
+      updates.push(`daily_rate = $${pIdx++}`);
+      values.push(finalRate);
+
+      if (otRate === undefined) {
+        finalOtRate = computeDefaultHourlyOtRate(finalRate);
         updates.push(`hourly_ot_rate = $${pIdx++}`);
-        values.push(computeDefaultHourlyOtRate(numRate));
+        values.push(finalOtRate);
       }
     }
 
     if (otRate !== undefined && isFinance) {
+      finalOtRate = Number(otRate);
       updates.push(`hourly_ot_rate = $${pIdx++}`);
-      values.push(Number(otRate));
+      values.push(finalOtRate);
     }
 
     if (status !== undefined) {
@@ -379,19 +442,57 @@ workersRouter.patch('/:id', requireRole(['ADMIN']), async (req: Request, res: Re
     updates.push(`updated_at = CURRENT_TIMESTAMP`);
     values.push(id);
 
-    await pool.query(
-      `UPDATE workers SET ${updates.join(', ')} WHERE id = $${pIdx}`,
+    const updRes = await pool.query(
+      `UPDATE workers SET ${updates.join(', ')} WHERE id = $${pIdx} RETURNING id, name, first_name, last_name, position, daily_rate, hourly_ot_rate, status`,
       values
     );
 
-    broadcastChange('workers');
+    if (updRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Worker not found.' });
+    }
 
-    res.json({ success: true, message: 'Worker record updated successfully.' });
+    // Mirror updated fields to contractors table so Workforce Directory & Site Analytics stay synced
+    const contractorUpdate: Record<string, any> = {};
+    if (pos !== undefined) {
+      contractorUpdate.specialty = String(pos).trim();
+      contractorUpdate.roleTitle = String(pos).trim();
+    }
+    if (finalRate !== undefined) contractorUpdate.dailyRate = finalRate;
+    if (status !== undefined) contractorUpdate.status = String(status).toUpperCase();
+    if (Object.keys(contractorUpdate).length > 0) {
+      await prisma.contractor.updateMany({
+        where: { id },
+        data: contractorUpdate,
+      }).catch(() => {});
+    }
+
+    broadcastChange('workers');
+    broadcastChange('contractors');
+    invalidateAllDataCache();
+
+    const row = updRes.rows[0];
+    res.json({
+      success: true,
+      message: 'Worker record updated successfully.',
+      worker: {
+        id: row.id,
+        name: row.name,
+        firstName: row.first_name,
+        lastName: row.last_name,
+        position: row.position,
+        dailyRate: Number(row.daily_rate),
+        hourlyOtRate: Number(row.hourly_ot_rate),
+        status: row.status,
+      }
+    });
   } catch (error) {
     console.error('Error updating worker:', error);
     res.status(500).json({ error: 'Failed to update worker' });
   }
-});
+};
+
+workersRouter.patch('/:id', requireRole(['ADMIN', 'FINANCE']), handleUpdateWorkerRoute);
+workersRouter.put('/:id', requireRole(['ADMIN', 'FINANCE']), handleUpdateWorkerRoute);
 
 // ============================================================================
 // DELETE /api/workers/:id — Delete or inactivate worker

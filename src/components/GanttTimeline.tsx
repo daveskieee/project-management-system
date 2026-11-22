@@ -1184,7 +1184,12 @@ export default function GanttTimeline({
         endDate: endDateStr,
         duration,
         progress: normalizeTaskProgressFraction({ progress: typeof t.progress === 'number' ? t.progress : Number(t.progress), status: t.status }),
-        weight: typeof t.weight === 'number' ? t.weight : undefined,
+        weight: typeof t.weight === 'number' && t.weight > 0
+          ? t.weight
+          : (() => {
+              const m = String(t.text || t.title || '').match(/\((\d+(?:\.\d+)?)%\)\s*$/);
+              return m ? Number(m[1]) : undefined;
+            })(),
         constructionPhase: resolvedPhase,
         baselineStart: t.baselineStart ? formatDateISO(parseDate(t.baselineStart)) : null,
         baselineEnd: t.baselineEnd ? formatDateISO(parseDate(t.baselineEnd)) : null,
@@ -1238,17 +1243,79 @@ export default function GanttTimeline({
   }, []);
 
   const latestGanttLoadSeqRef = useRef(0);
+  const ganttMemoryCacheRef = useRef<Map<string, { tasks: GanttTaskItem[]; links: GanttLinkItem[]; ts: number }>>(new Map());
+  const [cacheVersion, setCacheVersion] = useState(0);
 
-  const loadGanttData = useCallback(async (projectId: string) => {
+  // Keep memory cache in sync when active project's tasks/links change locally
+  useEffect(() => {
+    if (selectedProjectId && !isLoading && tasks.length > 0 && tasks.every(t => !t.projectId || t.projectId === selectedProjectId)) {
+      ganttMemoryCacheRef.current.set(selectedProjectId, { tasks, links, ts: Date.now() });
+    }
+  }, [selectedProjectId, tasks, links, isLoading]);
+
+  // Parallel background prefetch of ALL active projects' Gantt schedules so dropdown switching is instant (0ms)
+  const projectIdsKey = useMemo(() => projects.map(p => p.id).filter(Boolean).join(','), [projects]);
+  useEffect(() => {
+    if (!projectIdsKey) return;
+    let cancelled = false;
+    const ids = projectIdsKey.split(',').filter(Boolean);
+    Promise.all(
+      ids.map(async (pid) => {
+        try {
+          const res = await fetch(`/api/projects/${encodeURIComponent(pid)}/gantt`, {
+            credentials: 'include',
+            headers: buildGanttAuthHeaders(false),
+          });
+          if (!res.ok || cancelled) return;
+          const json = await res.json();
+          if (cancelled) return;
+          const rawTasks = Array.isArray(json.data) ? json.data : [];
+          const rawLinks = Array.isArray(json.links) ? json.links : [];
+          const { parsedTasks, parsedLinks } = parseDbGanttPayload(pid, rawTasks, rawLinks);
+          ganttMemoryCacheRef.current.set(pid, { tasks: parsedTasks, links: parsedLinks, ts: Date.now() });
+          purgeStaleLocalGanttCache(pid, parsedTasks);
+        } catch {
+          /* silent prefetch fallback */
+        }
+      })
+    ).then(() => {
+      if (!cancelled) {
+        setCacheVersion((v) => v + 1);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectIdsKey, buildGanttAuthHeaders, parseDbGanttPayload, purgeStaleLocalGanttCache]);
+
+  const loadGanttData = useCallback(async (projectId: string, forceFresh = false) => {
     if (!projectId) {
       setTasks([]);
       setLinks([]);
       return;
     }
     const loadSeq = ++latestGanttLoadSeqRef.current;
-    setIsLoading(true);
+
+    // Instant 0ms render from in-memory cache (or localStorage snapshot) while refreshing silently in background
+    const memCached = ganttMemoryCacheRef.current.get(projectId);
+    if (memCached && !forceFresh) {
+      setTasks(memCached.tasks);
+      setLinks(memCached.links);
+      setIsLoading(false);
+    } else {
+      const localSnap = !forceFresh ? loadProjectGanttTasksFromStorage(projectId, false) : null;
+      if (localSnap && localSnap.length > 0) {
+        setTasks(localSnap as GanttTaskItem[]);
+        setLinks([]);
+        setIsLoading(false);
+      } else {
+        setIsLoading(true);
+      }
+    }
+
     try {
-      const res = await fetch(`/api/projects/${projectId}/gantt`, {
+      const url = forceFresh ? `/api/projects/${encodeURIComponent(projectId)}/gantt?fresh=1` : `/api/projects/${encodeURIComponent(projectId)}/gantt`;
+      const res = await fetch(url, {
         credentials: 'include',
         headers: buildGanttAuthHeaders(false),
       });
@@ -1261,19 +1328,21 @@ export default function GanttTimeline({
       const rawLinks = Array.isArray(json.links) ? json.links : [];
       const { parsedTasks: validTasks, parsedLinks: validLinks } = parseDbGanttPayload(projectId, rawTasks, rawLinks);
 
+      ganttMemoryCacheRef.current.set(projectId, { tasks: validTasks, links: validLinks, ts: Date.now() });
+      setCacheVersion((v) => v + 1);
+
       if (validTasks.length > 0) {
-        // Authoritative DB records — render directly and sync live snapshot
         setTasks(validTasks);
         setLinks(validLinks);
         purgeStaleLocalGanttCache(projectId, validTasks);
       } else {
-        // DB returned 0 tasks — start empty so template loading is strictly opt-in
         setTasks([]);
         setLinks([]);
         purgeStaleLocalGanttCache(projectId, []);
       }
     } catch (err) {
       console.error('Failed to load project gantt data:', err);
+      if (ganttMemoryCacheRef.current.has(projectId)) return;
       const cached = loadProjectGanttTasksFromStorage(projectId, false);
       if (cached && cached.length > 0) {
         setTasks(cached as GanttTaskItem[]);
@@ -1306,9 +1375,11 @@ export default function GanttTimeline({
         setLinks([]);
       }
     } finally {
-      setIsLoading(false);
+      if (loadSeq === latestGanttLoadSeqRef.current) {
+        setIsLoading(false);
+      }
     }
-  }, [isTaskTombstoned, tasksProp, parseDbGanttPayload, purgeStaleLocalGanttCache]);
+  }, [isTaskTombstoned, tasksProp, buildGanttAuthHeaders, parseDbGanttPayload, purgeStaleLocalGanttCache]);
 
   useEffect(() => {
     loadGanttData(selectedProjectId);
@@ -2584,11 +2655,21 @@ export default function GanttTimeline({
                 aria-label="Select Commercial Project"
                 className={`rounded-lg px-3 py-1.5 text-xs font-semibold focus:border-amber-500 focus:outline-none cursor-pointer border max-w-[260px] sm:max-w-xs truncate ${isDark ? 'bg-slate-950 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800 shadow-2xs'}`}
               >
-                {projects.map(p => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.id === selectedProjectId ? currentProjectProgress : getCanonicalProjectProgress(p, tasksProp || [])}%)
-                  </option>
-                ))}
+                {projects.map(p => {
+                  void cacheVersion;
+                  const cachedEntry = ganttMemoryCacheRef.current.get(p.id);
+                  const dropdownPct =
+                    p.id === selectedProjectId
+                      ? currentProjectProgress
+                      : cachedEntry && cachedEntry.tasks.length > 0
+                        ? getCanonicalProjectProgress(p, cachedEntry.tasks as any)
+                        : getCanonicalProjectProgress(p, tasksProp || []);
+                  return (
+                    <option key={p.id} value={p.id}>
+                      {p.name} ({dropdownPct}%)
+                    </option>
+                  );
+                })}
               </select>
             ) : (
               <span className={`text-xs font-mono px-2.5 py-1.5 rounded-lg border ${isDark ? 'text-slate-400 bg-slate-950 border-slate-800' : 'text-slate-500 bg-slate-50 border-slate-200'}`}>
@@ -2986,6 +3067,12 @@ export default function GanttTimeline({
                   const isMilestone = task.type === 'milestone' || task.duration === 0;
                   const isCritical = criticalTaskIds.has(task.id);
                   const pct = Math.round(task.progress * 100);
+                  const isCompleted = pct >= 100 || String((task as any).status || '').toUpperCase() === 'COMPLETED';
+                  const taskEndTs = parseDate(task.endDate).getTime();
+                  const todayMidnight = new Date();
+                  todayMidnight.setHours(0, 0, 0, 0);
+                  const isOverdue = !isCompleted && !isNaN(taskEndTs) && taskEndTs < todayMidnight.getTime();
+                  const isRedAlert = !isCompleted && (isOverdue || isCritical);
                   const depth = depthMap.get(task.id) || 0;
                   const hasChildren = hasChildrenMap.get(task.id) || false;
                   const isCollapsed = collapsedTaskIds.has(task.id);
@@ -3045,6 +3132,8 @@ export default function GanttTimeline({
                     */}
                         {isMilestone ? (
                           <span className="text-amber-400 font-bold mr-1.5 select-none shrink-0">◆</span>
+                        ) : Math.round(task.progress * 100) >= 100 || String((task as any).status || '').toUpperCase() === 'COMPLETED' ? (
+                          <span className="text-emerald-500 font-bold mr-1.5 select-none shrink-0">•</span>
                         ) : isCritical ? (
                           <span className="text-red-500 font-bold mr-1.5 select-none shrink-0">•</span>
                         ) : null}
@@ -3124,6 +3213,22 @@ export default function GanttTimeline({
                     </div>
                   );
                 })}
+                {isLoading && visibleTasks.length === 0 && (
+                  <div className="p-4 space-y-2.5 animate-pulse">
+                    {Array.from({ length: 8 }).map((_, idx) => (
+                      <div
+                        key={`gantt-skel-${idx}`}
+                        className={`h-10 rounded-lg border flex items-center justify-between px-3 ${isDark ? 'bg-slate-900/70 border-slate-800/80' : 'bg-slate-100/80 border-slate-200'}`}
+                      >
+                        <div className="flex items-center gap-2.5 w-2/3">
+                          <div className={`h-3 w-10 rounded ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`} />
+                          <div className={`h-3 flex-1 rounded ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`} />
+                        </div>
+                        <div className={`h-3 w-14 rounded ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`} />
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {visibleTasks.length === 0 && !isLoading && (
                   <div className="p-8 text-center flex flex-col items-center justify-center min-h-[340px]">
                     <div className={`w-12 h-12 rounded-xl flex items-center justify-center mb-3 ${isDark ? 'bg-slate-900 text-amber-400 border border-slate-800' : 'bg-amber-50 text-amber-600 border border-amber-200'
@@ -3365,6 +3470,12 @@ export default function GanttTimeline({
                   columnWidth
                 );
                 const pct = Math.round(task.progress * 100);
+                const isCompleted = pct >= 100 || String((task as any).status || '').toUpperCase() === 'COMPLETED';
+                const taskEndTs = parseDate(task.endDate).getTime();
+                const todayMidnight = new Date();
+                todayMidnight.setHours(0, 0, 0, 0);
+                const isOverdue = !isCompleted && !isNaN(taskEndTs) && taskEndTs < todayMidnight.getTime();
+                const isRedAlert = !isCompleted && (isOverdue || isCritical);
 
                 // Baseline coordinates: original baseline schedule span (or current dates fallback)
                 const hasBaseline = Boolean(task.baselineStart && task.baselineEnd);
@@ -3424,7 +3535,7 @@ export default function GanttTimeline({
                           onDoubleClick={() => handleOpenEditModal(task)}
                           onPointerDown={(e) => handlePointerDown(e, task.id, 'move')}
                           onMouseDown={(e) => handlePointerDown(e, task.id, 'move')}
-                          className={`absolute top-[17px] h-[22px] rounded-sm shadow-md overflow-hidden flex items-center transition-shadow select-none group/bar pointer-events-auto cursor-grab active:cursor-grabbing z-20 ${isCritical
+                          className={`absolute top-[17px] h-[22px] rounded-sm shadow-md overflow-hidden flex items-center transition-shadow select-none group/bar pointer-events-auto cursor-grab active:cursor-grabbing z-20 ${isRedAlert
                             ? isDark
                               ? 'bg-red-950/80 border border-red-700/60 shadow-red-950/40'
                               : 'bg-red-200 border border-red-500 shadow-xs'
@@ -3432,7 +3543,7 @@ export default function GanttTimeline({
                               ? 'bg-emerald-950/80 border border-emerald-700/60 shadow-emerald-950/40'
                               : 'bg-emerald-200 border border-emerald-500 shadow-xs'
                             } hover:ring-1 hover:ring-white/40`}
-                          title={`${task.text}: ${pct}% complete • ${isCritical ? 'Critical Path (0 Float)' : `Non-Critical (Float: ${taskFloat}d)`}`}
+                          title={`${task.text}: ${pct}% complete • ${isCompleted ? 'Completed (100%)' : isOverdue ? 'Overdue' : isCritical ? 'Critical Path (0 Float)' : `On Track (Float: ${taskFloat}d)`}`}
                         >
                           {/* Completed progress portion */}
                           {pct > 0 && (
@@ -3441,7 +3552,7 @@ export default function GanttTimeline({
                                 width: `${Math.min(100, Math.max(0, pct))}%`,
                                 minWidth: '34px'
                               }}
-                              className={`h-full flex items-center justify-center shrink-0 pointer-events-none select-none ${isCritical ? 'bg-red-600' : 'bg-emerald-600'
+                              className={`h-full flex items-center justify-center shrink-0 pointer-events-none select-none ${isRedAlert ? 'bg-red-600' : 'bg-emerald-600'
                                 }`}
                             >
                               <span className="font-mono font-bold text-[10px] sm:text-[11px] text-white px-1 whitespace-nowrap drop-shadow select-none">
@@ -3452,7 +3563,7 @@ export default function GanttTimeline({
 
                           {/* 0% progress indicator */}
                           {pct === 0 && (
-                            <div className={`h-full px-2 flex items-center justify-center shrink-0 pointer-events-none select-none ${isCritical ? 'bg-red-600' : 'bg-emerald-600'
+                            <div className={`h-full px-2 flex items-center justify-center shrink-0 pointer-events-none select-none ${isRedAlert ? 'bg-red-600' : 'bg-emerald-600'
                               }`}>
                               <span className="font-mono font-bold text-[10px] text-white select-none">
                                 0%

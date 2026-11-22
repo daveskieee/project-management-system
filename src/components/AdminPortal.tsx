@@ -49,6 +49,7 @@ import DailySiteDiary from './DailySiteDiary';
 import RiskMatrix from './RiskMatrix';
 import ProjectProfileHub from './ProjectProfileHub';
 import ProjectHistory from './ProjectHistory';
+import WorkspaceErrorBoundary from './WorkspaceErrorBoundary';
 import PaymentsTracker from './PaymentsTracker';
 import ProjectScheduleCalendar from './ProjectScheduleCalendar';
 import GovernmentPermitsTracker from './GovernmentPermitsTracker';
@@ -910,12 +911,29 @@ export default function AdminPortal({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isNotificationOpen]);
 
+  const hasUserGestureRef = useRef<boolean>(false);
+  useEffect(() => {
+    const markActive = () => { hasUserGestureRef.current = true; };
+    window.addEventListener('pointerdown', markActive, { once: true, passive: true });
+    window.addEventListener('keydown', markActive, { once: true, passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', markActive);
+      window.removeEventListener('keydown', markActive);
+    };
+  }, []);
+
   const playLeadChime = () => {
     if (chimeMuted) return;
+    const isActivated = hasUserGestureRef.current || Boolean((navigator as any)?.userActivation?.hasBeenActive);
+    if (!isActivated) return;
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
+      if (ctx.state === 'suspended') {
+        ctx.close().catch(() => {});
+        return;
+      }
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
       osc.type = 'sine';
@@ -930,6 +948,7 @@ export default function AdminPortal({
 
       osc.start(now);
       osc.stop(now + 0.5);
+      setTimeout(() => { ctx.close().catch(() => {}); }, 700);
     } catch { /* AudioContext policy fallback */ }
   };
 
@@ -2554,6 +2573,11 @@ export default function AdminPortal({
           {/* ------------------------------------------------------------- */}
           {/* TAB VIEWS (PERMANENT DOM RETENTION & INSTANT SWITCHING) */}
           {/* ------------------------------------------------------------- */}
+          <WorkspaceErrorBoundary
+            key={activeTab}
+            resetKey={activeTab}
+            sectionLabel={TAB_METADATA[activeTab]?.title || 'Workspace Module'}
+          >
               {/* ------------------------------------------------------------- */}
               {/* VERTICAL HIERARCHICAL RBAC 403 FORBIDDEN GUARD */}
               {/* ------------------------------------------------------------- */}
@@ -3880,6 +3904,7 @@ export default function AdminPortal({
                 </div>
                 );
               })()}
+          </WorkspaceErrorBoundary>
 
         </main>
       </div>

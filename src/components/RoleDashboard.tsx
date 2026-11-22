@@ -686,8 +686,8 @@ export default function RoleDashboard({
           <p className={`text-[11px] ${mutedText}`}>Progress bars will appear automatically once projects are added.</p>
         </div>
       ) : (
-        <div className="h-64 w-full">
-          <ResponsiveContainer width="100%" height="100%">
+        <div className="h-[260px] w-full min-w-0">
+          <ResponsiveContainer width="100%" height={260} minWidth={0}>
             <BarChart data={progressChartData} margin={{ top: 8, right: 12, left: -16, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} vertical={false} />
               <XAxis dataKey="name" tick={{ fill: axisTick, fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -791,8 +791,8 @@ export default function RoleDashboard({
         </span>
       </div>
 
-      <div className="h-64 w-full">
-        <ResponsiveContainer width="100%" height="100%">
+      <div className="h-[260px] w-full min-w-0">
+        <ResponsiveContainer width="100%" height={260} minWidth={0}>
           <AreaChart data={financialAnalytics.cashFlowTrendData} margin={{ top: 10, right: 12, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="inflowGrad" x1="0" y1="0" x2="0" y2="1">
