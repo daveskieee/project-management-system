@@ -1028,6 +1028,12 @@ export default function GanttTimeline({
   const latestTasksRef = useRef<GanttTaskItem[]>(tasks);
   latestTasksRef.current = tasks;
   const lastKnownActiveProjectRef = useRef<ProjectProfile | null>(null);
+  const isMutatingRef = useRef(false);
+  const pendingMutationsRef = useRef(0);
+  const mutationSeqRef = useRef(0);
+  const isDraggingRef = useRef(false);
+  const queuedDragUpdatesRef = useRef<Map<string, { projectId: string; task: GanttTaskItem }>>(new Map());
+  const dragFlushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const ganttMemoryCacheRef = useRef<Map<string, { tasks: GanttTaskItem[]; links: GanttLinkItem[]; ts: number }>>(new Map());
   const [cacheVersion, setCacheVersion] = useState(0);
 
@@ -1393,6 +1399,14 @@ export default function GanttTimeline({
       const rawLinks = Array.isArray(json.links) ? json.links : [];
       const { parsedTasks: validTasks, parsedLinks: validLinks } = parseDbGanttPayload(targetProjectId, rawTasks, rawLinks);
 
+      // Never overwrite local optimistic state while a local mutation or drag is in flight for this project
+      const hasPendingLocalMutation =
+        latestSelectedProjectIdRef.current === targetProjectId &&
+        (isMutatingRef.current || pendingMutationsRef.current > 0 || queuedDragUpdatesRef.current.size > 0 || isDraggingRef.current);
+      if (hasPendingLocalMutation) {
+        return;
+      }
+
       // Always store authoritative payload under targetProjectId's cache key
       ganttMemoryCacheRef.current.set(targetProjectId, { tasks: validTasks, links: validLinks, ts: Date.now() });
       purgeStaleLocalGanttCache(targetProjectId, validTasks);
@@ -1457,6 +1471,95 @@ export default function GanttTimeline({
   // 6. Backend Synchronization Helper (Immediate Auto-Save + DB Hydration)
   // ==========================================
 
+  const syncBulkBackend = useCallback(async (
+    batchTasks: Array<Partial<GanttTaskItem> & { id: string }>,
+    projectIdOverride?: string
+  ) => {
+    const targetProjectId = projectIdOverride || selectedProjectId;
+    if (!targetProjectId || batchTasks.length === 0) return;
+
+    const mySeq = ++mutationSeqRef.current;
+    pendingMutationsRef.current += 1;
+    isMutatingRef.current = true;
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(targetProjectId)}/gantt/bulk`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: buildGanttAuthHeaders(true),
+        body: JSON.stringify({
+          tasks: batchTasks.map((task) => {
+            const resolvedPhase = task.constructionPhase || resolveTaskConstructionPhase(task);
+            return {
+              id: task.id,
+              text: task.text,
+              startDate: task.startDate,
+              endDate: task.endDate,
+              duration: task.duration,
+              progress: task.progress,
+              weight: task.weight,
+              constructionPhase: resolvedPhase,
+              milestonePhase: resolvedPhase,
+              type: task.type,
+              parentTaskId: task.parentTaskId,
+              wbsCode: task.wbsCode,
+              sortOrder: task.sortOrder,
+              assignedContractorId: task.assignedContractorId,
+              predecessorIds: task.predecessorIds
+            };
+          })
+        })
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const resData = await res.json().catch(() => null);
+
+      if (Array.isArray(resData?.data)) {
+        const { parsedTasks: dbTasks, parsedLinks: dbLinks } = parseDbGanttPayload(
+          targetProjectId,
+          resData.data,
+          Array.isArray(resData.links) ? resData.links : []
+        );
+
+        // Only hydrate cache & UI state if this is the latest settled mutation (prevents rubber-banding)
+        const isLatestSettled =
+          mySeq === mutationSeqRef.current &&
+          pendingMutationsRef.current <= 1 &&
+          queuedDragUpdatesRef.current.size === 0 &&
+          !isDraggingRef.current;
+
+        if (isLatestSettled) {
+          ganttMemoryCacheRef.current.set(targetProjectId, { tasks: dbTasks, links: dbLinks, ts: Date.now() });
+          purgeStaleLocalGanttCache(targetProjectId, dbTasks);
+          setCacheVersion((v) => v + 1);
+          if (latestSelectedProjectIdRef.current === targetProjectId) {
+            setTasks(dbTasks);
+            setLinks(dbLinks);
+          }
+        }
+
+        const unifiedProg = computeUnifiedProjectProgress(dbTasks);
+        onUpdateProject?.(targetProjectId, {
+          progressPercentage: unifiedProg,
+          cpmProgress: unifiedProg,
+          tasksCount: dbTasks.length
+        });
+      }
+      setSyncFeedback({ type: 'success', message: 'All changes saved' });
+      setTimeout(() => setSyncFeedback(null), 2500);
+    } catch (err) {
+      console.error('syncBulkBackend error:', err);
+      setSyncFeedback({ type: 'error', message: 'Unable to save schedule changes. Please try again.' });
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } finally {
+      pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
+      isMutatingRef.current = pendingMutationsRef.current > 0 || queuedDragUpdatesRef.current.size > 0;
+      if (pendingMutationsRef.current === 0) {
+        setIsSyncing(false);
+      }
+    }
+  }, [selectedProjectId, onUpdateProject, buildGanttAuthHeaders, parseDbGanttPayload, purgeStaleLocalGanttCache]);
+
   const syncBackend = useCallback(async (
     action: 'create' | 'update' | 'delete',
     task: Partial<GanttTaskItem> & { id: string },
@@ -1464,6 +1567,9 @@ export default function GanttTimeline({
   ) => {
     const targetProjectId = projectIdOverride || selectedProjectId;
     if (!targetProjectId) return;
+    const mySeq = ++mutationSeqRef.current;
+    pendingMutationsRef.current += 1;
+    isMutatingRef.current = true;
     setIsSyncing(true);
     try {
       const resolvedPhase = task.constructionPhase || resolveTaskConstructionPhase(task);
@@ -1497,21 +1603,28 @@ export default function GanttTimeline({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const resData = await res.json().catch(() => null);
 
-      // Always write authoritative DB response under targetProjectId's cache key
+      // Only hydrate authoritative DB response when no newer local mutation or drag is pending
       if (Array.isArray(resData?.data)) {
         const { parsedTasks: dbTasks, parsedLinks: dbLinks } = parseDbGanttPayload(
           targetProjectId,
           resData.data,
           Array.isArray(resData.links) ? resData.links : []
         );
-        ganttMemoryCacheRef.current.set(targetProjectId, { tasks: dbTasks, links: dbLinks, ts: Date.now() });
-        purgeStaleLocalGanttCache(targetProjectId, dbTasks);
-        setCacheVersion((v) => v + 1);
+        const isLatestSettled =
+          mySeq === mutationSeqRef.current &&
+          pendingMutationsRef.current <= 1 &&
+          queuedDragUpdatesRef.current.size === 0 &&
+          !isDraggingRef.current;
 
-        // Only hydrate active UI state if user is still viewing targetProjectId
-        if (latestSelectedProjectIdRef.current === targetProjectId) {
-          setTasks(dbTasks);
-          setLinks(dbLinks);
+        if (isLatestSettled) {
+          ganttMemoryCacheRef.current.set(targetProjectId, { tasks: dbTasks, links: dbLinks, ts: Date.now() });
+          purgeStaleLocalGanttCache(targetProjectId, dbTasks);
+          setCacheVersion((v) => v + 1);
+
+          if (latestSelectedProjectIdRef.current === targetProjectId) {
+            setTasks(dbTasks);
+            setLinks(dbLinks);
+          }
         }
 
         const unifiedProg = computeUnifiedProjectProgress(dbTasks);
@@ -1534,7 +1647,11 @@ export default function GanttTimeline({
       setSyncFeedback({ type: 'error', message: 'Unable to save schedule changes. Please try again.' });
       setTimeout(() => setSyncFeedback(null), 4000);
     } finally {
-      setIsSyncing(false);
+      pendingMutationsRef.current = Math.max(0, pendingMutationsRef.current - 1);
+      isMutatingRef.current = pendingMutationsRef.current > 0 || queuedDragUpdatesRef.current.size > 0;
+      if (pendingMutationsRef.current === 0) {
+        setIsSyncing(false);
+      }
     }
   }, [selectedProjectId, onUpdateProject, buildGanttAuthHeaders, parseDbGanttPayload, purgeStaleLocalGanttCache]);
 
@@ -1542,14 +1659,56 @@ export default function GanttTimeline({
     action: 'create' | 'update' | 'delete',
     task: Partial<GanttTaskItem> & { id: string }
   ) => {
-    const targetProjectId = selectedProjectId;
+    const targetProjectId = latestSelectedProjectIdRef.current || selectedProjectId;
+    if (!targetProjectId) return;
+
+    // For drag/resize updates, accumulate all dragged bars into queuedDragUpdatesRef so dragging bar 2
+    // NEVER cancels bar 1's save, then flush them all atomically in one single /gantt/bulk request.
+    if (action === 'update') {
+      mutationSeqRef.current += 1;
+      isMutatingRef.current = true;
+      queuedDragUpdatesRef.current.set(task.id, {
+        projectId: targetProjectId,
+        task: task as GanttTaskItem
+      });
+
+      if (dragFlushTimerRef.current) {
+        clearTimeout(dragFlushTimerRef.current);
+      }
+      dragFlushTimerRef.current = setTimeout(() => {
+        dragFlushTimerRef.current = null;
+        if (isDraggingRef.current) return;
+        const entries = Array.from(queuedDragUpdatesRef.current.values());
+        queuedDragUpdatesRef.current.clear();
+        if (entries.length === 0) {
+          isMutatingRef.current = pendingMutationsRef.current > 0;
+          return;
+        }
+        // Group by projectId and flush each project's dragged bars in one atomic bulk call
+        const byProject = new Map<string, GanttTaskItem[]>();
+        entries.forEach(({ projectId, task: t }) => {
+          const list = byProject.get(projectId) || [];
+          list.push(t);
+          byProject.set(projectId, list);
+        });
+        byProject.forEach((projTasks, pid) => {
+          if (projTasks.length === 1) {
+            syncBackend('update', projTasks[0], pid);
+          } else {
+            syncBulkBackend(projTasks, pid);
+          }
+        });
+      }, 220);
+      return;
+    }
+
     if (pendingSyncTimerRef.current) {
       clearTimeout(pendingSyncTimerRef.current);
     }
     pendingSyncTimerRef.current = setTimeout(() => {
       syncBackend(action, task, targetProjectId);
     }, 150);
-  }, [selectedProjectId, syncBackend]);
+  }, [selectedProjectId, syncBackend, syncBulkBackend]);
 
   // ==========================================
   // 6b. Multi-Level Task Tree & Collapsible Subtasks
@@ -1940,6 +2099,8 @@ export default function GanttTimeline({
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
 
+    isDraggingRef.current = true;
+    mutationSeqRef.current += 1;
     setDragState({
       active: true,
       type,
@@ -2017,6 +2178,7 @@ export default function GanttTimeline({
 
     const onPointerUp = () => {
       document.body.style.userSelect = originalUserSelect;
+      isDraggingRef.current = false;
 
       const currentTasks = latestTasksRef.current;
       const finalTask = currentTasks.find(t => t.id === dragState.taskId);
@@ -2159,10 +2321,10 @@ export default function GanttTimeline({
         tasksCount: scheduled.length
       });
 
-      if (newlyCreatedPhaseParent) {
-        syncBackend('create', newlyCreatedPhaseParent, targetProjectId);
-      }
-      newBatchTasks.forEach(t => syncBackend('create', t, targetProjectId));
+      const atomicBatch = newlyCreatedPhaseParent
+        ? [newlyCreatedPhaseParent, ...newBatchTasks]
+        : newBatchTasks;
+      syncBulkBackend(atomicBatch, targetProjectId);
       setIsNewTaskDraft(false);
       setEditingTask(null);
       return;

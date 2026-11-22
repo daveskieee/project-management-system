@@ -647,8 +647,10 @@ export function createGanttRouter(prisma: PrismaClient) {
         if (childCreates.length > 0) {
           await tx.projectTask.createMany({ data: childCreates, skipDuplicates: true });
         }
-        for (const upd of tasksToUpdate) {
-          await tx.projectTask.update({ where: { id: upd.id }, data: upd.data });
+        if (tasksToUpdate.length > 0) {
+          await Promise.all(
+            tasksToUpdate.map((upd) => tx.projectTask.update({ where: { id: upd.id }, data: upd.data }))
+          );
         }
 
         // 4. Upsert explicit links & task predecessorIds
@@ -775,9 +777,10 @@ export function createGanttRouter(prisma: PrismaClient) {
         links: result.links,
         ts: Date.now(),
       });
+      invalidateAllDataCache();
+      broadcastChange('gantt', { projectId });
       broadcastChange('tasks');
       broadcastChange('projects');
-      invalidateAllDataCache();
 
       res.json({
         success: true,
@@ -790,6 +793,267 @@ export function createGanttRouter(prisma: PrismaClient) {
     } catch (error) {
       console.error('Error synchronizing Gantt data:', error);
       res.status(500).json({ error: 'Failed to synchronize Gantt schedule' });
+    }
+  });
+
+  /**
+   * POST /api/projects/:projectId/gantt/bulk
+   * Atomic batch create/update endpoint for multi-task creation and rapid drag/resize flushes.
+   * Commits all tasks in a single PostgreSQL transaction and broadcasts cache invalidation ONCE.
+   */
+  router.post('/:projectId/gantt/bulk', requireRole(['ADMIN', 'OPERATIONS_MANAGER', 'PROJECT_MANAGER', 'ENGINEER']), async (req: Request, res: Response) => {
+    try {
+      const { projectId } = req.params;
+      const incomingTasks: any[] = Array.isArray(req.body?.tasks) ? req.body.tasks : [];
+
+      if (!projectId) {
+        return res.status(400).json({ error: 'Project ID is required' });
+      }
+      if (!hasProjectManagementAccess(req.user) && !checkUserProjectAccess(req.user, projectId)) {
+        return res.status(403).json({ error: 'Forbidden: You do not have access to this project.' });
+      }
+      if (incomingTasks.length === 0) {
+        return res.status(400).json({ error: 'At least one task is required for bulk sync.' });
+      }
+
+      const existingProject = await prisma.commercialProject.findUnique({ where: { id: projectId } });
+      if (!existingProject) {
+        return res.json({ success: true, localOnly: true, result: { tasksCount: incomingTasks.length } });
+      }
+
+      const result = await prisma.$transaction(async (tx) => {
+        const orderedIncoming = [...incomingTasks].sort((a, b) => {
+          const aHasParent = Boolean(a.parentTaskId || (a.parent && a.parent !== 0 && a.parent !== '0'));
+          const bHasParent = Boolean(b.parentTaskId || (b.parent && b.parent !== 0 && b.parent !== '0'));
+          if (aHasParent !== bHasParent) return aHasParent ? 1 : -1;
+          return Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0);
+        });
+
+        const incomingIds = orderedIncoming.map((t) => String(t.id || '')).filter(Boolean);
+        const incomingContractorIds = Array.from(
+          new Set(orderedIncoming.map((t) => (t.assignedContractorId ? String(t.assignedContractorId) : '')).filter(Boolean))
+        );
+
+        const [existingTasksRows, existingProjectTaskRows, validContractorsRows] = await Promise.all([
+          incomingIds.length > 0
+            ? tx.projectTask.findMany({ where: { id: { in: incomingIds } }, select: { id: true, projectId: true } })
+            : Promise.resolve([]),
+          tx.projectTask.findMany({ where: { projectId }, select: { id: true } }),
+          incomingContractorIds.length > 0
+            ? tx.contractor.findMany({ where: { id: { in: incomingContractorIds } }, select: { id: true } })
+            : Promise.resolve([])
+        ]);
+
+        const ownerByTaskId = new Map<string, string>(existingTasksRows.map((r) => [r.id, r.projectId]));
+        const knownProjectTaskIds = new Set<string>(existingProjectTaskRows.map((r) => r.id));
+        const validContractorIds = new Set<string>(validContractorsRows.map((r) => r.id));
+
+        const tasksToCreate: any[] = [];
+        const tasksToUpdate: Array<{ id: string; data: any }> = [];
+
+        for (let idx = 0; idx < orderedIncoming.length; idx++) {
+          const t = orderedIncoming[idx];
+          const taskIdStr = String(t.id || `task-${Date.now()}-${idx}`);
+
+          // Strictly forbid overwriting tasks owned by another project
+          const existingOwnerProjectId = ownerByTaskId.get(taskIdStr);
+          if (existingOwnerProjectId && existingOwnerProjectId !== projectId) {
+            continue;
+          }
+
+          const startRaw = t.start_date || t.startDate;
+          const endRaw = t.end_date || t.endDate;
+          const parsedStart = startRaw ? new Date(startRaw) : new Date();
+          const startDate = isNaN(parsedStart.getTime()) ? new Date() : parsedStart;
+          const isMilestone = t.type === 'milestone' || (t.duration !== undefined && parseInt(String(t.duration), 10) === 0);
+          const duration = isMilestone ? 0 : Math.max(1, parseInt(String(t.duration ?? 1), 10) || 1);
+          const parsedEnd = endRaw ? new Date(endRaw) : addWorkingDays(startDate, duration || 1);
+          const endDate = isMilestone ? startDate : (isNaN(parsedEnd.getTime()) ? addWorkingDays(startDate, duration || 1) : parsedEnd);
+
+          const rawParentId =
+            t.parent && t.parent !== 0 && t.parent !== '0'
+              ? String(t.parent)
+              : t.parentTaskId
+                ? String(t.parentTaskId)
+                : null;
+          const safeParentId =
+            rawParentId && rawParentId !== taskIdStr && knownProjectTaskIds.has(rawParentId)
+              ? rawParentId
+              : null;
+
+          const safeContractorId =
+            t.assignedContractorId && validContractorIds.has(String(t.assignedContractorId))
+              ? String(t.assignedContractorId)
+              : null;
+
+          const rawProg = parseFloat(String(t.progress ?? 0)) || 0;
+          const progress = Math.max(0, Math.min(1, rawProg > 1 ? rawProg / 100 : rawProg));
+          const status = progress >= 1.0
+            ? 'COMPLETED'
+            : (t.status === 'COMPLETED' && progress < 1.0)
+              ? (progress > 0 ? 'IN_PROGRESS' : 'TODO')
+              : (t.status || (progress > 0 ? 'IN_PROGRESS' : 'TODO'));
+          const type = isMilestone ? 'milestone' : (t.type || 'task');
+
+          knownProjectTaskIds.add(taskIdStr);
+
+          const baseFields = {
+            text: t.text || t.title || 'New Construction Task',
+            title: t.text || t.title || 'New Construction Task',
+            startDate,
+            endDate,
+            duration,
+            progress,
+            ...(t.weight !== undefined && t.weight !== null ? { weight: Number(t.weight) } : {}),
+            status,
+            type,
+            parentTaskId: safeParentId,
+            wbsCode: t.wbsCode || null,
+            milestonePhase: t.milestonePhase || t.constructionPhase || null,
+            assignedContractorId: safeContractorId,
+            sortOrder: typeof t.sortOrder === 'number' ? t.sortOrder : idx
+          };
+
+          if (existingOwnerProjectId === projectId) {
+            tasksToUpdate.push({ id: taskIdStr, data: { ...baseFields, updatedAt: new Date() } });
+          } else {
+            tasksToCreate.push({ id: taskIdStr, projectId, ...baseFields });
+          }
+        }
+
+        const rootCreates = tasksToCreate.filter((r) => !r.parentTaskId);
+        const childCreates = tasksToCreate.filter((r) => Boolean(r.parentTaskId));
+        if (rootCreates.length > 0) {
+          await tx.projectTask.createMany({ data: rootCreates, skipDuplicates: true });
+        }
+        if (childCreates.length > 0) {
+          await tx.projectTask.createMany({ data: childCreates, skipDuplicates: true });
+        }
+        if (tasksToUpdate.length > 0) {
+          await Promise.all(
+            tasksToUpdate.map((upd) => tx.projectTask.update({ where: { id: upd.id }, data: upd.data }))
+          );
+        }
+
+        // Batch-create predecessor links for newly created tasks
+        const linksToCreate: Array<{ id: string; projectId: string; sourceId: string; targetId: string; type: string; lagDays: number }> = [];
+        for (const t of orderedIncoming) {
+          const targetId = String(t.id || '');
+          if (!targetId || !Array.isArray(t.predecessorIds)) continue;
+          for (const predId of t.predecessorIds) {
+            const sourceId = String(predId || '');
+            if (!sourceId || sourceId === targetId) continue;
+            if (knownProjectTaskIds.has(sourceId) && knownProjectTaskIds.has(targetId)) {
+              linksToCreate.push({
+                id: `link-${sourceId}-${targetId}`,
+                projectId,
+                sourceId,
+                targetId,
+                type: '0',
+                lagDays: 0
+              });
+            }
+          }
+        }
+        if (linksToCreate.length > 0) {
+          await tx.taskLink.createMany({ data: linksToCreate, skipDuplicates: true });
+        }
+
+        const [freshTasks, freshLinks] = await Promise.all([
+          tx.projectTask.findMany({
+            where: { projectId },
+            include: { assignedContractor: true },
+            orderBy: { sortOrder: 'asc' }
+          }),
+          tx.taskLink.findMany({ where: { projectId } })
+        ]);
+
+        let avgProgress = 0;
+        if (freshTasks.length > 0) {
+          const parentIds = new Set(freshTasks.map((t) => t.parentTaskId).filter(Boolean));
+          const leafTasks = freshTasks.filter((t) => !parentIds.has(t.id));
+          const targetTasks = leafTasks.length > 0 ? leafTasks : freshTasks;
+          const totalDuration = targetTasks.reduce((acc, curr) => acc + Math.max(1, curr.duration || 1), 0);
+          const weightedProgress = targetTasks.reduce((acc, curr) => {
+            let p = 0;
+            if (curr.status === 'COMPLETED') {
+              p = 1.0;
+            } else {
+              const raw = typeof curr.progress === 'number' ? curr.progress : 0;
+              p = raw > 1.0 ? Math.min(1.0, raw / 100) : Math.max(0, Math.min(1.0, raw));
+            }
+            return acc + p * Math.max(1, curr.duration || 1);
+          }, 0);
+          avgProgress = totalDuration > 0 ? Math.round((weightedProgress / totalDuration) * 100) : 0;
+        }
+
+        const isCompletedProj = existingProject.status === 'COMPLETED' || existingProject.status === 'HANDED_OVER';
+        const finalProgress = isCompletedProj ? 100 : avgProgress;
+        await tx.commercialProject.update({
+          where: { id: projectId },
+          data: {
+            progressPercentage: finalProgress,
+            tasksCount: freshTasks.length
+          }
+        }).catch(() => {});
+
+        return {
+          tasksCount: freshTasks.length,
+          linksCount: freshLinks.length,
+          projectProgress: finalProgress,
+          data: freshTasks.map((t) => {
+            const isMilestone = t.type === 'milestone' || t.duration === 0;
+            return {
+              id: t.id,
+              text: t.text,
+              start_date: formatGanttDate(t.startDate),
+              end_date: formatGanttDate(t.endDate),
+              duration: t.duration,
+              progress: typeof t.progress === 'number' ? t.progress : 0,
+              weight: typeof (t as any).weight === 'number' ? (t as any).weight : null,
+              status: t.status || ((typeof t.progress === 'number' && t.progress >= 1.0) ? 'COMPLETED' : (typeof t.progress === 'number' && t.progress > 0) ? 'IN_PROGRESS' : 'TODO'),
+              parent: t.parentTaskId || 0,
+              type: isMilestone ? 'milestone' : t.type || 'task',
+              wbsCode: t.wbsCode || '',
+              milestonePhase: t.milestonePhase || '',
+              assignedContractorId: t.assignedContractorId || '',
+              contractor: t.assignedContractor?.name || (t.assignedContractorId ? 'Assigned Contractor' : 'LDM Construction Crew'),
+              baselineStart: t.baselineStart ? formatGanttDate(t.baselineStart) : null,
+              baselineEnd: t.baselineEnd ? formatGanttDate(t.baselineEnd) : null,
+              sortOrder: t.sortOrder
+            };
+          }),
+          links: freshLinks.map((l) => ({
+            id: l.id,
+            source: l.sourceId,
+            target: l.targetId,
+            type: l.type || '0',
+            lag: l.lagDays || 0
+          }))
+        };
+      }, { maxWait: 15000, timeout: 30000 });
+
+      ganttCache.set(projectId, {
+        data: result.data,
+        links: result.links,
+        ts: Date.now(),
+      });
+      invalidateAllDataCache();
+      broadcastChange('gantt', { projectId });
+      broadcastChange('tasks');
+      broadcastChange('projects');
+
+      return res.json({
+        success: true,
+        message: `Atomically saved ${incomingTasks.length} Gantt task(s).`,
+        result,
+        data: result.data,
+        links: result.links,
+        syncedAt: new Date().toISOString()
+      });
+    } catch (error) {
+      console.error('Error in bulk Gantt sync:', error);
+      return res.status(500).json({ error: 'Failed to bulk-save Gantt tasks' });
     }
   });
 
