@@ -248,7 +248,7 @@ export default function WorkerMasterlistManager({
   }, [workers, searchQuery, selectedFilterPosition, statusFilter]);
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-slate-950 text-slate-100 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-6">
+    <div className="flex-1 flex flex-col min-h-0 text-slate-100 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-6">
       
       {/* Toast Alert */}
       {toastMessage && (

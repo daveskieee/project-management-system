@@ -1001,10 +1001,16 @@ export default function PaymentsTracker({
                   </td>
                 </tr>
               ) : (
-                filteredInstallments.map((inst, index) => (
+                filteredInstallments.map((inst, index) => {
+                  const displayInvoiceId = /^INV-\d{4}-\d+$/i.test(inst.id)
+                    ? inst.id
+                    : (inst.reference && /^INV-\d{4}-\d+$/i.test(inst.reference.trim())
+                        ? inst.reference.trim()
+                        : `INV-${(inst.dueDate || '2026').slice(0, 4)}-${String(index + 1).padStart(3, '0')}`);
+                  return (
                   <tr key={`${inst.id}-${index}`} className="hover:bg-slate-800/40 transition">
                     <td className="py-3.5 px-4 font-mono font-bold text-amber-400">
-                      {inst.id}
+                      {displayInvoiceId}
                     </td>
                     <td className="py-3.5 px-4 font-semibold text-white">
                       {inst.clientName}
@@ -1048,7 +1054,7 @@ export default function PaymentsTracker({
                     <td className="py-3.5 px-4 text-right">
                       <div className="flex items-center justify-end gap-1.5">
                         <button
-                          onClick={() => setSelectedReceipt(inst)}
+                          onClick={() => setSelectedReceipt({ ...inst, id: displayInvoiceId })}
                           className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-mono flex items-center gap-1 transition cursor-pointer"
                           title="View Receipt Statement"
                         >
@@ -1067,7 +1073,8 @@ export default function PaymentsTracker({
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

@@ -412,22 +412,29 @@ export default function BillOfMaterialsManager({
     return [];
   });
 
-  // Re-load BOM when switching project (never auto-seed sample preset for blank projects)
+  // Re-load BOM when switching project (hydrate from server-persisted BOM phases if localStorage is empty)
   useEffect(() => {
     try {
       const saved = localStorage.getItem(`ldm_bom_${selectedProjectId}`);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           setPhases(parsed);
-          if (parsed.length === 0) setProjectType('');
           return;
         }
       }
     } catch { }
+    const serverPhases = Array.isArray((activeProject as any)?.bomPhases) ? (activeProject as any).bomPhases : [];
+    if (serverPhases.length > 0) {
+      setPhases(serverPhases);
+      try {
+        localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(serverPhases));
+      } catch { }
+      return;
+    }
     setPhases([]);
     setProjectType('');
-  }, [selectedProjectId]);
+  }, [selectedProjectId, activeProject]);
 
   const [materialSyncTick, setMaterialSyncTick] = useState(0);
 
@@ -437,13 +444,20 @@ export default function BillOfMaterialsManager({
     return () => window.removeEventListener(BOM_PROFIT_SYNC_EVENT, onSync);
   }, []);
 
-  // Auto-save BOM changes to localStorage
+  // Auto-save BOM changes to localStorage + persist to PostgreSQL
   const saveBomToStorage = useCallback((newPhases: BomPhase[]) => {
     setPhases(newPhases);
     try {
       localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(newPhases));
       notifyBomProfitSync();
     } catch { }
+    if (selectedProjectId) {
+      fetch(`/api/projects/${encodeURIComponent(selectedProjectId)}/bom`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phases: newPhases }),
+      }).catch(() => { /* silent offline fallback */ });
+    }
   }, [selectedProjectId]);
 
   const bomProfitSync = useMemo(() => {
@@ -1255,8 +1269,8 @@ export default function BillOfMaterialsManager({
               type="button"
               onClick={() => setIsClientMode(!isClientMode)}
               className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 border transition cursor-pointer ${isClientMode
-                  ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
-                  : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40'
+                : 'bg-slate-800 text-slate-300 border-slate-700 hover:text-white'
                 }`}
               title="Toggle client-friendly view (hides profit, overhead, and markup breakdown columns)"
             >
@@ -1475,8 +1489,8 @@ export default function BillOfMaterialsManager({
             <div className="flex items-center justify-between gap-1">
               <span className="text-[10px] font-mono text-amber-400 uppercase block font-bold">Total Profit Pool</span>
               <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border font-bold ${bomProfitSync.isIntact
-                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                  : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
+                ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                : 'bg-rose-500/15 text-rose-300 border-rose-500/30'
                 }`}>
                 {bomProfitSync.profitMarginPct}% {bomProfitSync.isIntact ? 'Intact' : 'Impacted'}
               </span>
@@ -1534,8 +1548,8 @@ export default function BillOfMaterialsManager({
               disabled={exists}
               onClick={() => handleAddOptionalPhase(tpl)}
               className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold flex items-center gap-1 transition ${exists
-                  ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
-                  : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 cursor-pointer'
+                ? 'bg-slate-800/50 text-slate-500 border border-slate-800 cursor-not-allowed'
+                : 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 cursor-pointer'
                 }`}
             >
               <span>+ Phase {tpl.code}: {tpl.title}</span>
@@ -1548,9 +1562,8 @@ export default function BillOfMaterialsManager({
       {/* 4. EXPANDABLE WBS PHASES & MATERIAL LINE ITEMS ACCORDION */}
       <div className="space-y-4">
         {phases.length === 0 ? (
-          <div className={`rounded-2xl border p-10 text-center space-y-4 ${
-            isDark ? 'bg-slate-900/70 border-slate-800' : 'bg-white border-slate-200'
-          }`}>
+          <div className={`rounded-2xl border p-10 text-center space-y-4 ${isDark ? 'bg-slate-900/70 border-slate-800' : 'bg-white border-slate-200'
+            }`}>
             <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto">
               <FileSpreadsheet className="w-6 h-6" />
             </div>
@@ -1574,11 +1587,10 @@ export default function BillOfMaterialsManager({
               <button
                 type="button"
                 onClick={() => setShowTemplatePickerModal(true)}
-                className={`px-4 py-2.5 rounded-xl border font-semibold text-xs flex items-center gap-1.5 cursor-pointer transition-colors ${
-                  isDark
+                className={`px-4 py-2.5 rounded-xl border font-semibold text-xs flex items-center gap-1.5 cursor-pointer transition-colors ${isDark
                     ? 'bg-slate-950 hover:bg-slate-800 border-slate-700 text-slate-200'
                     : 'bg-slate-50 hover:bg-slate-100 border-slate-300 text-slate-700'
-                }`}
+                  }`}
               >
                 <Layers className="w-4 h-4 text-amber-400" />
                 <span>Apply a Template Preset</span>
@@ -1586,312 +1598,312 @@ export default function BillOfMaterialsManager({
             </div>
           </div>
         ) : (
-        phases.map((phase, pIdx) => {
-          const phaseSummary = summaryCalculations.phaseSummaries.find(ps => ps.phaseId === phase.id);
+          phases.map((phase, pIdx) => {
+            const phaseSummary = summaryCalculations.phaseSummaries.find(ps => ps.phaseId === phase.id);
 
-          return (
-            <div
-              key={phase.id}
-              className={`rounded-2xl border overflow-hidden shadow-md transition-colors ${isDark ? 'bg-slate-900/90 border-slate-800' : 'bg-white border-slate-200'
-                }`}
-            >
-              {/* Phase Header Bar */}
-              <div className="p-3.5 sm:p-4 bg-slate-950/80 border-b border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                <div
-                  onClick={() => togglePhaseExpand(phase.id)}
-                  className="flex items-center gap-2.5 cursor-pointer select-none"
-                >
-                  <button
-                    type="button"
-                    className="w-6 h-6 rounded-md bg-slate-800 flex items-center justify-center text-slate-300 hover:text-white"
+            return (
+              <div
+                key={phase.id}
+                className={`rounded-2xl border overflow-hidden shadow-md transition-colors ${isDark ? 'bg-slate-900/90 border-slate-800' : 'bg-white border-slate-200'
+                  }`}
+              >
+                {/* Phase Header Bar */}
+                <div className="p-3.5 sm:p-4 bg-slate-950/80 border-b border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                  <div
+                    onClick={() => togglePhaseExpand(phase.id)}
+                    className="flex items-center gap-2.5 cursor-pointer select-none"
                   >
-                    {phase.isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
-                  </button>
-                  <div>
-                    <span className="text-[10px] font-mono text-amber-400 uppercase font-bold tracking-wider">
-                      PHASE {phase.code}
-                    </span>
-                    <h3 className="text-sm sm:text-base font-bold text-white tracking-tight">
-                      {phase.title}
-                    </h3>
-                  </div>
-                </div>
-
-                {/* Phase Batch Controls & Subtotals */}
-                <div className="flex flex-wrap items-center gap-3">
-                  {!isClientMode && (
-                    <div className="flex items-center gap-2 bg-slate-900 border border-slate-700/80 px-2.5 py-1 rounded-lg text-xs font-mono">
-                      <span className="text-slate-400 text-[10px]">Phase Profit:</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={phase.defaultProfitPct}
-                        onChange={(e) => handleBatchProfitChange(phase.id, Number(e.target.value))}
-                        className="w-12 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-center text-amber-400 font-bold"
-                      />
-                      <span className="text-slate-400 text-[10px]">%</span>
-                      <span className="text-slate-600">|</span>
-                      <span className="text-slate-400 text-[10px]">Overhead:</span>
-                      <input
-                        type="number"
-                        min={0}
-                        max={100}
-                        value={phase.defaultOverheadPct}
-                        onChange={(e) => handleBatchOverheadChange(phase.id, Number(e.target.value))}
-                        className="w-12 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-center text-blue-400 font-bold"
-                      />
-                      <span className="text-slate-400 text-[10px]">%</span>
-                    </div>
-                  )}
-
-                  <div className="text-right font-mono">
-                    <span className="text-[10px] text-slate-400 block">Phase Total</span>
-                    <span className="text-sm sm:text-base font-black text-emerald-400">
-                      ₱{(phaseSummary?.phaseTotal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                    </span>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => handleAddSubPhase(phase.id)}
-                    className="px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-xs font-bold flex items-center gap-1 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>+ Add Sub-Phase</span>
-                  </button>
-
-                  {!isClientMode && (
                     <button
                       type="button"
-                      onClick={() => handleDeletePhase(phase.id)}
-                      className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/70 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-500/40 transition-colors cursor-pointer"
-                      title={`Delete Phase ${phase.code}`}
+                      className="w-6 h-6 rounded-md bg-slate-800 flex items-center justify-center text-slate-300 hover:text-white"
                     >
-                      <Trash2 className="w-3.5 h-3.5" />
+                      {phase.isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                     </button>
-                  )}
-                </div>
-              </div>
+                    <div>
+                      <span className="text-[10px] font-mono text-amber-400 uppercase font-bold tracking-wider">
+                        PHASE {phase.code}
+                      </span>
+                      <h3 className="text-sm sm:text-base font-bold text-white tracking-tight">
+                        {phase.title}
+                      </h3>
+                    </div>
+                  </div>
 
-              {/* Sub-Phases & Items Content */}
-              {phase.isExpanded && (
-                <div className="p-3 sm:p-4 space-y-4">
-                  {phase.subPhases.map((sp) => (
-                    <div key={sp.id} className="bg-slate-950/40 border border-slate-800 rounded-xl overflow-hidden">
-
-                      {/* Sub-Phase Title Row */}
-                      <div className="px-3.5 py-2 bg-slate-900/60 border-b border-slate-800 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-                          <span className="text-xs font-bold text-white">{sp.title}</span>
-                          <span className="text-[10px] font-mono text-slate-400">({sp.items.length} item{sp.items.length === 1 ? '' : 's'})</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleAddItem(phase.id, sp.id)}
-                            className="text-[11px] font-mono text-amber-400 hover:text-amber-300 font-bold flex items-center gap-1 cursor-pointer"
-                          >
-                            <Plus className="w-3 h-3" />
-                            <span>Add Item</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteSubPhase(phase.id, sp.id)}
-                            className="text-slate-500 hover:text-red-400 p-1 cursor-pointer"
-                            title="Delete Sub-Phase"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
+                  {/* Phase Batch Controls & Subtotals */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    {!isClientMode && (
+                      <div className="flex items-center gap-2 bg-slate-900 border border-slate-700/80 px-2.5 py-1 rounded-lg text-xs font-mono">
+                        <span className="text-slate-400 text-[10px]">Phase Profit:</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={phase.defaultProfitPct}
+                          onChange={(e) => handleBatchProfitChange(phase.id, Number(e.target.value))}
+                          className="w-12 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-center text-amber-400 font-bold"
+                        />
+                        <span className="text-slate-400 text-[10px]">%</span>
+                        <span className="text-slate-600">|</span>
+                        <span className="text-slate-400 text-[10px]">Overhead:</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={100}
+                          value={phase.defaultOverheadPct}
+                          onChange={(e) => handleBatchOverheadChange(phase.id, Number(e.target.value))}
+                          className="w-12 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-center text-blue-400 font-bold"
+                        />
+                        <span className="text-slate-400 text-[10px]">%</span>
                       </div>
+                    )}
 
-                      {/* Items Table */}
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-left text-xs border-collapse">
-                          <thead>
-                            <tr className="bg-slate-950 text-slate-400 font-mono text-[10px] uppercase border-b border-slate-800">
-                              <th className="py-2.5 px-3 min-w-[200px]">Scope of Work / Material</th>
-                              <th className="py-2.5 px-2 w-20 text-center">No. of Units</th>
-                              <th className="py-2.5 px-2 w-20 text-center">Unit</th>
-                              <th className="py-2.5 px-2 w-28 text-right">{isClientMode ? 'Unit Price (₱)' : 'Unit Cost (₱)'}</th>
-                              {!isClientMode && <th className="py-2.5 px-2 w-28 text-right">Direct Cost (₱)</th>}
-                              {!isClientMode && <th className="py-2.5 px-2 w-20 text-center">Profit %</th>}
-                              {!isClientMode && <th className="py-2.5 px-2 w-24 text-right">Profit (₱)</th>}
-                              {!isClientMode && <th className="py-2.5 px-2 w-20 text-center">Overhead %</th>}
-                              {!isClientMode && <th className="py-2.5 px-2 w-24 text-right">Total Markup</th>}
-                              <th className="py-2.5 px-3 w-32 text-right">Total Cost (₱)</th>
-                              <th className="py-2.5 px-2 w-10"></th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-800/60 font-sans">
-                            {sp.items.map((item) => {
-                              const c = calculateLineItemCosts(item);
-                              const syncStatus = bomProfitSync.lineItemStatuses[item.id];
+                    <div className="text-right font-mono">
+                      <span className="text-[10px] text-slate-400 block">Phase Total</span>
+                      <span className="text-sm sm:text-base font-black text-emerald-400">
+                        ₱{(phaseSummary?.phaseTotal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </span>
+                    </div>
 
-                              return (
-                                <tr key={item.id} className="hover:bg-slate-900/40 transition-colors">
-                                  {/* Scope */}
-                                  <td className="py-2 px-3">
-                                    <input
-                                      type="text"
-                                      value={item.scopeOfWork}
-                                      onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'scopeOfWork', e.target.value)}
-                                      className="w-full bg-transparent border-0 text-white text-xs focus:ring-1 focus:ring-amber-500 rounded px-1 py-0.5"
-                                    />
-                                    {syncStatus && (syncStatus.isBudgetFulfilled || syncStatus.overrunAmount > 0 || syncStatus.actualMaterialSpend > 0) && (
-                                      <div className="flex items-center gap-1.5 mt-1 px-1 flex-wrap">
-                                        {syncStatus.overrunAmount > 0 ? (
-                                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-[10px] font-mono font-bold text-rose-300">
-                                            <AlertCircle className="w-2.5 h-2.5" />
-                                            Overrun: -₱{Math.round(syncStatus.overrunAmount).toLocaleString()} from Profit
-                                          </span>
-                                        ) : syncStatus.isBudgetFulfilled ? (
-                                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-mono font-bold text-emerald-300">
-                                            <CheckCircle2 className="w-2.5 h-2.5" />
-                                            Budget Fulfilled
-                                          </span>
-                                        ) : (
-                                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20 text-[10px] font-mono text-sky-300">
-                                            Mat. Spend: ₱{Math.round(syncStatus.actualMaterialSpend).toLocaleString()} / ₱{Math.round(syncStatus.allocatedCost).toLocaleString()}
-                                          </span>
-                                        )}
-                                      </div>
-                                    )}
-                                  </td>
+                    <button
+                      type="button"
+                      onClick={() => handleAddSubPhase(phase.id)}
+                      className="px-2.5 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/30 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>+ Add Sub-Phase</span>
+                    </button>
 
-                                  {/* No of Units */}
-                                  <td className="py-2 px-2 text-center">
-                                    <input
-                                      type="number"
-                                      min={0}
-                                      step="any"
-                                      value={item.noOfUnits}
-                                      onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'noOfUnits', Math.max(0, parseFloat(e.target.value) || 0))}
-                                      className="w-16 bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-center text-xs font-mono text-white focus:border-amber-500 focus:outline-none"
-                                    />
-                                  </td>
+                    {!isClientMode && (
+                      <button
+                        type="button"
+                        onClick={() => handleDeletePhase(phase.id)}
+                        className="p-1.5 rounded-lg bg-slate-900 hover:bg-rose-950/70 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-500/40 transition-colors cursor-pointer"
+                        title={`Delete Phase ${phase.code}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
 
-                                  {/* Unit */}
-                                  <td className="py-2 px-2 text-center">
-                                    <select
-                                      value={item.unit}
-                                      onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'unit', e.target.value)}
-                                      className="bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-300 focus:border-amber-500 focus:outline-none cursor-pointer"
-                                    >
-                                      <option value="pcs">pcs</option>
-                                      <option value="days">days</option>
-                                      <option value="lot">lot</option>
-                                      <option value="cu.m.">cu.m.</option>
-                                      <option value="sq.m.">sq.m.</option>
-                                      <option value="bags">bags</option>
-                                      <option value="kg">kg</option>
-                                      <option value="bd.ft.">bd.ft.</option>
-                                      <option value="l.m.">l.m.</option>
-                                      <option value="sets">sets</option>
-                                      <option value="sheets">sheets</option>
-                                      <option value="lengths">lengths</option>
-                                      <option value="rolls">rolls</option>
-                                    </select>
-                                  </td>
+                {/* Sub-Phases & Items Content */}
+                {phase.isExpanded && (
+                  <div className="p-3 sm:p-4 space-y-4">
+                    {phase.subPhases.map((sp) => (
+                      <div key={sp.id} className="bg-slate-950/40 border border-slate-800 rounded-xl overflow-hidden">
 
-                                  {/* Unit Cost */}
-                                  <td className="py-2 px-2 text-right">
-                                    {isClientMode ? (
-                                      <span className="font-mono text-slate-300">
-                                        ₱{c.markedUpUnitCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                      </span>
-                                    ) : (
+                        {/* Sub-Phase Title Row */}
+                        <div className="px-3.5 py-2 bg-slate-900/60 border-b border-slate-800 flex items-center justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+                            <span className="text-xs font-bold text-white">{sp.title}</span>
+                            <span className="text-[10px] font-mono text-slate-400">({sp.items.length} item{sp.items.length === 1 ? '' : 's'})</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => handleAddItem(phase.id, sp.id)}
+                              className="text-[11px] font-mono text-amber-400 hover:text-amber-300 font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Plus className="w-3 h-3" />
+                              <span>Add Item</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSubPhase(phase.id, sp.id)}
+                              className="text-slate-500 hover:text-red-400 p-1 cursor-pointer"
+                              title="Delete Sub-Phase"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Items Table */}
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs border-collapse">
+                            <thead>
+                              <tr className="bg-slate-950 text-slate-400 font-mono text-[10px] uppercase border-b border-slate-800">
+                                <th className="py-2.5 px-3 min-w-[200px]">Scope of Work / Material</th>
+                                <th className="py-2.5 px-2 w-20 text-center">No. of Units</th>
+                                <th className="py-2.5 px-2 w-20 text-center">Unit</th>
+                                <th className="py-2.5 px-2 w-28 text-right">{isClientMode ? 'Unit Price (₱)' : 'Unit Cost (₱)'}</th>
+                                {!isClientMode && <th className="py-2.5 px-2 w-28 text-right">Direct Cost (₱)</th>}
+                                {!isClientMode && <th className="py-2.5 px-2 w-20 text-center">Profit %</th>}
+                                {!isClientMode && <th className="py-2.5 px-2 w-24 text-right">Profit (₱)</th>}
+                                {!isClientMode && <th className="py-2.5 px-2 w-20 text-center">Overhead %</th>}
+                                {!isClientMode && <th className="py-2.5 px-2 w-24 text-right">Total Markup</th>}
+                                <th className="py-2.5 px-3 w-32 text-right">Total Cost (₱)</th>
+                                <th className="py-2.5 px-2 w-10"></th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-800/60 font-sans">
+                              {sp.items.map((item) => {
+                                const c = calculateLineItemCosts(item);
+                                const syncStatus = bomProfitSync.lineItemStatuses[item.id];
+
+                                return (
+                                  <tr key={item.id} className="hover:bg-slate-900/40 transition-colors">
+                                    {/* Scope */}
+                                    <td className="py-2 px-3">
+                                      <input
+                                        type="text"
+                                        value={item.scopeOfWork}
+                                        onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'scopeOfWork', e.target.value)}
+                                        className="w-full bg-transparent border-0 text-white text-xs focus:ring-1 focus:ring-amber-500 rounded px-1 py-0.5"
+                                      />
+                                      {syncStatus && (syncStatus.isBudgetFulfilled || syncStatus.overrunAmount > 0 || syncStatus.actualMaterialSpend > 0) && (
+                                        <div className="flex items-center gap-1.5 mt-1 px-1 flex-wrap">
+                                          {syncStatus.overrunAmount > 0 ? (
+                                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-[10px] font-mono font-bold text-rose-300">
+                                              <AlertCircle className="w-2.5 h-2.5" />
+                                              Overrun: -₱{Math.round(syncStatus.overrunAmount).toLocaleString()} from Profit
+                                            </span>
+                                          ) : syncStatus.isBudgetFulfilled ? (
+                                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-mono font-bold text-emerald-300">
+                                              <CheckCircle2 className="w-2.5 h-2.5" />
+                                              Budget Fulfilled
+                                            </span>
+                                          ) : (
+                                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-500/10 border border-sky-500/20 text-[10px] font-mono text-sky-300">
+                                              Mat. Spend: ₱{Math.round(syncStatus.actualMaterialSpend).toLocaleString()} / ₱{Math.round(syncStatus.allocatedCost).toLocaleString()}
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                    </td>
+
+                                    {/* No of Units */}
+                                    <td className="py-2 px-2 text-center">
                                       <input
                                         type="number"
                                         min={0}
                                         step="any"
-                                        value={item.unitCost}
-                                        onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'unitCost', Math.max(0, parseFloat(e.target.value) || 0))}
-                                        className="w-24 bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-right text-xs font-mono text-white focus:border-amber-500 focus:outline-none"
+                                        value={item.noOfUnits}
+                                        onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'noOfUnits', Math.max(0, parseFloat(e.target.value) || 0))}
+                                        className="w-16 bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-center text-xs font-mono text-white focus:border-amber-500 focus:outline-none"
                                       />
+                                    </td>
+
+                                    {/* Unit */}
+                                    <td className="py-2 px-2 text-center">
+                                      <select
+                                        value={item.unit}
+                                        onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'unit', e.target.value)}
+                                        className="bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-300 focus:border-amber-500 focus:outline-none cursor-pointer"
+                                      >
+                                        <option value="pcs">pcs</option>
+                                        <option value="days">days</option>
+                                        <option value="lot">lot</option>
+                                        <option value="cu.m.">cu.m.</option>
+                                        <option value="sq.m.">sq.m.</option>
+                                        <option value="bags">bags</option>
+                                        <option value="kg">kg</option>
+                                        <option value="bd.ft.">bd.ft.</option>
+                                        <option value="l.m.">l.m.</option>
+                                        <option value="sets">sets</option>
+                                        <option value="sheets">sheets</option>
+                                        <option value="lengths">lengths</option>
+                                        <option value="rolls">rolls</option>
+                                      </select>
+                                    </td>
+
+                                    {/* Unit Cost */}
+                                    <td className="py-2 px-2 text-right">
+                                      {isClientMode ? (
+                                        <span className="font-mono text-slate-300">
+                                          ₱{c.markedUpUnitCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                        </span>
+                                      ) : (
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          step="any"
+                                          value={item.unitCost}
+                                          onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'unitCost', Math.max(0, parseFloat(e.target.value) || 0))}
+                                          className="w-24 bg-slate-900 border border-slate-700/80 rounded px-1.5 py-0.5 text-right text-xs font-mono text-white focus:border-amber-500 focus:outline-none"
+                                        />
+                                      )}
+                                    </td>
+
+                                    {/* Direct Total Cost */}
+                                    {!isClientMode && (
+                                      <td className="py-2 px-2 text-right font-mono text-slate-300">
+                                        ₱{c.directTotalCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                      </td>
                                     )}
-                                  </td>
 
-                                  {/* Direct Total Cost */}
-                                  {!isClientMode && (
-                                    <td className="py-2 px-2 text-right font-mono text-slate-300">
-                                      ₱{c.directTotalCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                    {/* Profit % */}
+                                    {!isClientMode && (
+                                      <td className="py-2 px-2 text-center">
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          max={100}
+                                          value={item.profitPct}
+                                          onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'profitPct', Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
+                                          className="w-14 bg-slate-900 border border-slate-700/80 rounded px-1 py-0.5 text-center text-xs font-mono text-amber-400 focus:border-amber-500 focus:outline-none"
+                                        />
+                                      </td>
+                                    )}
+
+                                    {/* Profit Cost */}
+                                    {!isClientMode && (
+                                      <td className="py-2 px-2 text-right font-mono text-amber-300">
+                                        ₱{c.profitCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                      </td>
+                                    )}
+
+                                    {/* Overhead % */}
+                                    {!isClientMode && (
+                                      <td className="py-2 px-2 text-center">
+                                        <input
+                                          type="number"
+                                          min={0}
+                                          max={100}
+                                          value={item.overheadPct}
+                                          onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'overheadPct', Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
+                                          className="w-14 bg-slate-900 border border-slate-700/80 rounded px-1 py-0.5 text-center text-xs font-mono text-blue-400 focus:border-amber-500 focus:outline-none"
+                                        />
+                                      </td>
+                                    )}
+
+                                    {/* Total Markup */}
+                                    {!isClientMode && (
+                                      <td className="py-2 px-2 text-right font-mono text-purple-300">
+                                        ₱{c.totalMarkup.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+                                      </td>
+                                    )}
+
+                                    {/* Final Total Cost */}
+                                    <td className="py-2 px-3 text-right font-mono font-bold text-emerald-400">
+                                      ₱{c.finalTotalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                     </td>
-                                  )}
 
-                                  {/* Profit % */}
-                                  {!isClientMode && (
+                                    {/* Delete Item */}
                                     <td className="py-2 px-2 text-center">
-                                      <input
-                                        type="number"
-                                        min={0}
-                                        max={100}
-                                        value={item.profitPct}
-                                        onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'profitPct', Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
-                                        className="w-14 bg-slate-900 border border-slate-700/80 rounded px-1 py-0.5 text-center text-xs font-mono text-amber-400 focus:border-amber-500 focus:outline-none"
-                                      />
+                                      <button
+                                        type="button"
+                                        onClick={() => handleDeleteItem(phase.id, sp.id, item.id)}
+                                        className="text-slate-600 hover:text-red-400 p-1 cursor-pointer transition-colors"
+                                        title="Delete Item"
+                                      >
+                                        <Trash2 className="w-3 h-3" />
+                                      </button>
                                     </td>
-                                  )}
-
-                                  {/* Profit Cost */}
-                                  {!isClientMode && (
-                                    <td className="py-2 px-2 text-right font-mono text-amber-300">
-                                      ₱{c.profitCost.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                    </td>
-                                  )}
-
-                                  {/* Overhead % */}
-                                  {!isClientMode && (
-                                    <td className="py-2 px-2 text-center">
-                                      <input
-                                        type="number"
-                                        min={0}
-                                        max={100}
-                                        value={item.overheadPct}
-                                        onChange={(e) => handleUpdateItem(phase.id, sp.id, item.id, 'overheadPct', Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
-                                        className="w-14 bg-slate-900 border border-slate-700/80 rounded px-1 py-0.5 text-center text-xs font-mono text-blue-400 focus:border-amber-500 focus:outline-none"
-                                      />
-                                    </td>
-                                  )}
-
-                                  {/* Total Markup */}
-                                  {!isClientMode && (
-                                    <td className="py-2 px-2 text-right font-mono text-purple-300">
-                                      ₱{c.totalMarkup.toLocaleString(undefined, { minimumFractionDigits: 2 })}
-                                    </td>
-                                  )}
-
-                                  {/* Final Total Cost */}
-                                  <td className="py-2 px-3 text-right font-mono font-bold text-emerald-400">
-                                    ₱{c.finalTotalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                  </td>
-
-                                  {/* Delete Item */}
-                                  <td className="py-2 px-2 text-center">
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeleteItem(phase.id, sp.id, item.id)}
-                                      className="text-slate-600 hover:text-red-400 p-1 cursor-pointer transition-colors"
-                                      title="Delete Item"
-                                    >
-                                      <Trash2 className="w-3 h-3" />
-                                    </button>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })
         )}
       </div>
 

@@ -122,6 +122,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
   const [reallocReason, setReallocReason] = useState('Critical path milestone coverage');
 
   const handleOpenReallocModal = (c: Contractor) => {
+    if (!isPM || isOM) return;
     setReallocWorker(c);
     setReallocTargetSite(projects[0]?.name || '2-Storey Modern Farmhouse');
     setReallocTargetRole(c.roleTitle || c.specialty || 'Lead Artisan');
@@ -132,7 +133,7 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
 
   const handleSubmitReallocRequest = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!reallocWorker) return;
+    if (!isPM || isOM || !reallocWorker) return;
 
     const newReq: WorkerReallocationRequest = {
       id: `REAL-${Date.now().toString().slice(-4)}`,
@@ -905,15 +906,17 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                             </span>
                           </div>
 
-                          {/* Action Button: Reallocate Site & Assign Role */}
-                          <button
-                            type="button"
-                            onClick={() => handleOpenReallocModal(selectedContractor)}
-                            className="px-3.5 py-2 bg-amber-500/20 hover:bg-amber-500 border border-amber-500/40 text-amber-300 hover:text-slate-950 rounded-xl text-xs font-mono font-bold transition-all flex items-center gap-2 cursor-pointer shadow-xs shrink-0 self-start sm:self-center"
-                          >
-                            <ArrowRightLeft className="w-3.5 h-3.5" />
-                            <span>Reallocate Site &amp; Assign Role</span>
-                          </button>
+                          {/* Action Button: Reallocate Site & Assign Role (Project Manager Only — Read-Only for OM) */}
+                          {isPM && !isOM && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenReallocModal(selectedContractor)}
+                              className="px-3.5 py-2 bg-amber-500/20 hover:bg-amber-500 border border-amber-500/40 text-amber-300 hover:text-slate-950 rounded-xl text-xs font-mono font-bold transition-all flex items-center gap-2 cursor-pointer shadow-xs shrink-0 self-start sm:self-center"
+                            >
+                              <ArrowRightLeft className="w-3.5 h-3.5" />
+                              <span>Reallocate Site &amp; Assign Role</span>
+                            </button>
+                          )}
                         </div>
 
                         {/* Visual Project Status if mapped to an active project */}
@@ -1247,8 +1250,8 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
         </div>
       )}
 
-      {/* REALLOCATE SITE & ASSIGN ROLE MODAL */}
-      {isReallocModalOpen && reallocWorker && (
+      {/* REALLOCATE SITE & ASSIGN ROLE MODAL (PM Only) */}
+      {isPM && !isOM && isReallocModalOpen && reallocWorker && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-md w-full p-5 shadow-2xl space-y-4">
             <div className="flex items-center justify-between border-b border-slate-800 pb-3">

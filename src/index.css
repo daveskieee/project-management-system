@@ -837,7 +837,7 @@ html.dark:not(.night) textarea {
 }
 
 /* ============================================================================
-   3. NIGHT THEME (True Obsidian Deep Surface Hierarchy)
+   3. NIGHT THEME (True Obsidian Neutral Surface Hierarchy — Zero Blue/Navy Tint)
    ============================================================================ */
 html.night,
 html[data-theme="night"] {
@@ -846,76 +846,98 @@ html[data-theme="night"] {
 
 html.night body,
 html[data-theme="night"] body {
-  background-color: #0A0A0C;
+  background-color: #09090B;
   color: #FAFAFA;
 }
 
-/* Tier 1: App Canvas Background (#0A0A0C) */
+/* Tier 1: App Canvas Background (#09090B Pure Obsidian) */
 html.night .min-h-screen,
 html.night #landing-page-root,
 html.night main,
 html.night .workspace-canvas,
 html.night .w-full.relative.bg-slate-950,
 html.night [class*="h-screen"][class*="flex flex-col"] {
-  background-color: #0A0A0C !important;
+  background-color: #09090B !important;
   color: #FAFAFA !important;
 }
 
-/* Tier 2: Sidebar & Header (#111114 with #27272A border) */
+/* Tier 2: Sidebar & Header (#111113 with #26262A neutral border) */
 html.night header,
 html.night aside {
-  background-color: #111114 !important;
-  border-color: #27272A !important;
+  background-color: #111113 !important;
+  border-color: #26262A !important;
 }
 
-/* Tier 3: Cards, Panels & Modals (#18181C with #27272A border) */
-html.night [class~="bg-slate-900"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas),
-html.night [class*=" bg-slate-900/"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas),
-html.night [class^="bg-slate-900/"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas),
-html.night [class~="bg-slate-950"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas):not(.flex-1.flex-col.min-h-0),
+/* Tier 3: Cards, Banners, Panels, Filter Bars & Modals (#161618 Neutral Obsidian) */
+html.night [class~="bg-slate-900"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas):not(.preserve-dark-surface),
+html.night [class*="bg-slate-900/"]:not([class*="hover:bg-slate-900/"]):not([class*="fixed inset-0"]):not(main):not(.workspace-canvas):not(.preserve-dark-surface),
+html.night [class~="bg-slate-950"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas):not(.flex-1.flex-col.min-h-0):not(.preserve-dark-surface),
+html.night [class~="bg-gray-900"]:not([class*="fixed inset-0"]):not(.preserve-dark-surface),
+html.night [class~="bg-[#0f172a]"]:not(.preserve-dark-surface),
+html.night [class~="bg-[#111827]"]:not(.preserve-dark-surface),
+html.night [class~="bg-[#1e293b]"]:not(.preserve-dark-surface),
+html.night [class~="bg-[#0B0F19]"]:not(.preserve-dark-surface),
+html.night [class~="bg-[#111116]"]:not(.preserve-dark-surface),
 html.night .erp-card {
-  background-color: #18181C !important;
-  border-color: #27272A !important;
+  background-color: #161618 !important;
+  border-color: #26262A !important;
 }
 
-/* Inset surfaces, sub-cards & table headers (#111114) */
-html.night [class*=" bg-slate-950/"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas),
-html.night [class^="bg-slate-950/"]:not([class*="fixed inset-0"]):not(main):not(.workspace-canvas),
-html.night [class~="bg-slate-800"]:not([class*="rounded-full"]):not([class*="fixed inset-0"]),
-html.night [class*=" bg-slate-800/"]:not([class*="rounded-full"]):not([class*="fixed inset-0"]),
-html.night [class^="bg-slate-800/"]:not([class*="rounded-full"]):not([class*="fixed inset-0"]) {
-  background-color: #111114 !important;
+/* Neutralize blue/navy slate gradients on cards and banners in Night Mode */
+html.night [class*="from-slate-9"]:not(.preserve-dark-surface):not(button),
+html.night [class*="via-slate-9"]:not(.preserve-dark-surface):not(button),
+html.night [class*="to-slate-9"]:not(.preserve-dark-surface):not(button) {
+  background-image: none !important;
+  background-color: #161618 !important;
+  border-color: #26262A !important;
+}
+
+/* Inset surfaces, nested sub-cards, pills & table headers (#111113) */
+html.night [class*="bg-slate-950/"]:not([class*="hover:bg-slate-950/"]):not([class*="fixed inset-0"]):not(main):not(.workspace-canvas):not(.preserve-dark-surface),
+html.night [class~="bg-slate-800"]:not([class*="rounded-full"]):not([class*="fixed inset-0"]):not(.preserve-dark-surface),
+html.night [class*="bg-slate-800/"]:not([class*="hover:bg-slate-800/"]):not([class*="rounded-full"]):not([class*="fixed inset-0"]):not(.preserve-dark-surface),
+html.night [class~="bg-gray-800"]:not([class*="rounded-full"]):not([class*="fixed inset-0"]):not(.preserve-dark-surface),
+html.night [class~="bg-slate-950"] [class*="bg-slate-900"]:not(.preserve-dark-surface),
+html.night [class~="bg-slate-900"] [class~="bg-slate-950"]:not(.preserve-dark-surface) {
+  background-color: #111113 !important;
+  border-color: #26262A !important;
+}
+
+/* Neutral Obsidian hover states for tables, rows, and interactive cards */
+html.night [class*="hover:bg-slate-800"]:hover:not(.preserve-dark-surface),
+html.night [class*="hover:bg-slate-900"]:hover:not(.preserve-dark-surface) {
+  background-color: #1F1F23 !important;
 }
 
 html.night thead,
 html.night thead tr,
 html.night thead th,
 html.night .erp-table th {
-  background-color: #111114 !important;
+  background-color: #111113 !important;
   color: #A1A1AA !important;
-  border-color: #27272A !important;
+  border-color: #26262A !important;
 }
 
 html.night .erp-table td {
-  border-color: #27272A !important;
+  border-color: #26262A !important;
   color: #F4F4F5 !important;
 }
 
 html.night [class~="border-slate-800"],
-html.night [class*=" border-slate-800/"],
-html.night [class^="border-slate-800/"],
+html.night [class*="border-slate-800/"],
 html.night [class~="border-slate-700"],
-html.night [class*=" border-slate-700/"],
-html.night [class^="border-slate-700/"],
-html.night [class*="divide-slate-800"]> :not([hidden])~ :not([hidden]) {
-  border-color: #27272A !important;
+html.night [class*="border-slate-700/"],
+html.night [class~="border-slate-900"],
+html.night [class*="divide-slate-800"]> :not([hidden])~ :not([hidden]),
+html.night [class*="divide-slate-700"]> :not([hidden])~ :not([hidden]) {
+  border-color: #26262A !important;
 }
 
 html.night input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
 html.night select,
 html.night textarea {
-  background-color: #111114 !important;
-  border-color: #27272A !important;
+  background-color: #111113 !important;
+  border-color: #26262A !important;
   color: #FAFAFA !important;
 }
 

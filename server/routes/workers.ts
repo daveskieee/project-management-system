@@ -204,15 +204,20 @@ workersRouter.post('/', requireRole(['ADMIN']), async (req: Request, res: Respon
     const pos = (trade || position || 'Artisan').trim();
     const rate = Number(dailyRate || daily_rate || 0);
 
-    if (!trimmedName || rate <= 0) {
+    if (!trimmedName || !Number.isFinite(rate) || rate <= 0 || rate > 100000) {
       return res.status(400).json({
-        error: 'Worker name and valid daily rate (> 0) are required.'
+        error: 'Worker name and valid daily rate (₱1 – ₱100,000) are required.'
       });
     }
 
     const otRate = (hourlyOtRate !== undefined || hourly_ot_rate !== undefined)
-      ? Number(hourlyOtRate || hourly_ot_rate)
+      ? Number(hourlyOtRate ?? hourly_ot_rate)
       : computeDefaultHourlyOtRate(rate);
+    if (!Number.isFinite(otRate) || otRate < 0 || otRate > 25000) {
+      return res.status(400).json({
+        error: 'Invalid hourly OT rate (must be between ₱0 and ₱25,000).'
+      });
+    }
 
     const primaryProjId = assignedProjectId || assigned_project_id || (Array.isArray(projectIds) && projectIds.length > 0 ? projectIds[0] : null);
     const projMatch = primaryProjId ? await pool.query('SELECT name FROM commercial_projects WHERE id = $1', [primaryProjId]) : null;
@@ -325,6 +330,13 @@ workersRouter.patch('/:id', requireRole(['ADMIN']), async (req: Request, res: Re
     const isFinance = req.user?.role === 'FINANCE';
     const rate = dailyRate !== undefined ? dailyRate : daily_rate;
     const otRate = hourlyOtRate !== undefined ? hourlyOtRate : hourly_ot_rate;
+
+    if (rate !== undefined && (!Number.isFinite(Number(rate)) || Number(rate) <= 0 || Number(rate) > 100000)) {
+      return res.status(400).json({ error: 'Invalid daily rate: must be between ₱1 and ₱100,000.' });
+    }
+    if (otRate !== undefined && (!Number.isFinite(Number(otRate)) || Number(otRate) < 0 || Number(otRate) > 25000)) {
+      return res.status(400).json({ error: 'Invalid hourly OT rate: must be between ₱0 and ₱25,000.' });
+    }
 
     if ((rate !== undefined || otRate !== undefined) && !isFinance) {
       const currentWorkerRes = await pool.query('SELECT daily_rate, hourly_ot_rate FROM workers WHERE id = $1', [id]);

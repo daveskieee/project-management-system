@@ -5,7 +5,7 @@
 
 import { Router, Request, Response } from 'express';
 import { prisma, pool } from '../db';
-import { authenticateRequest, requireRole, checkUserProjectAccess } from '../middleware/auth';
+import { authenticateRequest, requireRole, requireExactRole, checkUserProjectAccess } from '../middleware/auth';
 import { broadcastChange } from '../events';
 import { AttendanceStatus } from '@prisma/client';
 
@@ -201,6 +201,7 @@ attendanceRouter.get('/roster', requireRole(['TIMEKEEPER', 'ENGINEER', 'FINANCE'
       LEFT JOIN contractors c ON w.id = c.id
       WHERE LOWER(w.status) = 'active'
         AND (c.status IS NULL OR LOWER(c.status) != 'inactive')
+        AND LOWER(TRIM(COALESCE(c.active_project_site, ''))) NOT IN ('unassigned', 'general standby pool', 'standby pool', 'standby', 'none')
         AND (
           w.assigned_project_id = $1 
           OR w.assigned_project_id IN (SELECT id FROM commercial_projects WHERE LOWER(name) = LOWER($1))
@@ -276,9 +277,9 @@ attendanceRouter.get('/roster', requireRole(['TIMEKEEPER', 'ENGINEER', 'FINANCE'
 
 // ============================================================================
 // POST /api/attendance — Submit daily batch attendance for a project
-// Allowed: TIMEKEEPER, ADMIN
+// Allowed: TIMEKEEPER ONLY (Strict Separation of Duties — OM & Finance Read-Only)
 // ============================================================================
-attendanceRouter.post('/', requireRole(['TIMEKEEPER', 'ADMIN']), async (req: Request, res: Response) => {
+attendanceRouter.post('/', requireExactRole(['TIMEKEEPER']), async (req: Request, res: Response) => {
   try {
     const {
       projectId, project_id, date, records, entries,
@@ -358,16 +359,46 @@ attendanceRouter.post('/', requireRole(['TIMEKEEPER', 'ADMIN']), async (req: Req
       }
       hadExistingLogs = existingRes.rows.length > 0;
 
-      // Query active worker IDs to ensure inactive workers cannot be checked in
-      const activeWorkersRes = await client.query(
-        `SELECT id FROM workers WHERE LOWER(status) = 'active'`
+      // Query active workers strictly assigned to targetProject (reject Unassigned / non-deployed workers)
+      const assignedWorkersRes = await client.query(
+        `SELECT DISTINCT w.id
+         FROM workers w
+         LEFT JOIN project_worker_assignments pwa ON w.id = pwa.worker_id
+         LEFT JOIN contractors c ON w.id = c.id
+         WHERE LOWER(w.status) = 'active'
+           AND LOWER(TRIM(COALESCE(c.active_project_site, ''))) NOT IN ('unassigned', 'general standby pool', 'standby pool', 'standby', 'none')
+           AND (
+             w.assigned_project_id = $1
+             OR pwa.project_id = $1
+             OR c.active_project_site IN (SELECT name FROM commercial_projects WHERE id = $1)
+             OR w.id IN (SELECT unnest(assigned_contractor_ids) FROM commercial_projects WHERE id = $1)
+           )`,
+        [targetProject]
       );
-      const activeWorkerIds = new Set(activeWorkersRes.rows.map(r => r.id));
+      const assignedWorkerIds = new Set(assignedWorkersRes.rows.map(r => r.id));
+
+      const unassignedSubmitted = attendanceItems
+        .map((rec: any) => rec?.workerId)
+        .filter((wId: any) => Boolean(wId) && !assignedWorkerIds.has(String(wId)));
+      if (unassignedSubmitted.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: `Cannot log DTR for worker(s) not assigned to this project site: ${unassignedSubmitted.join(', ')}`,
+          unassignedWorkerIds: unassignedSubmitted
+        });
+      }
 
       for (const rec of attendanceItems) {
-        if (!rec.workerId || !activeWorkerIds.has(rec.workerId)) continue;
+        if (!rec.workerId || !assignedWorkerIds.has(rec.workerId)) continue;
         const status = (rec.status || 'PRESENT').toUpperCase().trim();
-        const otHours = Math.max(0, Number(rec.overtimeHours || rec.ot_hours || 0));
+        const rawOt = Number(rec.overtimeHours ?? rec.ot_hours ?? 0);
+        if (!Number.isFinite(rawOt) || rawOt < 0 || rawOt > 16) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: `Invalid overtimeHours (${rec.overtimeHours ?? rec.ot_hours}): must be between 0 and 16 hours per day.`
+          });
+        }
+        const otHours = rawOt;
         const logId = rec.id || `ATT-${targetProject.slice(-4)}-${rec.workerId.slice(-4)}-${effectiveDate.replace(/-/g, '')}`;
 
         const prev = existingMap.get(rec.workerId);
@@ -454,7 +485,7 @@ attendanceRouter.post('/', requireRole(['TIMEKEEPER', 'ADMIN']), async (req: Req
     });
   } catch (error: any) {
     console.error('Error submitting batch attendance:', error);
-    res.status(500).json({ error: error?.message || 'Failed to submit batch attendance' });
+    res.status(500).json({ error: 'Failed to submit batch attendance' });
   }
 });
 
@@ -462,7 +493,7 @@ attendanceRouter.post('/', requireRole(['TIMEKEEPER', 'ADMIN']), async (req: Req
 // PATCH /api/attendance/:id — Correct an entry
 // Allowed: TIMEKEEPER if within 24h and not locked; ADMIN always.
 // ============================================================================
-attendanceRouter.patch('/:id', requireRole(['TIMEKEEPER', 'ADMIN']), async (req: Request, res: Response) => {
+attendanceRouter.patch('/:id', requireExactRole(['TIMEKEEPER']), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { status, overtimeHours, overtime_hours } = req.body;

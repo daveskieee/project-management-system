@@ -19,9 +19,14 @@ export function getCsrfToken(): string | null {
 // Global authorization failure callback and throttle lock
 let authExpiredHandler: (() => void) | null = null;
 let isHandlingSessionExpiry = false;
+let manualLogoutSuppressUntil = 0;
 
 export function setAuthExpiredHandler(handler: () => void) {
   authExpiredHandler = handler;
+}
+
+export function suppressSessionExpiredDuringLogout(durationMs = 5000) {
+  manualLogoutSuppressUntil = Date.now() + durationMs;
 }
 
 export function getIsHandlingSessionExpiry(): boolean {
@@ -29,6 +34,7 @@ export function getIsHandlingSessionExpiry(): boolean {
 }
 
 export function triggerSessionExpired(reason?: string) {
+  if (Date.now() < manualLogoutSuppressUntil) return;
   if (isHandlingSessionExpiry) return;
   isHandlingSessionExpiry = true;
 

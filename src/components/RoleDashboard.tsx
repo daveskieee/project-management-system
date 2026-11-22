@@ -40,6 +40,7 @@ import {
   GANTT_TASKS_STORAGE_PREFIX,
   GANTT_TASKS_UPDATED_EVENT,
   getCanonicalProjectProgress,
+  loadProjectGanttTasksFromStorage,
 } from '../utils/ganttProgress';
 import { useTheme } from '../context/ThemeContext';
 
@@ -273,12 +274,96 @@ export default function RoleDashboard({
 
   const scopedProjectIds = useMemo(() => new Set(scopedProjects.map((p) => p.id)), [scopedProjects]);
 
-  const scopedTasks = useMemo(() => {
-    if (persona === 'PROJECT_MANAGER' || persona === 'CLIENT') {
-      return tasks.filter((t) => scopedProjectIds.has(t.projectId));
+  // Live saved Gantt tasks fetched from PostgreSQL for scoped projects (keeps OVERDUE TASKS 100% synced)
+  const [liveGanttTasks, setLiveGanttTasks] = useState<ProjectTask[]>([]);
+  const scopedProjectIdsKey = useMemo(
+    () => scopedProjects.map((p) => p.id).sort().join(','),
+    [scopedProjects]
+  );
+
+  useEffect(() => {
+    if (!scopedProjectIdsKey) {
+      setLiveGanttTasks([]);
+      return;
     }
-    return tasks;
-  }, [persona, tasks, scopedProjectIds]);
+    let active = true;
+    const ids = scopedProjectIdsKey.split(',').filter(Boolean);
+    Promise.all(
+      ids.map(async (pid) => {
+        try {
+          const res = await fetch(`/api/projects/${encodeURIComponent(pid)}/gantt`, { credentials: 'include' });
+          if (!res.ok) return [];
+          const json = await res.json();
+          const rows = Array.isArray(json?.data) ? json.data : Array.isArray(json) ? json : [];
+          return rows.map((t: any) => ({
+            ...t,
+            id: String(t.id),
+            projectId: String(t.projectId || pid),
+            title: t.title || t.text || 'Untitled Task',
+            startDate: t.startDate || t.start_date || '',
+            endDate: t.endDate || t.end_date || t.dueDate || '',
+            progress: Number(t.progress ?? 0),
+            status: t.status || 'TODO',
+            type: t.type || 'task',
+          }));
+        } catch {
+          return [];
+        }
+      })
+    ).then((results) => {
+      if (active) {
+        setLiveGanttTasks(results.flat());
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [scopedProjectIdsKey, ganttSyncTick]);
+
+  const scopedTasks = useMemo(() => {
+    void ganttSyncTick;
+    const byId = new Map<string, ProjectTask>();
+
+    // 1. Base tasks prop (filtered to scoped projects for PM / Client)
+    const baseTasks =
+      persona === 'PROJECT_MANAGER' || persona === 'CLIENT'
+        ? tasks.filter((t) => scopedProjectIds.has(t.projectId))
+        : tasks;
+    for (const t of baseTasks) {
+      if (t?.id) byId.set(String(t.id), t);
+    }
+
+    // 2. Merge saved localStorage Gantt tasks for each scoped project
+    for (const p of scopedProjects) {
+      const stored = loadProjectGanttTasksFromStorage(p.id);
+      if (Array.isArray(stored)) {
+        for (const rawTask of stored) {
+          const t = rawTask as any;
+          if (!t?.id) continue;
+          byId.set(String(t.id), {
+            ...t,
+            id: String(t.id),
+            projectId: String(t.projectId || p.id),
+            title: t.title || t.text || 'Untitled Task',
+            startDate: t.startDate || t.start_date || '',
+            endDate: t.endDate || t.end_date || t.dueDate || '',
+            progress: Number(t.progress ?? 0),
+            status: t.status || (Number(t.progress ?? 0) >= 1 ? 'COMPLETED' : 'TODO'),
+            priority: t.priority || 'MEDIUM',
+          } as unknown as ProjectTask);
+        }
+      }
+    }
+
+    // 3. Merge live PostgreSQL Gantt tasks (authoritative)
+    for (const t of liveGanttTasks) {
+      if (t?.id && scopedProjectIds.has(t.projectId)) {
+        byId.set(String(t.id), t);
+      }
+    }
+
+    return Array.from(byId.values());
+  }, [persona, tasks, scopedProjects, scopedProjectIds, liveGanttTasks, ganttSyncTick]);
 
   const scopedContractors = useMemo(() => {
     if (persona === 'PROJECT_MANAGER') {
@@ -297,28 +382,42 @@ export default function RoleDashboard({
     [scopedProjects]
   );
 
-  // Due This Week / Overdue Tasks
+  // Due This Week / Overdue Tasks (synced with saved Gantt tasks; flags progress < 100% & endDate < today)
   const { dueThisWeekTasks, overdueTasks } = useMemo(() => {
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     const weekEnd = todayStart + 7 * 24 * 60 * 60 * 1000;
 
+    const parseLocalDayTs = (raw: string | undefined | null): number => {
+      if (!raw) return NaN;
+      const clean = String(raw).trim().split('T')[0].split(' ')[0];
+      const parts = clean.split('-').map((n) => parseInt(n, 10));
+      if (parts.length === 3 && !parts.some(isNaN)) {
+        if (parts[0] > 999) return new Date(parts[0], parts[1] - 1, parts[2]).getTime();
+        if (parts[2] > 999) return new Date(parts[2], parts[0] - 1, parts[1]).getTime();
+      }
+      const d = new Date(raw);
+      if (isNaN(d.getTime())) return NaN;
+      return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    };
+
     const incomplete = scopedTasks.filter((t) => {
-      const prog = typeof (t as any).progress === 'number' ? (t as any).progress : 0;
-      return t.status !== 'COMPLETED' && prog < 1;
+      const isContainer = String((t as any).type || '').toLowerCase() === 'project';
+      if (isContainer) return false;
+      const rawProg = Number((t as any).progress ?? 0);
+      const pct = Number.isFinite(rawProg) ? (rawProg > 1 ? rawProg : rawProg * 100) : 0;
+      return String(t.status || '').toUpperCase() !== 'COMPLETED' && pct < 100;
     });
 
     const overdue = incomplete.filter((t) => {
-      const endStr = (t as any).endDate || (t as any).dueDate;
-      if (!endStr) return false;
-      const ts = new Date(endStr).getTime();
+      const endStr = (t as any).endDate || (t as any).end_date || (t as any).dueDate;
+      const ts = parseLocalDayTs(endStr);
       return !isNaN(ts) && ts < todayStart;
     });
 
     const dueThisWeek = incomplete.filter((t) => {
-      const endStr = (t as any).endDate || (t as any).dueDate;
-      if (!endStr) return false;
-      const ts = new Date(endStr).getTime();
+      const endStr = (t as any).endDate || (t as any).end_date || (t as any).dueDate;
+      const ts = parseLocalDayTs(endStr);
       return !isNaN(ts) && ts >= todayStart && ts <= weekEnd;
     });
 
@@ -376,7 +475,11 @@ export default function RoleDashboard({
       const matchedSubcon = subconPayables
         .filter((sp) => {
           const st = String(sp.status || '').toUpperCase().trim();
-          return (st === 'PAID / DISBURSED' || st === 'DISBURSED' || st === 'PAID') && isProjectMatch(sp.projectSite || sp.project_site, p);
+          const isPaid = st === 'PAID / DISBURSED' || st === 'DISBURSED' || st === 'PAID';
+          if (!isPaid) return false;
+          const spProjId = String(sp.projectId || sp.project_id || '').trim();
+          if (spProjId && spProjId === String(p.id).trim()) return true;
+          return isProjectMatch(sp.projectSite || sp.project_site, p);
         })
         .reduce(
           (sum, sp) =>
@@ -385,12 +488,12 @@ export default function RoleDashboard({
           0
         );
 
-      const laborDisbursed = Number(p.paidLaborExpenses || matchedLabor || 0);
-      const subconDisbursed = Number(p.paidSubcontractorExpenses || matchedSubcon || 0);
-      const disbursed = Number(p.paidExpenses ?? laborDisbursed + subconDisbursed);
+      const laborDisbursed = Math.max(Number(p.paidLaborExpenses || 0), matchedLabor);
+      const subconDisbursed = Math.max(Number(p.paidSubcontractorExpenses || 0), matchedSubcon);
+      const disbursed = Number((laborDisbursed + subconDisbursed).toFixed(2));
       const budget = Number(p.budget) || 0;
       const percent = budget > 0 ? Math.min(100, (disbursed / budget) * 100) : 0;
-      return { id: p.id, fullName: p.name, budget, disbursed, percent };
+      return { id: p.id, fullName: p.name, budget, disbursed, laborDisbursed, subconDisbursed, percent };
     });
 
     const cashFlowTrendData = [
@@ -432,18 +535,18 @@ export default function RoleDashboard({
     };
   }, [scopedProjects, payrollRuns, subconPayables]);
 
-  // Project Progress Bar Chart Data (using canonical single-source-of-truth helper)
-  const getLiveProgress = (p: ProjectProfile) => getCanonicalProjectProgress(p, tasks);
+  // Project Progress Bar Chart Data (using canonical single-source-of-truth helper + live scopedTasks)
+  const getLiveProgress = (p: ProjectProfile) => getCanonicalProjectProgress(p, scopedTasks);
 
   const progressChartData = useMemo(() => {
     void ganttSyncTick;
     return scopedProjects.slice(0, 8).map((p) => ({
       name: p.name.length > 14 ? `${p.name.slice(0, 14)}…` : p.name,
       fullName: p.name,
-      progress: getCanonicalProjectProgress(p, tasks),
+      progress: getCanonicalProjectProgress(p, scopedTasks),
       status: p.status || 'PLANNING',
     }));
-  }, [scopedProjects, tasks, ganttSyncTick]);
+  }, [scopedProjects, scopedTasks, ganttSyncTick]);
 
   const cardSurface = isDark ? 'bg-slate-900/75 border-slate-800/90' : 'bg-white border-slate-200/90 shadow-xs';
   const subSurface = isDark ? 'bg-slate-950/70 border-slate-800/80' : 'bg-slate-50 border-slate-200/80';
@@ -464,9 +567,9 @@ export default function RoleDashboard({
   const avgScheduleProgress = useMemo(() => {
     void ganttSyncTick;
     return scopedProjects.length > 0
-      ? Math.round(scopedProjects.reduce((sum, p) => sum + getCanonicalProjectProgress(p, tasks), 0) / scopedProjects.length)
+      ? Math.round(scopedProjects.reduce((sum, p) => sum + getCanonicalProjectProgress(p, scopedTasks), 0) / scopedProjects.length)
       : 0;
-  }, [scopedProjects, tasks, ganttSyncTick]);
+  }, [scopedProjects, scopedTasks, ganttSyncTick]);
   const pendingReviews = clientReviews.filter((r) => r.status === 'Pending');
   const assignedSiteWorkers = scopedProjects.reduce((sum, p) => sum + (Number(p.assignedWorkersCount) || 0), 0);
   const totalDeployedWorkers = scopedContractors.reduce((sum, c) => sum + Math.max(1, Number(c.activeManpower) || 1), 0);
@@ -475,11 +578,12 @@ export default function RoleDashboard({
 
   const projectBomSummary = useMemo(() => {
     return scopedProjects.map((p) => {
-      const bomPhases = getStoredBomPhaseCount(p.id);
-      const hasGantt = hasStoredGanttTasks(p.id, tasks);
+      const serverBomCount = Number(p.bomPhasesCount || (Array.isArray(p.bomPhases) ? p.bomPhases.length : 0) || 0);
+      const bomPhases = Math.max(getStoredBomPhaseCount(p.id), serverBomCount);
+      const hasGantt = hasStoredGanttTasks(p.id, scopedTasks);
       return { project: p, bomPhases, hasGantt, pendingGanttSync: bomPhases > 0 && !hasGantt };
     });
-  }, [scopedProjects, tasks]);
+  }, [scopedProjects, scopedTasks]);
 
   const activeBomsCount =
     projectBomSummary.filter((item) => item.bomPhases > 0).length +
@@ -494,7 +598,8 @@ export default function RoleDashboard({
 
   const delayedProjects = activeProjects.filter((p) => {
     const endTs = p.targetHandoverDate ? new Date(p.targetHandoverDate).getTime() : NaN;
-    return (!isNaN(endTs) && endTs < Date.now() && getLiveProgress(p) < 100) || p.weatherSuspended;
+    const hasOverdueGanttTask = overdueTasks.some((t) => String(t.projectId) === String(p.id));
+    return (!isNaN(endTs) && endTs < Date.now() && getLiveProgress(p) < 100) || hasOverdueGanttTask || p.weatherSuspended;
   });
   const onTrackProjects = activeProjects.length - delayedProjects.length;
   const readyForArchiveCount = scopedProjects.filter((p) => p.status !== 'COMPLETED' && getLiveProgress(p) >= 95).length;
@@ -588,6 +693,7 @@ export default function RoleDashboard({
               <XAxis dataKey="name" tick={{ fill: axisTick, fontSize: 11 }} axisLine={false} tickLine={false} />
               <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} tick={{ fill: axisTick, fontSize: 11 }} axisLine={false} tickLine={false} />
               <Tooltip
+                cursor={{ fill: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(15, 23, 42, 0.06)' }}
                 contentStyle={tooltipStyle}
                 formatter={(value: any) => [`${value}%`, 'Schedule Progress']}
                 labelFormatter={(_label, payload) => payload?.[0]?.payload?.fullName || _label}
@@ -1244,7 +1350,7 @@ export default function RoleDashboard({
                       <div className="min-w-0">
                         <div className={`text-xs font-bold truncate ${headingText}`}>{project.name}</div>
                         <div className={`text-[10px] font-mono ${mutedText}`}>
-                          Budget: ₱{(Number(project.budget) || 0).toLocaleString()} • Collected: ₱{(Number(project.fundsCollected) || 0).toLocaleString()}
+                          Budget: ₱{(Number(project.budget) || 0).toLocaleString()} • Collected: ₱{getCanonicalProjectFundsCollected(project, clients).toLocaleString()}
                         </div>
                       </div>
                       {bomPhases === 0 ? (

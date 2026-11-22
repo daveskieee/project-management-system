@@ -27,7 +27,7 @@ import {
   SESSION_INACTIVITY_LIMIT_MS
 } from './utils/session';
 import { useInactivityTimeout } from './hooks/useInactivityTimeout';
-import { setupSecureFetch, secureFetch, getCsrfToken } from './utils/apiClient';
+import { setupSecureFetch, secureFetch, getCsrfToken, suppressSessionExpiredDuringLogout } from './utils/apiClient';
 import { getStoredAuditLogs, AUDIT_LOGS_UPDATED_EVENT } from './utils/auditLogger';
 
 export default function App() {
@@ -460,25 +460,11 @@ export default function App() {
   const mergeWithCachedProjects = useCallback((incoming: ProjectProfile[]): ProjectProfile[] => {
     const cleanIncoming = Array.isArray(incoming) ? incoming.filter((p: any) => p && p.id && !isTombstoned(p.id)) : [];
     try {
-      const cachedRaw = localStorage.getItem('ctvill_cached_projects') || localStorage.getItem('ctvill_projects');
-      const cachedList: ProjectProfile[] = cachedRaw ? JSON.parse(cachedRaw) : [];
-      const validCached = Array.isArray(cachedList) ? cachedList.filter((p: any) => p && p.id && !isTombstoned(p.id)) : [];
-
-      const byId = new Map<string, ProjectProfile>();
-      for (const p of cleanIncoming) {
-        byId.set(String(p.id), p);
-      }
-      for (const cp of validCached) {
-        if (!byId.has(String(cp.id))) {
-          byId.set(String(cp.id), cp);
-        }
-      }
-      const merged = Array.from(byId.values());
-      if (merged.length > 0) {
-        localStorage.setItem('ctvill_cached_projects', JSON.stringify(merged));
-        localStorage.setItem('ctvill_projects', JSON.stringify(merged));
-      }
-      return merged;
+      // Authoritative sync: overwrite localStorage with the live database project list
+      // so deleted/purged projects are never resurrected from stale browser cache.
+      localStorage.setItem('ctvill_cached_projects', JSON.stringify(cleanIncoming));
+      localStorage.setItem('ctvill_projects', JSON.stringify(cleanIncoming));
+      return cleanIncoming;
     } catch {
       return cleanIncoming;
     }
@@ -716,6 +702,8 @@ export default function App() {
   };
 
   const handleInitiateLogout = () => {
+    // Suppress any in-flight 401 responses from triggering a false "Session Expired" banner on intentional sign-out
+    suppressSessionExpiredDuringLogout(5000);
     fetch('/api/auth/logout', { method: 'POST' }).catch(() => { });
     clearExpiredAuthSession();
     try {
@@ -2093,7 +2081,8 @@ export default function App() {
       if (data.recommendations && Array.isArray(data.recommendations)) {
         setAiRecommendations(data.recommendations);
       }
-      await reloadAllData();
+      // Refresh portfolio data asynchronously so the AI Scan button resets immediately
+      void reloadAllData();
       return {
         success: true,
         message: data.message || `AI Optimization scan completed: ${data.count || 0} recommendations generated.`,

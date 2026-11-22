@@ -690,6 +690,8 @@ export interface ProjectProfile {
   paidExpenses?: number;
   approvedExpenses?: number;
   totalExpenses?: number;
+  bomPhases?: any[];
+  bomPhasesCount?: number;
 }
 
 export interface ExtendedPayrollItem {
@@ -891,6 +893,7 @@ export type SubcontractorPayableStatus =
 
 export interface SubcontractorPayable {
   id: string;
+  projectId?: string;
   disbursementDate?: string | null;
   payeeContractorId?: string;
   payeeContractorName: string;

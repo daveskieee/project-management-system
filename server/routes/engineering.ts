@@ -106,6 +106,7 @@ engineeringRouter.post('/permits', requireRole(['ADMIN', 'ENGINEER']), async (re
 
     broadcastChange('permits');
     broadcastChange('auditLogs');
+    invalidateAllDataCache();
     res.json({ success: true, id });
   } catch (error) {
     console.error('Error creating permit:', error);

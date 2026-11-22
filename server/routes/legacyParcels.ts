@@ -398,10 +398,51 @@ legacyParcelsRouter.get('/all-data', async (req: Request, res: Response) => {
       };
     });
 
+    // Pre-aggregate finalized payroll, disbursed subcontractor payables, and persisted BOM phases
+    const [allLaborRes, allSubRes, allBomRes] = await Promise.all([
+      pool.query(
+        `SELECT project_id,
+                COALESCE(SUM(CASE WHEN UPPER(TRIM(status)) IN ('LOCKED & ARCHIVED', 'FINALIZED', 'ARCHIVED', 'PAID', 'DISBURSED') THEN COALESCE(total_net, total_gross) ELSE 0 END), 0) AS paid_labor,
+                COALESCE(SUM(COALESCE(total_net, total_gross)), 0) AS total_labor
+         FROM payroll_runs
+         WHERE UPPER(TRIM(status)) IN ('LOCKED & ARCHIVED', 'FINALIZED', 'ARCHIVED', 'PAID', 'DISBURSED', 'APPROVED', 'PENDING')
+         GROUP BY project_id`
+      ).catch(() => ({ rows: [] })),
+      pool.query(
+        `SELECT COALESCE(NULLIF(TRIM(project_id), ''), project_site) AS project_key,
+                COALESCE(SUM(CASE WHEN UPPER(TRIM(status)) IN ('PAID', 'DISBURSED', 'PAID / DISBURSED') THEN COALESCE(disbursed_amount, approved_amount, billed_amount) ELSE 0 END), 0) AS paid_sub,
+                COALESCE(SUM(COALESCE(disbursed_amount, approved_amount, billed_amount)), 0) AS total_sub
+         FROM subcontractor_payables
+         WHERE UPPER(TRIM(status)) IN ('PAID', 'DISBURSED', 'PAID / DISBURSED', 'APPROVED', 'PENDING', 'PENDING_APPROVAL')
+         GROUP BY COALESCE(NULLIF(TRIM(project_id), ''), project_site)`
+      ).catch(() => ({ rows: [] })),
+      pool.query(`SELECT project_id, phases FROM project_bom_phases`).catch(() => ({ rows: [] })),
+    ]);
+
+    const laborByKey = new Map<string, { paid: number; total: number }>();
+    for (const r of allLaborRes.rows || []) {
+      laborByKey.set(String(r.project_id || '').trim().toLowerCase(), { paid: Number(r.paid_labor || 0), total: Number(r.total_labor || 0) });
+    }
+    const subByKey = new Map<string, { paid: number; total: number }>();
+    for (const r of allSubRes.rows || []) {
+      subByKey.set(String(r.project_key || '').trim().toLowerCase(), { paid: Number(r.paid_sub || 0), total: Number(r.total_sub || 0) });
+    }
+    const bomByProjId = new Map<string, any[]>();
+    for (const b of allBomRes.rows || []) {
+      bomByProjId.set(String(b.project_id || '').trim(), Array.isArray(b.phases) ? b.phases : []);
+    }
+
     // Project Authorization & Scoping
     const allProjects = (dbProjectsRes.rows || []).map((p: any) => {
       const computedProg = Number(p.cpmProgress ?? p.progress ?? p.progress_percentage ?? 0);
       const computedStatus = (computedProg > 0 && (p.status === 'PLANNING' || !p.status)) ? 'IN_PROGRESS' : (p.status || 'IN_PROGRESS');
+      const pIdKey = String(p.id || '').trim().toLowerCase();
+      const pNameKey = String(p.name || '').trim().toLowerCase();
+      const lInfo = laborByKey.get(pIdKey) || laborByKey.get(pNameKey) || { paid: 0, total: 0 };
+      const sInfo = subByKey.get(pIdKey) || subByKey.get(pNameKey) || { paid: 0, total: 0 };
+      const paidExp = Number((lInfo.paid + sInfo.paid).toFixed(2));
+      const totalExp = Number((lInfo.total + sInfo.total).toFixed(2));
+      const pBom = bomByProjId.get(String(p.id || '').trim()) || [];
       return {
         id: p.id,
         name: p.name,
@@ -412,6 +453,14 @@ legacyParcelsRouter.get('/all-data', async (req: Request, res: Response) => {
         fundsCollected: Number(p.ledger_funds_collected ?? 0),
         collected: Number(p.ledger_funds_collected ?? 0),
         amountPaid: Number(p.ledger_funds_collected ?? 0),
+        laborExpenses: lInfo.total,
+        paidLaborExpenses: lInfo.paid,
+        subcontractorExpenses: sInfo.total,
+        paidSubcontractorExpenses: sInfo.paid,
+        paidExpenses: paidExp,
+        totalExpenses: totalExp,
+        bomPhases: pBom,
+        bomPhasesCount: pBom.length,
         progressPercentage: computedProg,
         cpmProgress: computedProg,
         overallProgress: computedProg,
@@ -1934,6 +1983,6 @@ legacyParcelsRouter.delete('/admin/clear-all-data', requireRole(['ADMIN']), asyn
     res.json({ success: true, message: 'All operational data cleared. User accounts preserved.' });
   } catch (error: any) {
     console.error('Error clearing all data:', error);
-    res.status(500).json({ error: 'Failed to clear data', detail: error.message });
+    res.status(500).json({ error: 'Failed to clear data' });
   }
 });

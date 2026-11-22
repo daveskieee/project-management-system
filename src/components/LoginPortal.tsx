@@ -1390,7 +1390,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           setShowManualForm(true);
                         }
                       }}
-                      className={`group relative flex items-center gap-3 p-3 rounded-xl border transition-all cursor-pointer text-left ${
+                      className={`group relative flex items-center gap-2.5 px-3 py-2.5 rounded-xl border transition-all cursor-pointer text-left ${
                         isDark
                           ? 'bg-slate-950/90 border-slate-800 hover:border-amber-500/60 hover:bg-slate-900'
                           : 'bg-slate-50 border-slate-200 hover:border-amber-500 hover:bg-white shadow-xs'
@@ -1418,7 +1418,7 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                         <X className="w-3 h-3" />
                       </button>
 
-                      <div className="w-10 h-10 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center font-black text-xs shrink-0 overflow-hidden">
+                      <div className="w-9 h-9 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-400 flex items-center justify-center font-black text-[11px] shrink-0 overflow-hidden">
                         {acc.avatarUrl ? (
                           <img src={acc.avatarUrl} alt={acc.name} className="w-full h-full object-cover" />
                         ) : (
@@ -1426,14 +1426,14 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                         )}
                       </div>
 
-                      <div className="min-w-0 flex-1 pr-4">
-                        <div className={`text-xs font-bold truncate ${isDark ? 'text-white group-hover:text-amber-400' : 'text-slate-900 group-hover:text-amber-600'} transition-colors`}>
+                      <div className="min-w-0 flex-1">
+                        <div className={`text-[11px] sm:text-xs font-bold leading-snug pr-5 truncate ${isDark ? 'text-white group-hover:text-amber-400' : 'text-slate-900 group-hover:text-amber-600'} transition-colors`}>
                           {acc.name}
                         </div>
                         <div className={`text-[10px] truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                           {acc.email}
                         </div>
-                        <span className="inline-block mt-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 text-amber-400 text-[9px] font-mono font-bold">
+                        <span className="inline-block mt-1 px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/25 text-amber-400 text-[10px] font-mono font-bold leading-tight whitespace-nowrap">
                           {formatRecentRoleLabel(acc.role)}
                         </span>
                       </div>
@@ -1484,10 +1484,10 @@ export default function LoginPortal({ onLoginSuccess, onBackToLanding }: LoginPo
                           )}
                         </div>
                         <div className="min-w-0">
-                          <div className={`text-[11px] font-bold truncate ${isDark ? 'text-white' : 'text-slate-900'}`}>
+                          <div className={`text-[11px] font-bold leading-snug ${isDark ? 'text-white' : 'text-slate-900'}`}>
                             {selectedRecentAccount.name}
                           </div>
-                          <div className="text-[9px] font-mono text-amber-400 truncate">
+                          <div className="text-[10px] font-mono text-amber-400 whitespace-nowrap">
                             {formatRecentRoleLabel(selectedRecentAccount.role)}
                           </div>
                         </div>

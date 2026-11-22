@@ -236,8 +236,8 @@ export function checkUserProjectAccess(
   const cleanProjectId = projectId.trim();
   if (!cleanProjectId) return false;
 
-  // ADMIN and FINANCE have global access for system administration, corporate treasury, and site payroll
-  if (user.role === 'ADMIN' || user.role === 'FINANCE') return true;
+  // ADMIN, FINANCE, and TIMEKEEPER have operational access across active company commercial sites
+  if (user.role === 'ADMIN' || user.role === 'FINANCE' || user.role === 'TIMEKEEPER') return true;
 
   // All other roles (ENGINEER, PROJECT_MANAGER, TIMEKEEPER, CLIENT):
   // DENY BY DEFAULT if projectIds list is missing, empty, or doesn't include the target project

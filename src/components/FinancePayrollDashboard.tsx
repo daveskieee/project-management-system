@@ -65,12 +65,14 @@ export default function FinancePayrollDashboard({
       }
     };
     addList(projects);
-    try {
-      const cachedPrimary = localStorage.getItem('ctvill_cached_projects');
-      if (cachedPrimary) addList(JSON.parse(cachedPrimary));
-      const cachedSecondary = localStorage.getItem('ctvill_projects');
-      if (cachedSecondary) addList(JSON.parse(cachedSecondary));
-    } catch { }
+    if (byId.size === 0) {
+      try {
+        const cachedPrimary = localStorage.getItem('ctvill_cached_projects');
+        if (cachedPrimary) addList(JSON.parse(cachedPrimary));
+        const cachedSecondary = localStorage.getItem('ctvill_projects');
+        if (cachedSecondary) addList(JSON.parse(cachedSecondary));
+      } catch { }
+    }
     return Array.from(byId.values());
   }, [projects]);
 
@@ -1140,13 +1142,13 @@ export default function FinancePayrollDashboard({
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-slate-950 text-slate-100 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-6">
+    <div className="flex-1 flex flex-col min-h-0 text-slate-100 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-6">
 
       {/* Toast Alert */}
       {toastMessage && (
         <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-2xl flex items-center gap-2.5 text-xs font-semibold backdrop-blur-md border animate-slideDown ${toastMessage.type === 'success'
-            ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/50'
-            : 'bg-red-950/90 text-red-200 border-red-500/50'
+          ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500/50'
+          : 'bg-red-950/90 text-red-200 border-red-500/50'
           }`}>
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{toastMessage.text}</span>
@@ -1154,17 +1156,17 @@ export default function FinancePayrollDashboard({
       )}
 
       {/* Header Banner */}
-      <div className="bg-slate-950 border border-slate-800 rounded-lg p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="p-2 bg-slate-900 border border-slate-800 rounded-lg text-emerald-400">
+          <div className="p-2 bg-emerald-500/10 border border-emerald-500/20 rounded-lg text-emerald-400">
             <Banknote className="w-5 h-5" />
           </div>
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-base font-bold text-white tracking-tight">Weekly Site Payroll Engine</h1>
               <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded font-medium border ${!isFinance
-                  ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
-                  : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
+                ? 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'
                 }`}>
                 {!isFinance ? 'AUDIT & READ-ONLY' : 'FINANCE & DISBURSAL'}
               </span>
@@ -1176,12 +1178,12 @@ export default function FinancePayrollDashboard({
         </div>
 
         {/* View Toggle Tabs */}
-        <div className="flex items-center gap-1.5 bg-slate-900 border border-slate-800 p-1 rounded-lg text-xs font-medium self-start md:self-auto">
+        <div className="flex items-center gap-1.5 bg-slate-950 border border-slate-800 p-1 rounded-xl text-xs font-medium self-start md:self-auto">
           <button
             onClick={() => { setActiveTab('calculator'); setSelectedRunDetail(null); }}
             className={`px-3 py-1.5 rounded-md transition-colors cursor-pointer ${activeTab === 'calculator' && !selectedRunDetail
-                ? 'bg-amber-500 text-slate-950 font-semibold'
-                : 'text-slate-400 hover:text-white'
+              ? 'bg-amber-500 text-slate-950 font-semibold'
+              : 'text-slate-400 hover:text-white'
               }`}
           >
             Weekly Wage Engine
@@ -1189,8 +1191,8 @@ export default function FinancePayrollDashboard({
           <button
             onClick={() => setActiveTab('history')}
             className={`px-3 py-1.5 rounded-md transition-colors cursor-pointer ${activeTab === 'history'
-                ? 'bg-amber-500 text-slate-950 font-semibold'
-                : 'text-slate-400 hover:text-white'
+              ? 'bg-amber-500 text-slate-950 font-semibold'
+              : 'text-slate-400 hover:text-white'
               }`}
           >
             Payroll Archive ({pastRuns.length})
@@ -1560,8 +1562,8 @@ export default function FinancePayrollDashboard({
                             </span>
                             <span
                               className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${workerContact.payoutChannel === '📧 Email / GCash'
-                                  ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
-                                  : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                                ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
+                                : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
                                 }`}
                             >
                               {workerContact.payoutChannel}
@@ -1649,8 +1651,8 @@ export default function FinancePayrollDashboard({
                                   type="button"
                                   onClick={() => markPayslipDispatched(item)}
                                   className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-colors cursor-pointer flex items-center gap-1 border ${sentAt
-                                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                                    ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                    : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
                                     }`}
                                   title={
                                     sentAt
@@ -2012,8 +2014,8 @@ export default function FinancePayrollDashboard({
                     type="button"
                     onClick={() => setBatchDeliveryMode(opt.id)}
                     className={`text-left p-2.5 rounded-lg border transition-colors cursor-pointer ${batchDeliveryMode === opt.id
-                        ? 'bg-cyan-500/15 border-cyan-500 text-white'
-                        : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:border-slate-700'
+                      ? 'bg-cyan-500/15 border-cyan-500 text-white'
+                      : 'bg-slate-900/70 border-slate-800 text-slate-300 hover:border-slate-700'
                       }`}
                   >
                     <div className="text-xs font-bold">{opt.label}</div>
@@ -2039,8 +2041,8 @@ export default function FinancePayrollDashboard({
                         <span className="text-slate-400 font-mono text-[11px]">({item.position})</span>
                         <span
                           className={`px-1.5 py-0.5 rounded text-[9px] font-mono font-bold border ${contact.payoutChannel === '📧 Email / GCash'
-                              ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
-                              : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
+                            ? 'bg-cyan-500/10 text-cyan-300 border-cyan-500/30'
+                            : 'bg-amber-500/10 text-amber-300 border-amber-500/30'
                             }`}
                         >
                           {contact.payoutChannel}
@@ -2070,8 +2072,8 @@ export default function FinancePayrollDashboard({
                       </button>
                       <span
                         className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border ${sentAt
-                            ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                            : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                          ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                          : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
                           }`}
                         title={`Recipient: ${contact.email} • Channel: ${contact.payoutChannel}`}
                       >

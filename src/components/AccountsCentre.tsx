@@ -415,16 +415,18 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
       {/* META ACCOUNTS CENTRE CONTAINER */}
       {/* ============================================================= */}
       <div className={`w-full ${isNight
-        ? 'bg-[#0A0A0C] border-slate-800/90 shadow-2xl'
+        ? 'bg-[#09090B] border-zinc-800 shadow-2xl'
         : isDark
           ? 'bg-slate-950 border-slate-800 shadow-2xl'
           : 'bg-white border-slate-200/90 shadow-xl'
         } border rounded-3xl overflow-hidden flex flex-col md:flex-row min-h-[620px]`}>
 
         {/* Left Column: Accounts Centre Navigation */}
-        <div className={`w-full md:w-80 border-b md:border-b-0 md:border-r ${isDark
-          ? 'border-slate-800/80 bg-slate-950/70'
-          : 'border-slate-200 bg-slate-50/80'
+        <div className={`w-full md:w-80 border-b md:border-b-0 md:border-r ${isNight
+          ? 'border-zinc-800 bg-[#111113]'
+          : isDark
+            ? 'border-slate-800/80 bg-slate-950/70'
+            : 'border-slate-200 bg-slate-50/80'
           } p-6 flex flex-col justify-between shrink-0`}>
           <div className="space-y-6">
 
@@ -537,7 +539,7 @@ export const AccountsCentre: React.FC<AccountsCentreProps> = ({
         </div>
 
         {/* Right Column: Dynamic Content Area */}
-        <div className={`flex-1 min-w-0 w-full p-6 sm:p-8 lg:p-10 overflow-y-auto ${isNight ? 'bg-[#0A0A0C]' : isDark ? 'bg-slate-950' : 'bg-white'
+        <div className={`flex-1 min-w-0 w-full p-6 sm:p-8 lg:p-10 overflow-y-auto ${isNight ? 'bg-[#09090B]' : isDark ? 'bg-slate-950' : 'bg-white'
           }`}>
 
           {/* 1. PASSWORD AND SECURITY (Directly mirrors Meta Accounts Centre reference!) */}

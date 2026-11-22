@@ -331,14 +331,16 @@ export default function TimekeeperAttendanceDashboard({
     // 2. Direct API fetched projects
     addList(fetchedProjects);
 
-    // 3. Cached projects from localStorage (includes newly created projects across roles)
-    try {
-      const cachedPrimary = localStorage.getItem('ctvill_cached_projects');
-      if (cachedPrimary) addList(JSON.parse(cachedPrimary));
-      const cachedSecondary = localStorage.getItem('ctvill_projects');
-      if (cachedSecondary) addList(JSON.parse(cachedSecondary));
-    } catch {
-      // Ignore storage parse errors
+    // 3. Fallback to cached projects from localStorage ONLY if live server data is not yet loaded
+    if (byId.size === 0) {
+      try {
+        const cachedPrimary = localStorage.getItem('ctvill_cached_projects');
+        if (cachedPrimary) addList(JSON.parse(cachedPrimary));
+        const cachedSecondary = localStorage.getItem('ctvill_projects');
+        if (cachedSecondary) addList(JSON.parse(cachedSecondary));
+      } catch {
+        // Ignore storage parse errors
+      }
     }
 
     // 4. Master fallback commercial sites if still empty
@@ -354,23 +356,10 @@ export default function TimekeeperAttendanceDashboard({
   );
   const [selectedDate, setSelectedDate] = useState<string>(() => new Date().toISOString().split('T')[0]);
   const [periodView, setPeriodView] = useState<'DAILY' | 'WEEKLY' | 'MONTHLY'>('DAILY');
-  const [workers, setWorkers] = useState<SiteWorker[]>(() => FALLBACK_IN_HOUSE_ARTISANS);
-  const [hasLoadedArtisans, setHasLoadedArtisans] = useState<boolean>(true);
+  const [workers, setWorkers] = useState<SiteWorker[]>([]);
+  const [hasLoadedArtisans, setHasLoadedArtisans] = useState<boolean>(false);
   const [existingLogs, setExistingLogs] = useState<AttendanceRecord[]>([]);
-  const [localDtr, setLocalDtr] = useState<Map<string, DtrEntryState>>(() => {
-    const initMap = new Map<string, DtrEntryState>();
-    for (const w of FALLBACK_IN_HOUSE_ARTISANS) {
-      initMap.set(w.id, {
-        granularStatus: 'PRESENT',
-        timeIn: '08:00',
-        timeOut: '17:00',
-        remarks: 'On-time roll call',
-        auditTimestamp: 'Stamped 08:00 AM',
-        isLocked: false
-      });
-    }
-    return initMap;
-  });
+  const [localDtr, setLocalDtr] = useState<Map<string, DtrEntryState>>(() => new Map());
 
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -480,35 +469,52 @@ export default function TimekeeperAttendanceDashboard({
     return result;
   }, [selectedProjectId]);
 
-  // Synchronously resolve assigned in-house artisans for a project so the table renders immediately (never 0 workers)
+  // Helper: check whether a Workforce Directory contractor is strictly assigned to a given project (never Unassigned/Standby)
+  const isContractorAssignedToProject = useCallback(
+    (c: Contractor, projId: string, proj?: ProjectProfile | null): boolean => {
+      const siteNorm = String(c.activeProjectSite || '').trim().toLowerCase();
+      const isExplicitlyUnassigned =
+        siteNorm === 'unassigned' ||
+        siteNorm === 'general standby pool' ||
+        siteNorm === 'standby pool' ||
+        siteNorm === 'standby' ||
+        siteNorm === 'none';
+
+      if (isExplicitlyUnassigned) return false;
+
+      const assignedIdMatch =
+        Boolean(c.assignedProjectId) && String(c.assignedProjectId).trim() === String(projId).trim();
+      const projIdsMatch = Boolean(
+        proj?.assignedContractorIds &&
+        proj.assignedContractorIds.map(String).includes(String(c.id))
+      );
+      const projNameLower = proj ? resolveProjectDisplayName(proj).trim().toLowerCase() : '';
+      const siteNameMatch = Boolean(siteNorm && projNameLower && siteNorm === projNameLower);
+
+      // If contractor has an explicit activeProjectSite set to a different project name, respect Workforce Directory
+      if (siteNorm && projNameLower && siteNorm !== projNameLower) {
+        return false;
+      }
+
+      return assignedIdMatch || projIdsMatch || siteNameMatch;
+    },
+    []
+  );
+
+  // Synchronously resolve assigned in-house artisans strictly from the selected project's Workforce Directory roster
   const resolveSyncArtisansForProject = useCallback(
     (projId: string): SiteWorker[] => {
-      if (!projId) return FALLBACK_IN_HOUSE_ARTISANS;
-      try {
-        const cachedLedgerRaw = localStorage.getItem(`ctvill_dtr_project_ledger_${projId}`);
-        if (cachedLedgerRaw) {
-          const parsed = JSON.parse(cachedLedgerRaw);
-          if (Array.isArray(parsed?.workers) && parsed.workers.length > 0) {
-            return parsed.workers;
-          }
-        }
-      } catch { }
+      if (!projId) return [];
 
       if (contractors && contractors.length > 0) {
         const proj = effectiveProjects.find(p => String(p.id) === String(projId));
-        const projNameLower = resolveProjectDisplayName(proj).toLowerCase();
-        const assignedFromProps = contractors.filter(c =>
-          String(c.assignedProjectId || '') === String(projId) ||
-          (proj?.assignedContractorIds || []).map(String).includes(String(c.id)) ||
-          (proj && (c.activeProjectSite || '').toLowerCase() === projNameLower)
-        );
-        const filtered = filterInHouseArtisans(assignedFromProps.length > 0 ? assignedFromProps : contractors);
-        if (filtered.length > 0) return filtered;
+        const assignedFromProps = contractors.filter(c => isContractorAssignedToProject(c, projId, proj));
+        return filterInHouseArtisans(assignedFromProps);
       }
 
-      return FALLBACK_IN_HOUSE_ARTISANS;
+      return [];
     },
-    [contractors, effectiveProjects, filterInHouseArtisans]
+    [contractors, effectiveProjects, filterInHouseArtisans, isContractorAssignedToProject]
   );
 
   // Persist active & verified project DTR records into shared localStorage so Finance Weekly Payroll Engine reads them automatically
@@ -584,48 +590,53 @@ export default function TimekeeperAttendanceDashboard({
     []
   );
 
+  const latestLoadSeqRef = React.useRef(0);
+
   // Fetch workers & existing attendance logs when project or date changes
   const loadData = useCallback(async () => {
     if (!selectedProjectId) return;
-    // Immediately populate with synchronous fallback/assigned artisans so table is never empty while fetching
+    const loadSeq = ++latestLoadSeqRef.current;
+    // Immediately reflect strictly assigned artisans from Workforce Directory while fetching live roster
     const immediateArtisans = resolveSyncArtisansForProject(selectedProjectId);
-    setWorkers(prev => (prev.length > 0 ? prev : immediateArtisans));
+    setWorkers(immediateArtisans);
     setHasLoadedArtisans(true);
     setIsLoading(true);
     try {
+      const proj = effectiveProjects.find(p => String(p.id) === String(selectedProjectId));
       let rawWorkersData: any[] = [];
       const rosterRes = await fetch(`/api/attendance/roster?projectId=${selectedProjectId}&status=Active`);
+      if (loadSeq !== latestLoadSeqRef.current) return;
       if (rosterRes.ok) {
         rawWorkersData = await rosterRes.json();
       } else {
         const workersRes = await fetch(`/api/workers?projectId=${selectedProjectId}&status=Active`);
+        if (loadSeq !== latestLoadSeqRef.current) return;
         if (workersRes.ok) rawWorkersData = await workersRes.json();
       }
+      if (loadSeq !== latestLoadSeqRef.current) return;
 
       let workersData = filterInHouseArtisans(rawWorkersData);
 
-      // If project-specific API returned 0 workers, check assigned contractors from props or global active workers
-      if (workersData.length === 0 && contractors && contractors.length > 0) {
-        const proj = effectiveProjects.find(p => String(p.id) === String(selectedProjectId));
-        const projNameLower = resolveProjectDisplayName(proj).toLowerCase();
-        const assignedFromProps = contractors.filter(c =>
-          String(c.assignedProjectId || '') === String(selectedProjectId) ||
-          (proj?.assignedContractorIds || []).map(String).includes(String(c.id)) ||
-          (proj && (c.activeProjectSite || '').toLowerCase() === projNameLower)
+      // Cross-check against live Workforce Directory so Unassigned / reassigned workers never bleed into this site
+      if (contractors && contractors.length > 0) {
+        const contractorById = new Map(contractors.map(c => [String(c.id), c]));
+        workersData = workersData.filter(w => {
+          const dirMatch = contractorById.get(String(w.id));
+          if (!dirMatch) return true;
+          return isContractorAssignedToProject(dirMatch, selectedProjectId, proj);
+        });
+
+        // Merge any Workforce Directory workers assigned to this site that were not yet in the workers table
+        const existingIds = new Set(workersData.map(w => String(w.id)));
+        const assignedFromProps = filterInHouseArtisans(
+          contractors.filter(c => isContractorAssignedToProject(c, selectedProjectId, proj))
         );
-        workersData = filterInHouseArtisans(assignedFromProps.length > 0 ? assignedFromProps : contractors);
-      }
-
-      if (workersData.length === 0) {
-        const allWorkersRes = await fetch(`/api/workers?status=Active`).catch(() => null);
-        if (allWorkersRes && allWorkersRes.ok) {
-          const allRaw = await allWorkersRes.json();
-          workersData = filterInHouseArtisans(allRaw).slice(0, 12);
+        for (const w of assignedFromProps) {
+          if (!existingIds.has(String(w.id))) {
+            workersData.push(w);
+            existingIds.add(String(w.id));
+          }
         }
-      }
-
-      if (workersData.length === 0) {
-        workersData = FALLBACK_IN_HOUSE_ARTISANS;
       }
 
       setWorkers(workersData);
@@ -706,7 +717,7 @@ export default function TimekeeperAttendanceDashboard({
     } finally {
       setIsLoading(false);
     }
-  }, [selectedProjectId, selectedDate, contractors, effectiveProjects, filterInHouseArtisans, resolveSyncArtisansForProject, persistProjectDtrLedger, activeProjectName]);
+  }, [selectedProjectId, selectedDate, contractors, effectiveProjects, filterInHouseArtisans, isContractorAssignedToProject, resolveSyncArtisansForProject, persistProjectDtrLedger, activeProjectName]);
 
   useEffect(() => {
     loadData();
@@ -728,7 +739,7 @@ export default function TimekeeperAttendanceDashboard({
 
   // Update individual worker's Attendance Status dropdown/buttons
   const handleStatusChange = (workerId: string, nextStatus: GranularAttendanceStatus) => {
-    if (isDateLocked || isFinance) return;
+    if (isDateLocked || isReadOnlyReview) return;
     const stamp = `Stamped ${formatAuditClockTime()}`;
     setLocalDtr(prev => {
       const next = new Map(prev);
@@ -785,7 +796,7 @@ export default function TimekeeperAttendanceDashboard({
 
   // Update Time-In or Time-Out input or Punch button
   const handleTimeChange = (workerId: string, field: 'timeIn' | 'timeOut', value: string) => {
-    if (isDateLocked || isFinance) return;
+    if (isDateLocked || isReadOnlyReview) return;
     const stamp = `Stamped ${formatAuditClockTime()}`;
     setLocalDtr(prev => {
       const next = new Map(prev);
@@ -830,7 +841,7 @@ export default function TimekeeperAttendanceDashboard({
 
   // Update Remarks
   const handleRemarksChange = (workerId: string, remarks: string) => {
-    if (isDateLocked || isFinance) return;
+    if (isDateLocked || isReadOnlyReview) return;
     setLocalDtr(prev => {
       const next = new Map(prev);
       const curr = next.get(workerId);
@@ -1485,7 +1496,7 @@ export default function TimekeeperAttendanceDashboard({
   };
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 bg-slate-950 text-slate-100 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-5">
+    <div className="flex-1 flex flex-col min-h-0 text-slate-100 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-5">
       {/* Toast Notification */}
       {toastMessage && (
         <div
@@ -1504,7 +1515,7 @@ export default function TimekeeperAttendanceDashboard({
       )}
 
       {/* Top Banner / Attendance Header with Live Ticking Digital Clock */}
-      <div className="bg-slate-950 border border-slate-800 rounded-xl p-4 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
         <div className="flex items-center gap-2.5">
           <div className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-amber-400">
             <ClipboardCheck className="w-5 h-5" />
@@ -1662,25 +1673,16 @@ export default function TimekeeperAttendanceDashboard({
             />
           </div>
 
-          {/* Refresh & Print DTR Buttons */}
-          <div className="md:col-span-2 flex items-end gap-1.5">
+          {/* Refresh Button */}
+          <div className="md:col-span-2 flex items-end self-end">
             <button
               type="button"
               onClick={loadData}
               disabled={isLoading}
-              className="flex-1 py-1.5 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 border border-slate-700 transition-colors cursor-pointer"
+              className="w-full py-1.5 px-3 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 border border-slate-700 transition-colors cursor-pointer"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-amber-400' : ''}`} />
               <span>Refresh</span>
-            </button>
-            <button
-              type="button"
-              onClick={handlePrintDailyDtrSheet}
-              className="py-1.5 px-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold rounded-lg flex items-center justify-center gap-1.5 border border-slate-700 transition-colors cursor-pointer shrink-0"
-              title="Print Official Daily DTR & Muster Roll"
-            >
-              <Printer className="w-3.5 h-3.5 text-amber-400" />
-              <span>Print Daily DTR Sheet</span>
             </button>
           </div>
         </div>
@@ -1937,7 +1939,9 @@ export default function TimekeeperAttendanceDashboard({
                       </div>
                     ) : (
                       <div className="text-slate-400 text-xs font-medium">
-                        No active artisans matched your search filter.
+                        {workers.length === 0
+                          ? `No active in-house artisans are currently assigned to ${activeProjectName}.`
+                          : 'No active artisans matched your search filter.'}
                       </div>
                     )}
                   </td>
@@ -2220,11 +2224,11 @@ export default function TimekeeperAttendanceDashboard({
                         </div>
                         <input
                           type="text"
-                          disabled={isDateLocked || isFinance}
+                          disabled={isDateLocked || isReadOnlyReview}
                           value={entry.remarks}
                           onChange={(e) => handleRemarksChange(worker.id, e.target.value)}
                           placeholder="Shift note / remarks..."
-                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-200 focus:border-amber-500 focus:outline-none"
+                          className="w-full bg-slate-950 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-200 focus:border-amber-500 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                         />
                       </td>
                     </tr>
@@ -2254,7 +2258,7 @@ export default function TimekeeperAttendanceDashboard({
               <span>Print Daily DTR Sheet</span>
             </button>
 
-            {!isDateLocked && !isFinance && (
+            {!isDateLocked && !isReadOnlyReview && (
               <button
                 onClick={handleInitiateSubmit}
                 disabled={isSubmitting || workers.length === 0}

@@ -64,6 +64,7 @@ const fmtDate = formatDisbursementDate;
 const EMPTY_FORM = {
   payeeContractorName: '',
   tradeSpecialty: '',
+  projectId: '',
   projectSite: '',
   auditId: '',
   verifiedHeadcount: '',
@@ -132,72 +133,6 @@ export default function SubcontractorBillingsDisbursements({
   const [disbursing, setDisbursing] = useState(false);
   const [toastMsg, setToastMsg] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null);
 
-  // Default seed billing records linked to certified audits
-  const SEED_PAYABLES: SubcontractorPayable[] = [
-    {
-      id: 'SPY-001',
-      disbursementDate: '2026-09-26T08:00:00.000Z',
-      payeeContractorId: 'CONT-1789598922028',
-      payeeContractorName: 'Brent',
-      tradeSpecialty: 'Concrete Pouring & Structural Works',
-      projectSite: 'LDM Modern Villa Site',
-      auditId: 'AUD-1790357393677',
-      verifiedHeadcount: 15,
-      claimedHeadcount: 15,
-      billedDays: 3,
-      ratePerDay: 1000,
-      billedAmount: 45000,
-      paymentMethod: 'Bank Wire',
-      status: 'PENDING_AUDIT',
-      remarks: '15 Men Verified on-site for LDM Concrete Pouring shift. Gate muster 100% matched, pending fund release.',
-      createdBy: 'Finance Department',
-      createdAt: '2026-09-25T18:00:00.000Z'
-    },
-    {
-      id: 'SPY-002',
-      disbursementDate: '2026-09-20T08:00:00.000Z',
-      payeeContractorId: 'CONT-1789599140157',
-      payeeContractorName: 'Paul',
-      tradeSpecialty: 'Skilled Trade Crews (Electricians, Carpenters, Painters, Masons)',
-      projectSite: 'LDM Modern Villa Site',
-      auditId: 'AUD-67542',
-      verifiedHeadcount: 10,
-      claimedHeadcount: 10,
-      billedDays: 2,
-      ratePerDay: 1400,
-      billedAmount: 28000,
-      approvedAmount: 28000,
-      paymentMethod: 'Check',
-      referenceNo: 'CHK-2026-0981',
-      status: 'APPROVED',
-      remarks: 'Quadrant B electrical rough-ins and conduit works verified with GPS photo proof. Approved for payout.',
-      createdBy: 'Finance Department',
-      createdAt: '2026-09-17T09:30:00.000Z'
-    },
-    {
-      id: 'SPY-003',
-      disbursementDate: '2026-09-18T08:00:00.000Z',
-      payeeContractorId: 'CONT-1789599064683',
-      payeeContractorName: 'Lizter',
-      tradeSpecialty: 'Site Foremen & General Labor Muster',
-      projectSite: 'LDM Modern Villa Site',
-      auditId: 'AUD-08944',
-      verifiedHeadcount: 50,
-      claimedHeadcount: 50,
-      billedDays: 2.5,
-      ratePerDay: 1000,
-      billedAmount: 125000,
-      approvedAmount: 125000,
-      disbursedAmount: 125000,
-      paymentMethod: 'Bank Wire',
-      referenceNo: 'BW-889123-BDO',
-      status: 'PAID',
-      remarks: 'Full 50-man field supervision gang verified across all LDM project levels. Disbursed via BDO wire.',
-      createdBy: 'Finance Department',
-      createdAt: '2026-09-17T14:15:00.000Z'
-    }
-  ];
-
   // Sub-contractors from live contractor list and active trade crews / audited crews
   const tradeContractors = useMemo(() => {
     const list = contractors.filter(c => isTradeGroupOrOutsourcedContractor(c));
@@ -232,15 +167,37 @@ export default function SubcontractorBillingsDisbursements({
 
   const projectNames = useMemo(
     () => Array.from(new Set([
-      ...projects.map(p => sanitizeText(p.name)),
+      ...projects.map(p => p.name),
       ...records.map(r => r.projectSite),
-      ...sanitizedAudits.map(a => a.assignedSectorOrLot),
-      'LDM Modern Villa Site',
-      '2-Storey Residential House',
-      'Laguna Residential Turnkey Build'
     ])).filter(Boolean),
-    [projects, records, sanitizedAudits]
+    [projects, records]
   );
+
+  // Budget Guardrail computation: checks if approving/disbursing a payable exceeds project budget
+  const getProjectBudgetGuardrail = useCallback((record: SubcontractorPayable | null) => {
+    if (!record) return null;
+    const matchedProj = projects.find(
+      p => (record.projectId && String(p.id) === String(record.projectId)) ||
+           p.name.trim().toLowerCase() === String(record.projectSite || '').trim().toLowerCase()
+    );
+    if (!matchedProj || !matchedProj.budget) return null;
+    const invoiceAmount = Number(record.approvedAmount ?? record.billedAmount ?? 0);
+    const alreadyPaidOnProject = Number(matchedProj.paidExpenses ?? ((matchedProj.paidLaborExpenses || 0) + (matchedProj.paidSubcontractorExpenses || 0)));
+    const projectedSpend = record.status === 'PAID' ? alreadyPaidOnProject : alreadyPaidOnProject + invoiceAmount;
+    const budget = Number(matchedProj.budget);
+    const overage = projectedSpend - budget;
+    const utilizationPct = budget > 0 ? (projectedSpend / budget) * 100 : 0;
+    return {
+      projectName: matchedProj.name,
+      budget,
+      alreadyPaidOnProject,
+      invoiceAmount,
+      projectedSpend,
+      overage,
+      utilizationPct,
+      isOverBudget: overage > 0,
+    };
+  }, [projects]);
 
   // ── Data fetch ──
   const fetchRecords = useCallback(async (quiet = false) => {
@@ -250,32 +207,14 @@ export default function SubcontractorBillingsDisbursements({
       const res = await fetch('/api/subcontractor-payables');
       if (res.ok) {
         const rawData: SubcontractorPayable[] = await res.json();
-        const raw = rawData && rawData.length > 0 ? rawData : SEED_PAYABLES;
-        const sanitized = raw.map(sanitizePayable);
+        const sanitized = (Array.isArray(rawData) ? rawData : []).map(sanitizePayable);
         if (typeof window !== 'undefined') {
           localStorage.setItem(SUBCONTRACTOR_PAYABLES_KEY, JSON.stringify(sanitized));
         }
         setRecords(sanitized);
-      } else {
-        setRecords(prev => {
-          const fallback = prev.length > 0 ? prev : SEED_PAYABLES;
-          const sanitized = fallback.map(sanitizePayable);
-          if (typeof window !== 'undefined') {
-            localStorage.setItem(SUBCONTRACTOR_PAYABLES_KEY, JSON.stringify(sanitized));
-          }
-          return sanitized;
-        });
       }
     } catch (err) {
       console.warn('Failed to fetch subcontractor payables:', err);
-      setRecords(prev => {
-        const fallback = prev.length > 0 ? prev : SEED_PAYABLES;
-        const sanitized = fallback.map(sanitizePayable);
-        if (typeof window !== 'undefined') {
-          localStorage.setItem(SUBCONTRACTOR_PAYABLES_KEY, JSON.stringify(sanitized));
-        }
-        return sanitized;
-      });
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
@@ -399,13 +338,18 @@ export default function SubcontractorBillingsDisbursements({
     setIsSaving(true);
     const finalStatus = !form.auditId ? 'PENDING_AUDIT' : form.status;
     try {
+      const matchedProject = projects.find(
+        p => (form.projectId && String(p.id) === String(form.projectId)) ||
+             p.name.trim().toLowerCase() === form.projectSite.trim().toLowerCase()
+      );
       const res = await fetch('/api/subcontractor-payables', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           payeeContractorName: form.payeeContractorName,
           tradeSpecialty: form.tradeSpecialty || 'General Trade',
-          projectSite: form.projectSite,
+          projectId: matchedProject?.id || form.projectId || undefined,
+          projectSite: matchedProject?.name || form.projectSite,
           auditId: form.auditId || undefined,
           verifiedHeadcount: Number(form.verifiedHeadcount) || 0,
           claimedHeadcount: Number(form.claimedHeadcount) || 0,
@@ -437,6 +381,7 @@ export default function SubcontractorBillingsDisbursements({
 
   // ── Disburse / approve ──
   const handleApprove = async (record: SubcontractorPayable) => {
+    const guardrail = getProjectBudgetGuardrail(record);
     try {
       const res = await fetch(`/api/subcontractor-payables/${record.id}`, {
         method: 'PATCH',
@@ -444,7 +389,14 @@ export default function SubcontractorBillingsDisbursements({
         body: JSON.stringify({ status: 'APPROVED', approvedAmount: record.billedAmount }),
       });
       if (res.ok) {
-        setToastMsg({ text: `${record.payeeContractorName} — Approved for disbursement.`, type: 'success' });
+        if (guardrail?.isOverBudget) {
+          setToastMsg({
+            text: `Approved ${record.payeeContractorName} — BUDGET WARNING: ${guardrail.projectName} projected spend (${fmt(guardrail.projectedSpend)}) exceeds budget by ${fmt(guardrail.overage)}.`,
+            type: 'info',
+          });
+        } else {
+          setToastMsg({ text: `${record.payeeContractorName} — Approved for disbursement.`, type: 'success' });
+        }
         await fetchRecords(true);
       }
     } catch { setToastMsg({ text: 'Failed to approve.', type: 'error' }); }
@@ -1243,6 +1195,37 @@ export default function SubcontractorBillingsDisbursements({
                 <div className="flex justify-between"><span className="text-slate-400">Amount to Release</span><span className="text-sky-300 font-black font-mono">{fmt(disburseTarget.approvedAmount ?? disburseTarget.billedAmount)}</span></div>
                 <div className="flex justify-between"><span className="text-slate-400">Payment Channel</span><span className="text-slate-300">{disburseTarget.paymentMethod}</span></div>
               </div>
+              {(() => {
+                const guardrail = getProjectBudgetGuardrail(disburseTarget);
+                if (!guardrail) return null;
+                if (guardrail.isOverBudget) {
+                  return (
+                    <div className="bg-rose-500/10 border border-rose-500/40 rounded-xl p-3.5 text-xs space-y-1">
+                      <div className="flex items-center gap-2 font-bold text-rose-300">
+                        <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+                        <span>Budget Overrun Guardrail Warning</span>
+                      </div>
+                      <p className="text-rose-200/90 leading-relaxed">
+                        Disbursing this invoice pushes <strong>{guardrail.projectName}</strong> cumulative spend to{' '}
+                        <span className="font-mono font-bold">{fmt(guardrail.projectedSpend)}</span> against its{' '}
+                        <span className="font-mono font-bold">{fmt(guardrail.budget)}</span> allotted budget (exceeding by{' '}
+                        <span className="font-mono font-bold text-rose-300">{fmt(guardrail.overage)}</span>).
+                      </p>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-3.5 py-2.5 text-[11px] flex items-center justify-between text-emerald-300">
+                    <span className="flex items-center gap-1.5 font-semibold">
+                      <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                      Within Project Budget
+                    </span>
+                    <span className="font-mono font-bold">
+                      {guardrail.utilizationPct.toFixed(1)}% utilized after payout
+                    </span>
+                  </div>
+                );
+              })()}
               <div>
                 <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1.5">Reference / Voucher No.</label>
                 <input value={disburseRef} onChange={e => setDisburseRef(e.target.value)}

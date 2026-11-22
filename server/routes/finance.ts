@@ -1000,6 +1000,7 @@ const ensureSubcontractorPayablesTable = async () => {
   await pool.query(
     `CREATE TABLE IF NOT EXISTS subcontractor_payables (
       id TEXT PRIMARY KEY,
+      project_id TEXT,
       disbursement_date DATE,
       payee_contractor_id TEXT,
       payee_contractor_name TEXT NOT NULL,
@@ -1021,24 +1022,7 @@ const ensureSubcontractorPayablesTable = async () => {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`
   );
-
-  const countRes = await pool.query('SELECT count(*) FROM subcontractor_payables');
-  if (parseInt(countRes.rows[0].count, 10) === 0) {
-    await pool.query(
-      `INSERT INTO subcontractor_payables
-       (id, disbursement_date, payee_contractor_id, payee_contractor_name, trade_specialty, project_site, audit_id,
-        verified_headcount, claimed_headcount, billed_days, rate_per_day, billed_amount,
-        approved_amount, disbursed_amount, payment_method, reference_no, status, remarks, created_by, created_at)
-       VALUES 
-       ('SPY-001', '2026-09-26', 'CONT-1789598922028', 'Brent', 'Concrete Pouring & Structural Works', '2-Storey Residential House', 'AUD-1790357393677',
-        15, 15, 3, 1000, 45000, NULL, NULL, 'Bank Wire', NULL, 'PENDING_AUDIT', '15 Men Verified on-site for 2-Storey Residential House Concrete Pouring shift. Gate muster 100% matched, pending fund release.', 'Finance Department', NOW()),
-       ('SPY-002', '2026-09-20', 'CONT-1789599140157', 'Paul', 'Skilled Trade Crews (Electricians, Carpenters, Painters, Masons)', 'Proyecto Bahia 2-Storey Residence', 'AUD-67542',
-        10, 10, 2, 1400, 28000, 28000, NULL, 'Check', 'CHK-2026-0981', 'APPROVED', 'Quadrant B electrical rough-ins and conduit works verified with GPS photo proof. Approved for payout.', 'Finance Department', NOW() - INTERVAL '6 days'),
-       ('SPY-003', '2026-09-18', 'CONT-1789599064683', 'Lizter', 'Site Foremen & General Labor Muster', 'Modern Farmhouse Build', 'AUD-08944',
-        50, 50, 2.5, 1000, 125000, 125000, 125000, 'Bank Wire', 'BW-889123-BDO', 'PAID', 'Full 50-man field supervision gang verified across all Modern Farmhouse Build levels. Disbursed via BDO wire.', 'Finance Department', NOW() - INTERVAL '8 days')
-       ON CONFLICT (id) DO NOTHING`
-    );
-  }
+  await pool.query(`ALTER TABLE subcontractor_payables ADD COLUMN IF NOT EXISTS project_id TEXT`).catch(() => {});
 };
 
 const formatToISODateString = (val: any): string | null => {
@@ -1064,11 +1048,12 @@ financeRouter.get('/subcontractor-payables', requireRole(['FINANCE', 'ADMIN', 'E
     );
     const records = (result.rows || []).map((r: any) => ({
       id: r.id,
+      projectId: r.project_id || undefined,
       disbursementDate: formatToISODateString(r.disbursement_date),
       payeeContractorId: r.payee_contractor_id || undefined,
       payeeContractorName: r.payee_contractor_name,
       tradeSpecialty: r.trade_specialty,
-      projectSite: String(r.project_site || '').toLowerCase().includes('nexbridge') ? '2-Storey Residential House' : r.project_site,
+      projectSite: r.project_site,
       auditId: r.audit_id || undefined,
       verifiedHeadcount: Number(r.verified_headcount || 0),
       claimedHeadcount: Number(r.claimed_headcount || 0),
@@ -1080,7 +1065,7 @@ financeRouter.get('/subcontractor-payables', requireRole(['FINANCE', 'ADMIN', 'E
       paymentMethod: r.payment_method || 'Bank Wire',
       referenceNo: r.reference_no || undefined,
       status: r.status || 'PENDING_AUDIT',
-      remarks: String(r.remarks || '').replace(/NexBridge(\s*Software\s*Hub)?/gi, '2-Storey Residential House'),
+      remarks: String(r.remarks || ''),
       createdBy: r.created_by || undefined,
       createdAt: r.created_at ? (r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at)) : undefined,
     }));
@@ -1095,54 +1080,53 @@ financeRouter.get('/subcontractor-payables', requireRole(['FINANCE', 'ADMIN', 'E
 financeRouter.post('/subcontractor-payables', requireRole(['FINANCE', 'ADMIN']), async (req: Request, res: Response) => {
   try {
     const {
+      id: requestedId, projectId: requestedProjectId, disbursementDate,
       payeeContractorId, payeeContractorName, tradeSpecialty, projectSite,
       auditId, verifiedHeadcount, claimedHeadcount, billedDays, ratePerDay,
-      billedAmount, approvedAmount, paymentMethod, referenceNo, status, remarks, createdBy
+      billedAmount, approvedAmount, disbursedAmount, paymentMethod, referenceNo, status, remarks, createdBy
     } = req.body;
 
-    if (!payeeContractorName || !projectSite || !billedAmount) {
-      return res.status(400).json({ error: 'payeeContractorName, projectSite, and billedAmount are required.' });
+    if (!payeeContractorName || (!projectSite && !requestedProjectId) || !billedAmount) {
+      return res.status(400).json({ error: 'payeeContractorName, projectId/projectSite, and billedAmount are required.' });
     }
 
-    // Auto-create table if it does not exist
-    await pool.query(
-      `CREATE TABLE IF NOT EXISTS subcontractor_payables (
-        id TEXT PRIMARY KEY,
-        disbursement_date DATE,
-        payee_contractor_id TEXT,
-        payee_contractor_name TEXT NOT NULL,
-        trade_specialty TEXT NOT NULL DEFAULT 'General Trade',
-        project_site TEXT NOT NULL,
-        audit_id TEXT,
-        verified_headcount INTEGER DEFAULT 0,
-        claimed_headcount INTEGER DEFAULT 0,
-        billed_days NUMERIC DEFAULT 0,
-        rate_per_day NUMERIC DEFAULT 0,
-        billed_amount NUMERIC NOT NULL DEFAULT 0,
-        approved_amount NUMERIC,
-        disbursed_amount NUMERIC,
-        payment_method TEXT DEFAULT 'Bank Wire',
-        reference_no TEXT,
-        status TEXT NOT NULL DEFAULT 'PENDING_AUDIT',
-        remarks TEXT,
-        created_by TEXT,
-        created_at TIMESTAMPTZ DEFAULT NOW()
-      )`
-    );
+    await ensureSubcontractorPayablesTable();
 
-    const id = `SPY-${Date.now()}`;
+    // Strictly resolve project_id and canonical project_site from commercial_projects
+    let resolvedProjectId: string | null = requestedProjectId ? String(requestedProjectId).trim() : null;
+    let resolvedProjectSite: string = String(projectSite || '').trim();
+    try {
+      const projLookup = await pool.query(
+        `SELECT id, name FROM commercial_projects WHERE id = $1 OR LOWER(TRIM(name)) = LOWER(TRIM($2)) LIMIT 1`,
+        [resolvedProjectId || '', resolvedProjectSite]
+      );
+      if (projLookup.rows.length > 0) {
+        resolvedProjectId = String(projLookup.rows[0].id);
+        resolvedProjectSite = String(projLookup.rows[0].name);
+      }
+    } catch { /* non-fatal */ }
+
+    const countRes = await pool.query('SELECT COUNT(*)::int AS cnt FROM subcontractor_payables');
+    const nextSeq = Number(countRes.rows[0]?.cnt || 0) + 1;
+    const year = new Date().getFullYear();
+    const id = requestedId && /^SPY-[A-Za-z0-9_-]+$/.test(String(requestedId))
+      ? String(requestedId)
+      : `SPY-${year}-${String(nextSeq).padStart(3, '0')}`;
     const billedAmt = Number(billedAmount) || (Number(billedDays || 0) * Number(ratePerDay || 0));
     await pool.query(
       `INSERT INTO subcontractor_payables
-       (id, payee_contractor_id, payee_contractor_name, trade_specialty, project_site, audit_id,
+       (id, project_id, disbursement_date, payee_contractor_id, payee_contractor_name, trade_specialty, project_site, audit_id,
         verified_headcount, claimed_headcount, billed_days, rate_per_day, billed_amount,
-        approved_amount, payment_method, reference_no, status, remarks, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)`,
+        approved_amount, disbursed_amount, payment_method, reference_no, status, remarks, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)`,
       [
-        id, payeeContractorId || null, payeeContractorName, tradeSpecialty || 'General Trade',
-        projectSite, auditId || null, Number(verifiedHeadcount || 0), Number(claimedHeadcount || 0),
+        id, resolvedProjectId, disbursementDate || null,
+        payeeContractorId || null, payeeContractorName, tradeSpecialty || 'General Trade',
+        resolvedProjectSite || resolvedProjectId || 'Unassigned Site', auditId || null,
+        Number(verifiedHeadcount || 0), Number(claimedHeadcount || 0),
         Number(billedDays || 0), Number(ratePerDay || 0), billedAmt,
         approvedAmount !== undefined && approvedAmount !== null ? Number(approvedAmount) : null,
+        disbursedAmount !== undefined && disbursedAmount !== null ? Number(disbursedAmount) : null,
         paymentMethod || 'Bank Wire', referenceNo || null,
         status || 'PENDING_AUDIT', remarks || null, createdBy || null,
       ]
@@ -1157,7 +1141,7 @@ financeRouter.post('/subcontractor-payables', requireRole(['FINANCE', 'ADMIN']),
           action: 'INVOICE_GENERATED',
           actorName: (req as any).user?.name || createdBy || 'Finance Department',
           actorRole: 'FINANCE',
-          details: `Logged subcontractor payable invoice for ${payeeContractorName} (${projectSite}) for ₱${Number(billedAmount).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Headcount basis: ${verifiedHeadcount} verified / ${claimedHeadcount} claimed. Linked Audit: ${auditId || 'None'}.`,
+          details: `Logged subcontractor payable invoice ${id} for ${payeeContractorName} (${resolvedProjectSite}) for ₱${Number(billedAmount).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}. Headcount basis: ${verifiedHeadcount} verified / ${claimedHeadcount} claimed. Linked Audit: ${auditId || 'None'}.`,
         }
       });
       broadcastChange('auditLogs');
@@ -1165,11 +1149,13 @@ financeRouter.post('/subcontractor-payables', requireRole(['FINANCE', 'ADMIN']),
       console.warn('Process audit log error for new payable:', auditErr?.message);
     }
 
+    invalidateAllDataCache();
     broadcastChange('subcontractorPayables');
-    res.json({ success: true, id });
+    broadcastChange('projects');
+    res.json({ success: true, id, projectId: resolvedProjectId, projectSite: resolvedProjectSite });
   } catch (error: any) {
     console.error('Error creating subcontractor payable:', error);
-    res.status(500).json({ error: 'Internal Server Error: ' + (error?.message || '') });
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 });
 
@@ -1288,7 +1274,9 @@ financeRouter.patch('/subcontractor-payables/:id', requireRole(['FINANCE', 'ADMI
       }
     }
 
+    invalidateAllDataCache();
     broadcastChange('subcontractorPayables');
+    broadcastChange('projects');
     res.json({ success: true, id });
   } catch (error: any) {
     console.error('Error updating subcontractor payable:', error);

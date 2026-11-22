@@ -27,9 +27,7 @@ export function corsMiddleware(req: Request, res: Response, next: NextFunction) 
   if (requestOrigin && allowedOrigins.includes(requestOrigin)) {
     res.header('Access-Control-Allow-Origin', requestOrigin);
     res.header('Access-Control-Allow-Credentials', 'true');
-  } else if (!requestOrigin) {
-    // Non-browser or same-origin direct requests
-    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Vary', 'Origin');
   }
 
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');

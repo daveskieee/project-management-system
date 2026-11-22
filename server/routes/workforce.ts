@@ -8,7 +8,7 @@ import { GoogleGenAI } from '@google/genai';
 import { Groq } from 'groq-sdk';
 import { prisma, pool } from '../db';
 import { broadcastChange, invalidateAllDataCache } from '../events';
-import { requireAuth, requireRole, checkUserProjectAccess } from '../middleware/auth';
+import { requireAuth, requireRole, requireExactRole, checkUserProjectAccess } from '../middleware/auth';
 
 export const workforceRouter = Router();
 
@@ -1982,7 +1982,7 @@ workforceRouter.get('/workforce/reallocation-suggestions', async (req: Request, 
 });
 
 // POST /api/workforce/reallocate
-workforceRouter.post('/workforce/reallocate', requireRole(['ADMIN', 'ENGINEER']), async (req: Request, res: Response) => {
+workforceRouter.post('/workforce/reallocate', requireExactRole(['ENGINEER']), async (req: Request, res: Response) => {
   try {
     const { workerId, targetProjectId, targetProjectName } = req.body;
     if (!workerId || !targetProjectName) {

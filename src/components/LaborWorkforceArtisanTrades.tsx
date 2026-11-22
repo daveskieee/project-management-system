@@ -21,6 +21,8 @@ import {
 } from '../types';
 import { useTheme } from '../context/ThemeContext';
 import { normalizeRole, UserRole } from '../utils/rbac';
+import { getStoredSession } from '../utils/session';
+import { getCsrfToken } from '../utils/apiClient';
 import WorkforceMessengerRoster from './WorkforceMessengerRoster';
 
 export interface LaborWorkforceArtisanTradesProps {
@@ -60,7 +62,7 @@ export interface LaborWorkforceArtisanTradesProps {
   hideTabs?: boolean;
 }
 
-export type WorkforceTabId = 'workbench' | 'analytics' | 'directory';
+export type WorkforceTabId = 'workbench' | 'site-analytics' | 'analytics' | 'directory';
 
 export interface AllocationAuditEntry {
   id: string;
@@ -81,15 +83,135 @@ export interface AllocationAuditEntry {
 }
 
 const OVERRIDE_REASON_PRESETS = [
-  'Executive Approval / Urgent Pull-Out',
-  'Dual-Site Split Shift Authorized',
-  'Critical Path Milestone Coverage',
-  'Emergency Trade Substitution',
+  'Critical-Path Recovery',
+  'Split-Shift Supervision',
+  'Emergency Coverage',
+  'Custom Note',
 ];
 
+export interface ProjectTradeRequirement {
+  id: string;
+  label: string;
+  required: number;
+  matchTerms: string[];
+}
+
+const DEFAULT_SITE_TRADE_REQUIREMENTS: ProjectTradeRequirement[] = [
+  { id: 'mep', label: 'MEP Engineer', required: 1, matchTerms: ['mep', 'mepfs', 'electrical', 'electrician', 'mechanical', 'plumbing', 'plumber', 'hvac', 'fdas', 'fire protection', 'sanitary'] },
+  { id: 'architect', label: 'Architect', required: 1, matchTerms: ['architect', 'architectural', 'interior designer', 'interior', 'cad', 'draftsman'] },
+  { id: 'pm', label: 'PM', required: 1, matchTerms: ['project manager', 'site engineer', 'civil engineer', 'head engineer', 'project engineer', 'structural engineer', 'resident engineer'] },
+  { id: 'foreman', label: 'Site Foreman', required: 1, matchTerms: ['foreman', 'leadman', 'site supervisor', 'general foreman', 'field supervisor'] },
+  { id: 'labor', label: 'Labor Crew', required: 1, matchTerms: ['mason', 'carpenter', 'welder', 'painter', 'tile', 'drywall', 'labor', 'artisan', 'helper', 'finishing', 'steel', 'general'] }
+];
+
+const TRADE_REQUIREMENT_PRESETS: Array<{ id: string; name: string; subtitle: string; requirements: ProjectTradeRequirement[] }> = [
+  {
+    id: 'standard',
+    name: 'Standard 5-Role Site Crew',
+    subtitle: 'Balanced 1-per-role baseline for general sites',
+    requirements: DEFAULT_SITE_TRADE_REQUIREMENTS
+  },
+  {
+    id: 'residential_2storey',
+    name: '2-Storey Residential Build',
+    subtitle: 'Civil/structural supervision + 2 labor artisans',
+    requirements: [
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[2], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[3], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[0], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[1], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[4], required: 2 }
+    ]
+  },
+  {
+    id: 'commercial_fitout',
+    name: 'Commercial / Office Fit-Out',
+    subtitle: 'MEP-heavy fit-out with Safety Officer & 2 artisans',
+    requirements: [
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[2], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[3], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[0], required: 2 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[1], required: 1 },
+      { id: 'safety', label: 'Safety Officer', required: 1, matchTerms: ['safety', 'hse', 'osh', 'ppe'] },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[4], required: 2 }
+    ]
+  },
+  {
+    id: 'condo_renovation',
+    name: 'Condominium Renovation',
+    subtitle: 'Compact interior crew (Foreman, MEP, Architect, Crew)',
+    requirements: [
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[3], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[0], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[1], required: 1 },
+      { ...DEFAULT_SITE_TRADE_REQUIREMENTS[4], required: 1 }
+    ]
+  }
+];
+
+function buildMatchTermsForLabel(label: string): string[] {
+  const lower = label.toLowerCase().trim();
+  const baseTerms = new Set<string>([lower]);
+  lower.split(/[\s/,&-]+/).forEach((tok) => {
+    if (tok.length >= 3 && !['the', 'and', 'for', 'site', 'lead', 'senior', 'junior'].includes(tok)) {
+      baseTerms.add(tok);
+    }
+  });
+  if (lower.includes('mep') || lower.includes('electr') || lower.includes('mech') || lower.includes('plumb')) {
+    ['mep', 'mepfs', 'electrical', 'electrician', 'mechanical', 'plumbing', 'plumber', 'hvac'].forEach(t => baseTerms.add(t));
+  }
+  if (lower.includes('safety')) ['safety', 'osh', 'hse'].forEach(t => baseTerms.add(t));
+  if (lower.includes('qa') || lower.includes('qc')) ['qa', 'qc', 'quality', 'inspector'].forEach(t => baseTerms.add(t));
+  return Array.from(baseTerms);
+}
+
+function isExecutiveOrCorporateWorker(w: Contractor): boolean {
+  if (isOfficeOrExecutive(w)) return true;
+  const text = `${w.roleTitle || ''} ${w.tradeType || ''} ${w.specialty || ''}`.toLowerCase();
+  return /\b(ceo|coo|cfo|president|vice president|vp|director|hr|human resources|accounting|finance|legal|admin officer|executive)\b/.test(text);
+}
+
+// Priority-ordered trade matcher: specific technical trades (MEP, Architect, Safety, etc.) match BEFORE generic Foreman/Labor
+function matchWorkerToTradeSlot(w: Contractor, requirements: ProjectTradeRequirement[]): string | null {
+  if (isExecutiveOrCorporateWorker(w)) return null;
+  const text = `${w.roleTitle || ''} ${w.tradeType || ''} ${w.specialty || ''}`.toLowerCase();
+
+  // Order requirements so specific technical roles (mep, architect, custom) are evaluated before generic foreman/labor
+  const priorityOrder = (req: ProjectTradeRequirement) => {
+    if (req.id === 'mep') return 1;
+    if (req.id === 'architect') return 2;
+    if (req.id !== 'pm' && req.id !== 'foreman' && req.id !== 'labor') return 3;
+    if (req.id === 'pm') return 4;
+    if (req.id === 'foreman') return 5;
+    return 6;
+  };
+  const ordered = [...requirements].sort((a, b) => priorityOrder(a) - priorityOrder(b));
+
+  for (const slot of ordered) {
+    if (slot.matchTerms.some((term) => term && text.includes(term.toLowerCase()))) {
+      return slot.id;
+    }
+  }
+  const laborFallback = requirements.find(r => r.id === 'labor');
+  return laborFallback ? laborFallback.id : null;
+}
+
+function loadProjectTradeRequirements(projectId: string | undefined): ProjectTradeRequirement[] {
+  if (!projectId || typeof window === 'undefined') return DEFAULT_SITE_TRADE_REQUIREMENTS;
+  try {
+    const raw = localStorage.getItem(`ldm_project_trade_reqs_${projectId}`);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch { }
+  return DEFAULT_SITE_TRADE_REQUIREMENTS;
+}
+
 const TABS: { id: WorkforceTabId; label: string; icon: React.ElementType }[] = [
-  { id: 'workbench', label: 'Tab 1: Dispatch Workbench', icon: Sliders },
-  { id: 'analytics', label: 'Tab 2: Workforce Analytics & Reports', icon: BarChart3 },
+  { id: 'workbench', label: 'Dispatch Workbench', icon: Sliders },
+  { id: 'site-analytics', label: 'Site Analytics', icon: PieChart },
+  { id: 'analytics', label: 'Workforce Analytics & Reports', icon: BarChart3 },
   { id: 'directory', label: 'Personnel Directory & Roster', icon: Users },
 ];
 
@@ -136,11 +258,11 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
 
   const availableTabs = useMemo(() => {
     return TABS.filter(tab => {
-      // Tab 1 (Dispatch Workbench): Show ONLY for PM / Site Engineer (hide for OM)
-      if (tab.id === 'workbench') return isPM || (!isOM && !isPM);
-      // Tab 2 (Workforce Analytics & Reports): Show ONLY for OM (hide for PM / Site Engineer)
+      // Dispatch Workbench & Project-Scoped Site Analytics: PM / Site Engineer only
+      if (tab.id === 'workbench' || tab.id === 'site-analytics') return isPM || (!isOM && !isPM);
+      // Company-wide Workforce Analytics & Reports: OM only
       if (tab.id === 'analytics') return isOM;
-      // Tab 3 (Personnel Directory & Roster): Show for both
+      // Personnel Directory & Roster: Show for both
       return true;
     });
   }, [isOM, isPM]);
@@ -153,7 +275,7 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
 
   // Guard activeSubTab if role changes or tab is unauthorized
   useEffect(() => {
-    if (isOM && activeSubTab === 'workbench') {
+    if (isOM && (activeSubTab === 'workbench' || activeSubTab === 'site-analytics')) {
       setActiveSubTab('analytics');
     } else if (isPM && activeSubTab === 'analytics') {
       setActiveSubTab('workbench');
@@ -211,7 +333,37 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
     action: 'assigned' | 'unassigned';
   } | null>(null);
 
-  const currentActorRole = isFinance ? 'Finance Controller' : 'Operations Administrator';
+  const storedSession = getStoredSession();
+  const resolvedRoleLabel = isFinance
+    ? 'Finance Controller'
+    : isPM
+      ? 'Project Manager'
+      : isOM
+        ? 'Operations Manager'
+        : String(userRole || storedSession?.role || 'Site Staff');
+  const currentActorRole = storedSession?.name
+    ? `${storedSession.name} (${resolvedRoleLabel})`
+    : resolvedRoleLabel;
+
+  // Per-project configurable trade requirements state + Edit Requirements Modal
+  const [projectTradeReqsMap, setProjectTradeReqsMap] = useState<Record<string, ProjectTradeRequirement[]>>({});
+  const [isEditReqsModalOpen, setIsEditReqsModalOpen] = useState(false);
+  const [draftTradeReqs, setDraftTradeReqs] = useState<ProjectTradeRequirement[]>(DEFAULT_SITE_TRADE_REQUIREMENTS);
+  const [newCustomTradeLabel, setNewCustomTradeLabel] = useState('');
+  const [newCustomTradeQty, setNewCustomTradeQty] = useState<number>(1);
+
+  // Explainable AI Score Drawer, Auto-Optimize Preview Modal & Conflict Override Modal State
+  const [expandedScoreCardIds, setExpandedScoreCardIds] = useState<Record<string, boolean>>({});
+  const [isOptimizeModalOpen, setIsOptimizeModalOpen] = useState(false);
+  const [isDeployingOptimizedCrew, setIsDeployingOptimizedCrew] = useState(false);
+  const [pendingConflictAssign, setPendingConflictAssign] = useState<{
+    worker: Contractor;
+    source: 'Manual' | 'AI';
+    linkedRec?: AIManpowerRecommendation;
+    conflictSites: string[];
+  } | null>(null);
+  const [conflictOverridePreset, setConflictOverridePreset] = useState<string>(OVERRIDE_REASON_PRESETS[0]);
+  const [conflictCustomNote, setConflictCustomNote] = useState<string>('');
 
   // Daily wage rate helper (₱/day)
   const getWorkerDailyRate = (w: Contractor): number => {
@@ -237,6 +389,34 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
     }
     return projects.find(p => p.status !== 'COMPLETED' && p.status !== 'HANDED_OVER') || projects[0] || null;
   }, [selectedWorkbenchProjectId, projects]);
+
+  // Active project's configurable trade requirements (persisted per project in localStorage)
+  const activeProjectTradeReqs = useMemo<ProjectTradeRequirement[]>(() => {
+    const pid = targetAllocationProject?.id;
+    if (!pid) return DEFAULT_SITE_TRADE_REQUIREMENTS;
+    if (projectTradeReqsMap[pid]) return projectTradeReqsMap[pid];
+    return loadProjectTradeRequirements(pid);
+  }, [targetAllocationProject?.id, projectTradeReqsMap]);
+
+  const handleOpenEditReqsModal = () => {
+    setDraftTradeReqs(activeProjectTradeReqs.map(r => ({ ...r, matchTerms: [...r.matchTerms] })));
+    setNewCustomTradeLabel('');
+    setNewCustomTradeQty(1);
+    setIsEditReqsModalOpen(true);
+  };
+
+  const handleSaveProjectTradeReqs = () => {
+    const pid = targetAllocationProject?.id;
+    if (!pid) return;
+    const cleaned = draftTradeReqs.filter(r => r.label.trim().length > 0 && r.required > 0);
+    const finalReqs = cleaned.length > 0 ? cleaned : DEFAULT_SITE_TRADE_REQUIREMENTS;
+    setProjectTradeReqsMap(prev => ({ ...prev, [pid]: finalReqs }));
+    try {
+      localStorage.setItem(`ldm_project_trade_reqs_${pid}`, JSON.stringify(finalReqs));
+    } catch { }
+    setIsEditReqsModalOpen(false);
+    notify(`✓ Updated Site Trade Requirements for "${targetAllocationProject?.name}".`);
+  };
 
   // Keep selectedWorkbenchProjectId valid when projects load
   useEffect(() => {
@@ -417,38 +597,76 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
       { keyword: 'Welder', matchTerms: ['welder', 'steel', 'metal', 'structural', 'fabrication'] }
     ];
 
-    // Strictly skip any worker flagged as isLockedByAdmin or already assigned to the selected project
+    // Compute open site trade slots dynamically from currently assigned crew & project's custom requirements
+    const currentlyAssignedWorkers = localContractors.filter(c => crewSelectedWorkerIds.includes(c.id));
+    const slotFillCounts = new Map<string, number>();
+    activeProjectTradeReqs.forEach(req => slotFillCounts.set(req.id, 0));
+    currentlyAssignedWorkers.forEach(w => {
+      const slotId = matchWorkerToTradeSlot(w, activeProjectTradeReqs);
+      if (slotId) {
+        slotFillCounts.set(slotId, (slotFillCounts.get(slotId) || 0) + 1);
+      }
+    });
+    const openSlotIds = new Set<string>(
+      activeProjectTradeReqs.filter(req => (slotFillCounts.get(req.id) || 0) < req.required).map(req => req.id)
+    );
+
+    // Strictly skip any worker flagged as isLockedByAdmin, already assigned to selected project, or corporate/executive (CEO/COO)
     const unlockedPool = localContractors.filter(
       c => !isWorkerLockedByAdmin(c) && !crewSelectedWorkerIds.includes(c.id)
     );
-    const fieldCandidates = unlockedPool.filter(c => !isOfficeOrExecutive(c));
-    const pool = fieldCandidates.length > 0 ? fieldCandidates : unlockedPool;
+    const fieldCandidates = unlockedPool.filter(c => !isExecutiveOrCorporateWorker(c));
+    const pool = fieldCandidates;
+
+    const benchmarkDailyRate = projectBudget > 0
+      ? Math.max(900, Math.min(2500, (projectBudget * 0.25) / (30 * 5)))
+      : 1350;
 
     const scored = pool.map(w => {
-      const tradeStr = (w.tradeType || w.specialty || w.roleTitle || 'General').toLowerCase();
       const avail = getWorkerAvailabilityAdvisory(w, targetAllocationProject);
       const rate = getWorkerDailyRate(w);
-      const matchesScope = desiredTrades.some(
-        dt => dt.matchTerms.some(t => tradeStr.includes(t)) && (scopeText.length === 0 || dt.matchTerms.some(t => scopeText.includes(t)))
-      );
-      const rateFitsBudget = projectBudget <= 0 || rate <= Math.max(1500, projectBudget * 0.02);
+      const matchedSlotId = matchWorkerToTradeSlot(w, activeProjectTradeReqs);
+      const matchedSlotDef = activeProjectTradeReqs.find(s => s.id === matchedSlotId) || null;
+      const fillsOpenSlot = Boolean(matchedSlotId && openSlotIds.has(matchedSlotId));
 
       // Check if there is also an active cross-site AI recommendation for this worker
       const matchingAiRec = recommendationQueue.find(
         r => r.workerId === w.id || r.contractorId === w.id || (r.workerName || r.contractorName || '').toLowerCase() === w.name.toLowerCase()
       );
 
-      // 4-Factor Score Breakdown (Trade /35, Availability /30, Budget /20, Performance /15)
-      const tradeScore = matchesScope ? 35 : 28;
-      const availabilityScore = avail.isOverlapping ? 12 : 30;
-      const budgetScore = rateFitsBudget ? 20 : 12;
-      const perfScore = Math.min(15, Math.max(10, Math.round(((w.rating || 4.5) / 5) * 15)));
-      const score = tradeScore + availabilityScore + budgetScore + perfScore;
+      // Genuine 4-Factor Weighted Scoring (0–100%):
+      // 1. Trade Match (40 pts): 40 if fills open required slot, 18 if reinforces filled slot, 10 general field
+      const tradeScore = fillsOpenSlot ? 40 : matchedSlotDef ? 18 : 10;
+
+      // 2. Availability / Zero-Conflict (30 pts): 30 if Unassigned/Available, 5 if active on another site
+      const availabilityScore = avail.isOverlapping ? 5 : 30;
+
+      // 3. Budget Efficiency (20 pts): scaled vs. project labor budget benchmark
+      const budgetScore =
+        rate <= benchmarkDailyRate * 0.75
+          ? 20
+          : rate <= benchmarkDailyRate
+            ? 16
+            : rate <= benchmarkDailyRate * 1.35
+              ? 11
+              : 6;
+
+      // 4. Reliability / Rating (10 pts): scaled from worker rating (0-5)
+      const numericRating = Number(w.rating || 4.3);
+      const ratingScore = Math.min(10, Math.max(2, Math.round((numericRating / 5) * 10)));
+
+      const score = tradeScore + availabilityScore + budgetScore + ratingScore;
 
       const rationaleParts = [
-        'Trade matches scope',
-        avail.isOverlapping ? `Active on ${avail.overlappingProjects[0]} (Dual-site advisory)` : 'Currently Available',
-        rateFitsBudget ? `Rate fits budget (₱${rate.toLocaleString()}/day)` : `Standard rate (₱${rate.toLocaleString()}/day)`
+        fillsOpenSlot && matchedSlotDef
+          ? `Fills open ${matchedSlotDef.label} slot`
+          : matchedSlotDef
+            ? `Additional ${matchedSlotDef.label} support`
+            : 'General field trade',
+        avail.isOverlapping
+          ? `Active on ${avail.overlappingProjects[0]} (Conflict)`
+          : 'Zero schedule conflict',
+        `₱${rate.toLocaleString()}/day`
       ];
 
       return {
@@ -457,31 +675,63 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
         avail,
         score,
         matchingAiRec,
-        fourFactorBreakdown: `Trade ${tradeScore}/35 • Avail ${availabilityScore}/30 • Budget ${budgetScore}/20 • Rating ${perfScore}/15`,
-        rationale: matchingAiRec?.rationale
-          ? matchingAiRec.rationale
-          : `Recommended: ${rationaleParts.join(' • ')}`
+        matchedSlotId,
+        matchedSlotLabel: matchedSlotDef?.label || 'Field Crew',
+        fillsOpenSlot,
+        breakdown: {
+          tradeScore,
+          availabilityScore,
+          budgetScore,
+          ratingScore,
+          numericRating
+        },
+        fourFactorBreakdown: `Trade ${tradeScore}/40 • Avail ${availabilityScore}/30 • Budget ${budgetScore}/20 • Rating ${ratingScore}/10`,
+        rationale: rationaleParts.join(' • ')
       };
     });
 
     scored.sort((a, b) => b.score - a.score || a.rate - b.rate);
-    const picked: typeof scored = [];
-    const seenTrades = new Set<string>();
-    for (const item of scored) {
-      if (picked.length >= 5) break;
-      const tKey = (item.worker.tradeType || item.worker.specialty || 'General').toLowerCase();
-      if (!seenTrades.has(tKey) || picked.length < 3) {
-        picked.push(item);
-        seenTrades.add(tKey);
-      }
-    }
-    const baseList = picked.length > 0 ? picked : scored.slice(0, 4);
-    const filtered = baseList.filter(item => !dismissedWorkforceStagedIds.includes(item.worker.id));
+    const filtered = scored.filter(item => !dismissedWorkforceStagedIds.includes(item.worker.id));
     if (aiSortMode === 'cost') {
-      return [...filtered].sort((a, b) => a.rate - b.rate || b.score - a.score);
+      return [...filtered].sort((a, b) => a.rate - b.rate || b.score - a.score).slice(0, 6);
     }
-    return [...filtered].sort((a, b) => b.score - a.score || a.rate - b.rate);
-  }, [localContractors, projects, targetAllocationProject, crewSelectedWorkerIds, crewOverrideNotes, crewAdminLocks, dismissedWorkforceStagedIds, recommendationQueue, localProjectAssignments, aiSortMode]);
+    return [...filtered].sort((a, b) => b.score - a.score || a.rate - b.rate).slice(0, 6);
+  }, [localContractors, projects, targetAllocationProject, crewSelectedWorkerIds, crewOverrideNotes, crewAdminLocks, dismissedWorkforceStagedIds, recommendationQueue, localProjectAssignments, aiSortMode, activeProjectTradeReqs]);
+
+  // Unified entry point for assigning a worker: enforces Dual-Site Conflict Override modal when overlapping
+  const requestAssignWorker = (
+    worker: Contractor,
+    source: 'Manual' | 'AI',
+    linkedRec?: AIManpowerRecommendation
+  ) => {
+    if (!targetAllocationProject) return;
+    const avail = getWorkerAvailabilityAdvisory(worker, targetAllocationProject);
+    if (avail.isOverlapping) {
+      setConflictOverridePreset(OVERRIDE_REASON_PRESETS[0]);
+      setConflictCustomNote('');
+      setPendingConflictAssign({
+        worker,
+        source,
+        linkedRec,
+        conflictSites: avail.overlappingProjects
+      });
+      return;
+    }
+    handleAssignWorkerToProject(worker, source, linkedRec);
+  };
+
+  const handleConfirmConflictOverride = async () => {
+    if (!pendingConflictAssign) return;
+    const finalReason =
+      conflictOverridePreset === 'Custom Note'
+        ? conflictCustomNote.trim() || 'Authorized Dual-Site Override'
+        : conflictCustomNote.trim()
+          ? `${conflictOverridePreset} — ${conflictCustomNote.trim()}`
+          : conflictOverridePreset;
+    const { worker, source, linkedRec } = pendingConflictAssign;
+    setPendingConflictAssign(null);
+    await handleAssignWorkerToProject(worker, source, linkedRec, finalReason);
+  };
 
   // Unified Assign Worker Handler (Cohesive for both Manual & AI Recommendation actions, with Conflict Override Persistence)
   const handleAssignWorkerToProject = async (
@@ -570,17 +820,39 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
       dailyRate: getWorkerDailyRate(worker)
     });
 
-    fetch(`/api/projects/${targetAllocationProject.id}/workers`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        workerId: worker.id,
-        action: 'add',
-        allocationSource: source,
-        manualOverrideNote: resolvedOverrideNote || undefined,
-        isLockedByAdmin: shouldLock
-      })
-    }).catch(() => {});
+    const buildWorkforceAuthHeaders = (): Record<string, string> => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const csrf = getCsrfToken();
+      if (csrf) headers['x-csrf-token'] = csrf;
+      const bearer = (storedSession as any)?.sessionToken || (storedSession as any)?.token;
+      if (typeof bearer === 'string' && bearer.trim().length >= 16) {
+        headers['Authorization'] = `Bearer ${bearer.trim()}`;
+      }
+      return headers;
+    };
+
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(targetAllocationProject.id)}/workers`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers: buildWorkforceAuthHeaders(),
+        body: JSON.stringify({
+          workerId: worker.id,
+          action: 'add',
+          allocationSource: source,
+          manualOverrideNote: resolvedOverrideNote || undefined,
+          isLockedByAdmin: shouldLock
+        })
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        console.error('[Workforce Assign] DB sync failed:', res.status, errBody);
+        notify(`Warning: ${worker.name} assigned locally, but DB sync failed (${errBody.error || `HTTP ${res.status}`}).`);
+      }
+    } catch (err) {
+      console.error('[Workforce Assign] Network error:', err);
+      notify(`Warning: ${worker.name} assigned locally, but server sync failed.`);
+    }
 
     if (linkedRec && onApplyAIRecommendation) {
       try {
@@ -660,11 +932,29 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
       dailyRate: getWorkerDailyRate(worker)
     });
 
-    fetch(`/api/projects/${targetAllocationProject.id}/workers`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workerId: worker.id, action: 'remove' })
-    }).catch(() => {});
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const csrf = getCsrfToken();
+      if (csrf) headers['x-csrf-token'] = csrf;
+      const bearer = (storedSession as any)?.sessionToken || (storedSession as any)?.token;
+      if (typeof bearer === 'string' && bearer.trim().length >= 16) {
+        headers['Authorization'] = `Bearer ${bearer.trim()}`;
+      }
+      const res = await fetch(`/api/projects/${encodeURIComponent(targetAllocationProject.id)}/workers`, {
+        method: 'PUT',
+        credentials: 'include',
+        headers,
+        body: JSON.stringify({ workerId: worker.id, action: 'remove' })
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        console.error('[Workforce Unassign] DB sync failed:', res.status, errBody);
+        notify(`Warning: ${worker.name} unassigned locally, but DB sync failed (${errBody.error || `HTTP ${res.status}`}).`);
+      }
+    } catch (err) {
+      console.error('[Workforce Unassign] Network error:', err);
+      notify(`Warning: ${worker.name} unassigned locally, but server sync failed.`);
+    }
 
     setLastAllocationFeedback({
       workerId: worker.id,
@@ -689,6 +979,100 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
     () => localContractors.filter(c => crewSelectedWorkerIds.includes(c.id)),
     [localContractors, crewSelectedWorkerIds]
   );
+
+  // Dynamic Project Trade Requirements & Coverage Strip (driven by per-project configurable requirements)
+  const siteTradeCoverage = useMemo(() => {
+    const counts = new Map<string, number>();
+    activeProjectTradeReqs.forEach(r => counts.set(r.id, 0));
+    assignedCrewWorkers.forEach(w => {
+      const slot = matchWorkerToTradeSlot(w, activeProjectTradeReqs);
+      if (slot) counts.set(slot, (counts.get(slot) || 0) + 1);
+    });
+    const slots = activeProjectTradeReqs.map(req => {
+      const assigned = counts.get(req.id) || 0;
+      return {
+        ...req,
+        assigned,
+        isFilled: assigned >= req.required,
+        missing: Math.max(0, req.required - assigned)
+      };
+    });
+    const filledCount = slots.filter(s => s.isFilled).length;
+    const totalHeadcountRequired = slots.reduce((sum, s) => sum + s.required, 0);
+    const totalHeadcountFilled = slots.reduce((sum, s) => sum + Math.min(s.assigned, s.required), 0);
+    return { slots, filledCount, totalCount: slots.length, totalHeadcountRequired, totalHeadcountFilled };
+  }, [assignedCrewWorkers, activeProjectTradeReqs]);
+
+  // 1-Click Auto-Optimize Crew Plan (highest-scoring non-conflicting candidates for all open headcount slots)
+  const autoOptimizePlan = useMemo(() => {
+    const openSlots = siteTradeCoverage.slots.filter(s => !s.isFilled);
+    const chosenIds = new Set<string>();
+    const proposed: Array<{
+      slotId: string;
+      slotLabel: string;
+      worker: Contractor;
+      rate: number;
+      score: number;
+      matchingAiRec?: AIManpowerRecommendation;
+    }> = [];
+    const unfilledSlots: string[] = [];
+
+    const nonConflictingCandidates = workforceAiCrewSuggestions.filter(item => !item.avail.isOverlapping);
+
+    for (const slot of openSlots) {
+      let filledThisSlot = 0;
+      for (let need = 0; need < slot.missing; need++) {
+        const bestMatch = nonConflictingCandidates.find(
+          c => c.matchedSlotId === slot.id && !chosenIds.has(c.worker.id)
+        );
+        if (bestMatch) {
+          chosenIds.add(bestMatch.worker.id);
+          proposed.push({
+            slotId: slot.id,
+            slotLabel: slot.label,
+            worker: bestMatch.worker,
+            rate: bestMatch.rate,
+            score: bestMatch.score,
+            matchingAiRec: bestMatch.matchingAiRec
+          });
+          filledThisSlot++;
+        }
+      }
+      if (filledThisSlot < slot.missing) {
+        unfilledSlots.push(`${slot.label} (${slot.missing - filledThisSlot} open)`);
+      }
+    }
+
+    const additionalDailyBurn = proposed.reduce((sum, p) => sum + p.rate, 0);
+    const currentDailyBurn = assignedCrewWorkers.reduce((sum, w) => sum + getWorkerDailyRate(w), 0);
+    const projectedDailyBurn = currentDailyBurn + additionalDailyBurn;
+
+    return {
+      proposed,
+      unfilledSlots,
+      additionalDailyBurn,
+      currentDailyBurn,
+      projectedDailyBurn,
+      coverageBefore: `${siteTradeCoverage.totalHeadcountFilled}/${siteTradeCoverage.totalHeadcountRequired}`,
+      coverageAfter: `${siteTradeCoverage.totalHeadcountFilled + proposed.length}/${siteTradeCoverage.totalHeadcountRequired}`
+    };
+  }, [siteTradeCoverage, workforceAiCrewSuggestions, assignedCrewWorkers]);
+
+  const handleConfirmAutoOptimizeDeploy = async () => {
+    if (!targetAllocationProject || autoOptimizePlan.proposed.length === 0) return;
+    setIsDeployingOptimizedCrew(true);
+    try {
+      for (const item of autoOptimizePlan.proposed) {
+        await handleAssignWorkerToProject(item.worker, 'AI', item.matchingAiRec);
+      }
+      setIsOptimizeModalOpen(false);
+      notify(
+        `✓ Auto-Optimized Crew deployed: ${autoOptimizePlan.proposed.length} worker(s) assigned to "${targetAllocationProject.name}" (${autoOptimizePlan.coverageAfter} trade coverage).`
+      );
+    } finally {
+      setIsDeployingOptimizedCrew(false);
+    }
+  };
 
   const unassignedRosterWorkers = useMemo(
     () =>
@@ -901,6 +1285,152 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
 
   const inHouseRatio = liveInHouseAndOutsourced.ratio;
 
+  // Project-Scoped Site Analytics Data (strictly scoped to targetAllocationProject & its assignedCrewWorkers)
+  const pmSiteAnalytics = useMemo(() => {
+    // 1. Trade Coverage (Assigned vs. Required)
+    const coverageChartData = siteTradeCoverage.slots.map(slot => ({
+      trade: slot.label,
+      required: slot.required,
+      assigned: slot.assigned,
+      isFilled: slot.isFilled
+    }));
+
+    // 2. Daily Labor Burn Breakdown by Trade
+    const burnByTradeMap = new Map<string, { trade: string; dailyBurn: number; workers: number }>();
+    assignedCrewWorkers.forEach(w => {
+      const slotId = matchWorkerToTradeSlot(w, activeProjectTradeReqs);
+      const slotLabel = activeProjectTradeReqs.find(r => r.id === slotId)?.label || w.tradeType || w.specialty || 'General Crew';
+      const rate = getWorkerDailyRate(w);
+      const existing = burnByTradeMap.get(slotLabel) || { trade: slotLabel, dailyBurn: 0, workers: 0 };
+      existing.dailyBurn += rate;
+      existing.workers += 1;
+      burnByTradeMap.set(slotLabel, existing);
+    });
+    const burnByTradeData = Array.from(burnByTradeMap.values()).sort((a, b) => b.dailyBurn - a.dailyBurn);
+    const totalDailyBurn = burnByTradeData.reduce((s, r) => s + r.dailyBurn, 0);
+    const projectedWeeklyBurn = totalDailyBurn * 6; // 6-day Philippine construction workweek
+
+    // 3. Crew Deployment Health (Dedicated On-Site vs. Dual-Site Shared/Conflict)
+    let dedicatedCount = 0;
+    let conflictCount = 0;
+    assignedCrewWorkers.forEach(w => {
+      const avail = getWorkerAvailabilityAdvisory(w, targetAllocationProject);
+      if (avail.isOverlapping) conflictCount += 1;
+      else dedicatedCount += 1;
+    });
+    const deploymentHealthData = [
+      { name: 'Dedicated On-Site', value: dedicatedCount, color: '#10b981' },
+      { name: 'Dual-Site Conflict', value: conflictCount, color: '#f59e0b' }
+    ].filter(d => d.value > 0);
+
+    return {
+      coverageChartData,
+      burnByTradeData,
+      totalDailyBurn,
+      projectedWeeklyBurn,
+      dedicatedCount,
+      conflictCount,
+      deploymentHealthData
+    };
+  }, [siteTradeCoverage, assignedCrewWorkers, activeProjectTradeReqs, targetAllocationProject]);
+
+  const siteChartCursor = { fill: isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(15, 23, 42, 0.06)' };
+  const siteChartGridStroke = isDark ? 'rgba(148, 163, 184, 0.14)' : 'rgba(15, 23, 42, 0.08)';
+  const siteChartAxisTick = isDark ? '#94a3b8' : '#475569';
+
+  // High-contrast custom tooltip renderer for all 3 PM Site Analytics charts across Light, Dark & Night modes
+  const renderSiteChartTooltip = (mode: 'coverage' | 'health' | 'burn') => ({ active, payload, label }: any) => {
+    if (!active || !Array.isArray(payload) || payload.length === 0) return null;
+    const containerStyle: React.CSSProperties = isDark
+      ? {
+        backgroundColor: '#111827',
+        border: '1px solid #334155',
+        borderRadius: '10px',
+        padding: '10px 12px',
+        boxShadow: '0 10px 25px rgba(0, 0, 0, 0.45)',
+        color: '#F8FAFC',
+        fontSize: '12px',
+        minWidth: '175px'
+      }
+      : {
+        backgroundColor: '#FFFFFF',
+        border: '1px solid #CBD5E1',
+        borderRadius: '10px',
+        padding: '10px 12px',
+        boxShadow: '0 8px 20px rgba(15, 23, 42, 0.1)',
+        color: '#0F172A',
+        fontSize: '12px',
+        minWidth: '175px'
+      };
+    const titleColor = isDark ? '#F8FAFC' : '#0F172A';
+    const labelColor = isDark ? '#CBD5E1' : '#475569';
+    const valueColor = isDark ? '#F8FAFC' : '#0F172A';
+    const emeraldColor = isDark ? '#34D399' : '#059669';
+    const amberColor = isDark ? '#FBBF24' : '#D97706';
+    const tealColor = isDark ? '#2DD4BF' : '#0D9488';
+
+    if (mode === 'coverage') {
+      const row = payload[0]?.payload;
+      const isFilled = Boolean(row?.isFilled);
+      return (
+        <div style={containerStyle}>
+          <div style={{ color: titleColor, fontWeight: 700, marginBottom: '6px' }}>{label || row?.trade}</div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '14px', marginBottom: '3px' }}>
+            <span style={{ color: labelColor }}>Required Target</span>
+            <span style={{ color: valueColor, fontWeight: 700, fontFamily: 'monospace' }}>{row?.required ?? 0}</span>
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '14px' }}>
+            <span style={{ color: labelColor }}>Assigned On-Site</span>
+            <span style={{ color: isFilled ? emeraldColor : amberColor, fontWeight: 700, fontFamily: 'monospace' }}>
+              {row?.assigned ?? 0} {isFilled ? '(Filled)' : '(Shortfall)'}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    if (mode === 'health') {
+      const item = payload[0];
+      const name = String(item?.name || '');
+      const isConflict = name.toLowerCase().includes('conflict');
+      return (
+        <div style={containerStyle}>
+          <div style={{ color: isConflict ? amberColor : emeraldColor, fontWeight: 700, marginBottom: '4px' }}>
+            {name}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '14px' }}>
+            <span style={{ color: labelColor }}>Assigned Crew</span>
+            <span style={{ color: valueColor, fontWeight: 700, fontFamily: 'monospace' }}>
+              {item?.value ?? 0} worker{Number(item?.value) === 1 ? '' : 's'}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    // mode === 'burn'
+    const row = payload[0]?.payload;
+    const workersCount = Number(row?.workers || 0);
+    const dailyVal = Number(row?.dailyBurn || 0);
+    return (
+      <div style={containerStyle}>
+        <div style={{ color: titleColor, fontWeight: 700, marginBottom: '6px' }}>{label || row?.trade}</div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '14px', marginBottom: '3px' }}>
+          <span style={{ color: labelColor }}>Daily Burn</span>
+          <span style={{ color: tealColor, fontWeight: 700, fontFamily: 'monospace' }}>
+            ₱{dailyVal.toLocaleString()}/day
+          </span>
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'space-between', gap: '14px' }}>
+          <span style={{ color: labelColor }}>Headcount</span>
+          <span style={{ color: valueColor, fontWeight: 700, fontFamily: 'monospace' }}>
+            {workersCount} worker{workersCount === 1 ? '' : 's'}
+          </span>
+        </div>
+      </div>
+    );
+  };
+
   const isDedicatedAuditView = hideTabs;
 
   return (
@@ -944,24 +1474,24 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                   key={tab.id}
                   onClick={() => setActiveSubTab(tab.id)}
                   className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-semibold font-mono transition-all cursor-pointer whitespace-nowrap ${isActive
-                      ? isDark
-                        ? 'bg-teal-500/15 text-teal-300 border border-teal-500/30 shadow-xs'
-                        : 'bg-slate-900 text-white shadow-xs border border-slate-900'
-                      : isDark
-                        ? 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-transparent'
+                    ? isDark
+                      ? 'bg-teal-500/15 text-teal-300 border border-teal-500/30 shadow-xs'
+                      : 'bg-slate-900 text-white shadow-xs border border-slate-900'
+                    : isDark
+                      ? 'text-slate-400 hover:text-white hover:bg-slate-900 border border-transparent'
+                      : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-transparent'
                     }`}
                 >
                   <IconComponent className={`w-4 h-4 ${isActive ? (isDark ? 'text-teal-400' : 'text-amber-400') : (isDark ? 'text-slate-400' : 'text-slate-500')}`} />
                   <span>{tab.label}</span>
                   {count !== undefined && (
                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${isActive
-                        ? isDark
-                          ? 'bg-teal-500/25 text-teal-200'
-                          : 'bg-slate-800 text-slate-200'
-                        : isDark
-                          ? 'bg-slate-800 text-slate-400'
-                          : 'bg-slate-200 text-slate-700'
+                      ? isDark
+                        ? 'bg-teal-500/25 text-teal-200'
+                        : 'bg-slate-800 text-slate-200'
+                      : isDark
+                        ? 'bg-slate-800 text-slate-400'
+                        : 'bg-slate-200 text-slate-700'
                       }`}>
                       {count}
                     </span>
@@ -1047,11 +1577,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                 {/* Subtle Inline Micro-Feedback Confirmation Pill */}
                 {lastAllocationFeedback && (
                   <div
-                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium animate-fadeIn shrink-0 whitespace-nowrap ${
-                      lastAllocationFeedback.action === 'assigned'
-                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                        : 'bg-slate-800/80 border-slate-700 text-slate-300'
-                    }`}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border text-[11px] font-medium animate-fadeIn shrink-0 whitespace-nowrap ${lastAllocationFeedback.action === 'assigned'
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                      : 'bg-slate-800/80 border-slate-700 text-slate-300'
+                      }`}
                   >
                     <CheckCircle className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                     <span>
@@ -1088,11 +1617,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                 </div>
 
                 <div
-                  className={`rounded-xl px-3.5 py-2 border ${
-                    workbenchLaborBurn.isHighBurn
-                      ? 'bg-amber-950/25 border-amber-500/30'
-                      : 'bg-slate-900/60 border-slate-800/80'
-                  }`}
+                  className={`rounded-xl px-3.5 py-2 border ${workbenchLaborBurn.isHighBurn
+                    ? 'bg-amber-950/25 border-amber-500/30'
+                    : 'bg-slate-900/60 border-slate-800/80'
+                    }`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[10px] font-mono uppercase text-slate-400 whitespace-nowrap">
@@ -1100,11 +1628,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                     </span>
                     {workbenchLaborBurn.contractBudget > 0 && (
                       <span
-                        className={`px-2 py-0.5 rounded-md text-[11px] font-medium whitespace-nowrap ${
-                          workbenchLaborBurn.isHighBurn
-                            ? 'bg-amber-500/15 text-amber-300'
-                            : 'bg-emerald-500/15 text-emerald-300'
-                        }`}
+                        className={`px-2 py-0.5 rounded-md text-[11px] font-medium whitespace-nowrap ${workbenchLaborBurn.isHighBurn
+                          ? 'bg-amber-500/15 text-amber-300'
+                          : 'bg-emerald-500/15 text-emerald-300'
+                          }`}
                       >
                         {workbenchLaborBurn.burnPct}%
                       </span>
@@ -1115,6 +1642,52 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                     <span className="text-xs text-slate-400 font-normal">/day</span>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            {/* Project Trade Requirements & Coverage Strip */}
+            <div className="bg-slate-900/70 border border-slate-800/90 rounded-xl px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                <HardHat className="w-4 h-4 text-amber-400" />
+                <span className="text-xs font-bold text-white">Site Trade Coverage</span>
+                <span className={`px-2 py-0.5 rounded-md text-[11px] font-mono font-semibold border ${siteTradeCoverage.filledCount === siteTradeCoverage.totalCount
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  }`}>
+                  {siteTradeCoverage.totalHeadcountFilled}/{siteTradeCoverage.totalHeadcountRequired} Filled
+                </span>
+                <button
+                  type="button"
+                  onClick={handleOpenEditReqsModal}
+                  disabled={!targetAllocationProject}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-medium transition cursor-pointer flex items-center gap-1"
+                  title="Customize required trades and headcount for this project"
+                >
+                  <Sliders className="w-3 h-3 text-amber-400" />
+                  <span>Edit Requirements</span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {siteTradeCoverage.slots.map(slot => (
+                  <div
+                    key={slot.id}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-medium border flex items-center gap-1.5 transition-colors ${slot.isFilled
+                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                      : 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                      }`}
+                  >
+                    {slot.isFilled ? (
+                      <CheckCircle className="w-3 h-3 text-emerald-400 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-3 h-3 text-amber-400 shrink-0" />
+                    )}
+                    <span>{slot.label} ({slot.assigned}/{slot.required})</span>
+                    <span className={`text-[10px] uppercase font-bold ${slot.isFilled ? 'text-emerald-400' : 'text-amber-400'}`}>
+                      • {slot.isFilled ? 'Filled' : 'Missing'}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
 
@@ -1183,9 +1756,8 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                         return (
                           <div
                             key={worker.id}
-                            className={`bg-slate-900/60 hover:bg-slate-900 border border-slate-800/80 rounded-xl p-3.5 transition space-y-2.5 overflow-hidden ${
-                              isJustAssigned ? 'ring-1 ring-emerald-500/40 bg-emerald-950/15' : ''
-                            }`}
+                            className={`bg-slate-900/60 hover:bg-slate-900 border border-slate-800/80 rounded-xl p-3.5 transition space-y-2.5 overflow-hidden ${isJustAssigned ? 'ring-1 ring-emerald-500/40 bg-emerald-950/15' : ''
+                              }`}
                           >
                             <div className="flex items-center justify-between gap-2 flex-wrap">
                               {/* Primary & Secondary Typography */}
@@ -1197,11 +1769,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                                     </span>
                                     <span
                                       title={avail.badgeText}
-                                      className={`px-2 py-0.5 rounded-md text-[11px] font-medium border truncate max-w-[200px] sm:max-w-xs ${
-                                        avail.isOverlapping
-                                          ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                                          : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                                      }`}
+                                      className={`px-2 py-0.5 rounded-md text-[11px] font-medium border truncate max-w-[200px] sm:max-w-xs ${avail.isOverlapping
+                                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                                        : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                                        }`}
                                     >
                                       {avail.badgeText}
                                     </span>
@@ -1252,11 +1823,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                                     setActiveWorkforceNoteEditorId(prev => (prev === worker.id ? null : worker.id));
                                   }}
                                   title={isLocked ? 'Locked by Admin (isLockedByAdmin). AI skips this worker.' : 'Lock assignment or add override note'}
-                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${
-                                    isLocked
-                                      ? 'bg-rose-500/10 border-rose-500/40 text-rose-300'
-                                      : 'bg-slate-950/70 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-white'
-                                  }`}
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border flex items-center gap-1.5 transition cursor-pointer whitespace-nowrap ${isLocked
+                                    ? 'bg-rose-500/10 border-rose-500/40 text-rose-300'
+                                    : 'bg-slate-950/70 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-white'
+                                    }`}
                                 >
                                   <Lock className="w-3 h-3" />
                                   <span>{isLocked ? 'Locked' : 'Lock'}</span>
@@ -1297,11 +1867,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                                       type="button"
                                       title={preset}
                                       onClick={() => handleUpdateWorkforceOverrideNote(worker, preset)}
-                                      className={`px-2 py-0.5 rounded-md text-[10px] font-medium border transition cursor-pointer truncate max-w-[200px] sm:max-w-xs ${
-                                        overrideNote === preset
-                                          ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
-                                          : 'bg-slate-950/60 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-slate-200'
-                                      }`}
+                                      className={`px-2 py-0.5 rounded-md text-[10px] font-medium border transition cursor-pointer truncate max-w-[200px] sm:max-w-xs ${overrideNote === preset
+                                        ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                                        : 'bg-slate-950/60 hover:bg-slate-800 border-slate-800 text-slate-400 hover:text-slate-200'
+                                        }`}
                                     >
                                       {preset}
                                     </button>
@@ -1360,11 +1929,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                                 </span>
                                 <span
                                   title={avail.badgeText}
-                                  className={`px-2 py-0.5 rounded-md text-[11px] font-medium border truncate max-w-[200px] sm:max-w-xs ${
-                                    avail.isOverlapping
-                                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                                      : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                                  }`}
+                                  className={`px-2 py-0.5 rounded-md text-[11px] font-medium border truncate max-w-[200px] sm:max-w-xs ${avail.isOverlapping
+                                    ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                                    : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                                    }`}
                                 >
                                   {avail.badgeText}
                                 </span>
@@ -1381,40 +1949,16 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                             </div>
 
                             <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                              {avail.isOverlapping && (
-                                <select
-                                  value={selectedConflictReason}
-                                  onChange={(e) =>
-                                    setPoolPendingOverrideReasons(prev => ({
-                                      ...prev,
-                                      [worker.id]: e.target.value
-                                    }))
-                                  }
-                                  title="Non-blocking conflict override reason (saved to audit trail & sets isLockedByAdmin)"
-                                  className="bg-slate-950 border border-amber-500/30 rounded-lg px-2 py-1 text-[11px] text-amber-200 focus:outline-none cursor-pointer truncate max-w-[200px] sm:max-w-xs"
-                                >
-                                  {OVERRIDE_REASON_PRESETS.map(preset => (
-                                    <option key={preset} value={preset}>
-                                      {preset}
-                                    </option>
-                                  ))}
-                                </select>
-                              )}
-
                               <button
                                 type="button"
-                                onClick={() =>
-                                  handleAssignWorkerToProject(
-                                    worker,
-                                    'Manual',
-                                    undefined,
-                                    avail.isOverlapping ? selectedConflictReason : undefined
-                                  )
-                                }
-                                className="px-3 py-1.5 rounded-lg bg-teal-500/15 hover:bg-teal-600 text-teal-300 hover:text-white border border-teal-500/30 text-xs font-medium transition cursor-pointer shrink-0 flex items-center gap-1.5 whitespace-nowrap"
+                                onClick={() => requestAssignWorker(worker, 'Manual')}
+                                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition cursor-pointer shrink-0 flex items-center gap-1.5 whitespace-nowrap border ${avail.isOverlapping
+                                  ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border-amber-500/30'
+                                  : 'bg-teal-500/15 hover:bg-teal-600 text-teal-300 hover:text-white border-teal-500/30'
+                                  }`}
                               >
                                 <Plus className="w-3.5 h-3.5" />
-                                <span>Assign</span>
+                                <span>{avail.isOverlapping ? 'Override & Assign' : 'Assign'}</span>
                               </button>
                             </div>
                           </div>
@@ -1482,13 +2026,12 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                               <td className="py-2.5 px-3 align-top space-y-1">
                                 <div className="flex items-center gap-1.5 flex-wrap">
                                   <span
-                                    className={`px-2 py-0.5 rounded-md text-[11px] font-medium border whitespace-nowrap ${
-                                      entry.action === 'Conflict Override'
-                                        ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
-                                        : entry.action === 'Unassigned'
-                                          ? 'bg-slate-800 border-slate-700 text-slate-300'
-                                          : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                                    }`}
+                                    className={`px-2 py-0.5 rounded-md text-[11px] font-medium border whitespace-nowrap ${entry.action === 'Conflict Override'
+                                      ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+                                      : entry.action === 'Unassigned'
+                                        ? 'bg-slate-800 border-slate-700 text-slate-300'
+                                        : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                                      }`}
                                   >
                                     {entry.action}
                                   </span>
@@ -1523,90 +2066,10 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                 </div>
               </div>
 
-              {/* RIGHT COLUMN: Sticky AI Crew Assistant & Quick Add */}
+              {/* RIGHT COLUMN: Sticky AI Crew Assistant */}
               <div className="lg:col-span-5 sticky top-6 self-start space-y-4">
-                {/* Quick Manual Add Card */}
-                <div className="bg-slate-900/60 border border-slate-800/80 rounded-xl p-3.5 space-y-2.5 overflow-hidden">
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <span className="text-sm font-semibold text-white flex items-center gap-1.5">
-                      <Plus className="w-4 h-4 text-teal-400" />
-                      <span>Quick Manual Assign</span>
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between gap-2 flex-wrap sm:flex-nowrap">
-                    <select
-                      value={quickAddWorkerId}
-                      onChange={(e) => setQuickAddWorkerId(e.target.value)}
-                      className="flex-1 min-w-0 bg-slate-950 border border-slate-800 focus:border-teal-500 rounded-xl px-3 py-2 text-xs text-white focus:outline-none cursor-pointer truncate"
-                    >
-                      <option value="">Select worker from roster...</option>
-                      {localContractors
-                        .filter(c => !crewSelectedWorkerIds.includes(c.id))
-                        .map(c => {
-                          const avail = getWorkerAvailabilityAdvisory(c, targetAllocationProject);
-                          const displayName = c.name.length > 36 ? `${c.name.slice(0, 36)}…` : c.name;
-                          return (
-                            <option key={c.id} value={c.id} title={c.name}>
-                              {displayName} — {c.tradeType || c.specialty || 'Artisan'} (₱{getWorkerDailyRate(c).toLocaleString()}/day • {avail.isOverlapping ? `Active on ${avail.overlappingProjects[0]}` : 'Available'})
-                            </option>
-                          );
-                        })}
-                    </select>
-                    <button
-                      type="button"
-                      disabled={!quickAddWorkerId}
-                      onClick={() => {
-                        const chosen = localContractors.find(c => c.id === quickAddWorkerId);
-                        if (chosen) {
-                          const avail = getWorkerAvailabilityAdvisory(chosen, targetAllocationProject);
-                          handleAssignWorkerToProject(
-                            chosen,
-                            'Manual',
-                            undefined,
-                            avail.isOverlapping ? quickAddOverrideReason : undefined
-                          );
-                          setQuickAddWorkerId('');
-                        }
-                      }}
-                      className="px-3.5 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:opacity-40 text-white text-xs font-semibold transition cursor-pointer shrink-0 flex items-center gap-1.5 whitespace-nowrap"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>Assign</span>
-                    </button>
-                  </div>
-
-                  {/* If selected quick-add worker has an active schedule conflict, offer non-blocking override reason */}
-                  {(() => {
-                    const chosen = localContractors.find(c => c.id === quickAddWorkerId);
-                    if (!chosen) return null;
-                    const avail = getWorkerAvailabilityAdvisory(chosen, targetAllocationProject);
-                    if (!avail.isOverlapping) return null;
-                    return (
-                      <div className="flex items-center justify-between gap-2 flex-wrap pt-1 text-xs">
-                        <span
-                          title={avail.badgeText}
-                          className="text-amber-300 text-[11px] truncate max-w-[200px] sm:max-w-xs"
-                        >
-                          {avail.badgeText}:
-                        </span>
-                        <select
-                          value={quickAddOverrideReason}
-                          onChange={(e) => setQuickAddOverrideReason(e.target.value)}
-                          className="flex-1 min-w-[160px] bg-slate-950 border border-amber-500/30 rounded-lg px-2.5 py-1 text-[11px] text-amber-200 focus:outline-none cursor-pointer truncate max-w-[200px] sm:max-w-xs"
-                        >
-                          {OVERRIDE_REASON_PRESETS.map(preset => (
-                            <option key={preset} value={preset}>
-                              {preset}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    );
-                  })()}
-                </div>
-
                 {/* Dedicated AI Assistant Sidebar Card */}
-                <div className="border border-amber-500/30 bg-gradient-to-b from-slate-900 to-slate-950 rounded-2xl overflow-hidden shadow-lg">
+                <div className="bg-slate-900 border border-slate-700/60 rounded-2xl overflow-hidden shadow-sm">
                   <div className="p-4 flex items-center justify-between gap-2 flex-wrap border-b border-slate-800/80">
                     <div className="flex items-center gap-2.5 min-w-0">
                       <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-400 shrink-0">
@@ -1614,8 +2077,8 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                       </div>
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <h5 className="text-sm font-semibold text-white">✨ AI Crew Assistant</h5>
-                          <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-500/15 border border-amber-500/30 text-amber-300 whitespace-nowrap">
+                          <h5 className="text-sm font-semibold text-white">AI Crew Assistant</h5>
+                          <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-800/80 border border-slate-700/70 text-slate-300 whitespace-nowrap">
                             {workforceAiCrewSuggestions.length} Matches
                           </span>
                         </div>
@@ -1625,21 +2088,39 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-1.5 shrink-0">
+                    <div className="flex items-center gap-1.5 shrink-0 flex-wrap">
                       <button
                         type="button"
-                        onClick={() => {
-                          setDismissedWorkforceStagedIds([]);
-                          setIsAiAssistantOpen(true);
-                          handleTriggerAiScan();
-                        }}
-                        disabled={isAiScanning}
-                        className="px-2.5 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer flex items-center gap-1.5 whitespace-nowrap"
-                        title="Refresh multi-skill AI recommendations"
+                        onClick={() => setIsOptimizeModalOpen(true)}
+                        disabled={!targetAllocationProject || siteTradeCoverage.filledCount === siteTradeCoverage.totalCount}
+                        className="px-2.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 text-xs font-bold transition cursor-pointer flex items-center gap-1.5 whitespace-nowrap shadow-xs"
+                        title="Select highest-scoring non-conflicting candidates for all open trade slots"
                       >
-                        <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${isAiScanning ? 'animate-spin' : ''}`} />
-                        <span>{isAiScanning ? 'Scanning...' : 'Scan'}</span>
+                        <Zap className="w-3.5 h-3.5" />
+                        <span>Auto-Optimize Crew</span>
                       </button>
+
+                      {(() => {
+                        const showScanning = isAiScanning && workforceAiCrewSuggestions.length > 0;
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setDismissedWorkforceStagedIds([]);
+                              setIsAiAssistantOpen(true);
+                              if (localContractors.some(c => !crewSelectedWorkerIds.includes(c.id))) {
+                                handleTriggerAiScan();
+                              }
+                            }}
+                            disabled={showScanning}
+                            className="px-2.5 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer flex items-center gap-1.5 whitespace-nowrap"
+                            title="Refresh multi-skill AI recommendations"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 text-amber-400 ${showScanning ? 'animate-spin' : ''}`} />
+                            <span>{showScanning ? 'Scanning...' : 'Scan'}</span>
+                          </button>
+                        );
+                      })()}
 
                       <button
                         type="button"
@@ -1663,22 +2144,20 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                           <button
                             type="button"
                             onClick={() => setAiSortMode('match')}
-                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition cursor-pointer whitespace-nowrap ${
-                              aiSortMode === 'match'
-                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                                : 'text-slate-400 hover:text-slate-200 border border-transparent'
-                            }`}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition cursor-pointer whitespace-nowrap ${aiSortMode === 'match'
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                              : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                              }`}
                           >
                             Highest Match
                           </button>
                           <button
                             type="button"
                             onClick={() => setAiSortMode('cost')}
-                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition cursor-pointer whitespace-nowrap ${
-                              aiSortMode === 'cost'
-                                ? 'bg-teal-500/20 text-teal-300 border border-teal-500/30'
-                                : 'text-slate-400 hover:text-slate-200 border border-transparent'
-                            }`}
+                            className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition cursor-pointer whitespace-nowrap ${aiSortMode === 'cost'
+                              ? 'bg-teal-500/20 text-teal-300 border border-teal-500/30'
+                              : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                              }`}
                           >
                             Lowest Cost (₱/day)
                           </button>
@@ -1693,97 +2172,368 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                       )}
 
                       {workforceAiCrewSuggestions.length === 0 ? (
-                        <div className="py-8 px-4 text-center text-xs text-slate-400 space-y-2 border-2 border-dashed border-slate-800/80 rounded-xl bg-slate-900/30">
+                        <div className="py-8 px-4 text-center text-xs text-slate-400 space-y-2 border border-dashed border-slate-800 rounded-xl bg-slate-950/70">
                           <Bot className="w-6 h-6 text-amber-400/80 mx-auto" />
                           <div className="text-sm font-semibold text-white">All optimal candidates are assigned</div>
                           <button
                             type="button"
                             onClick={() => setDismissedWorkforceStagedIds([])}
-                            className="text-xs text-amber-300 hover:text-amber-200 underline cursor-pointer"
+                            className="text-xs text-slate-300 hover:text-amber-300 underline cursor-pointer transition-colors"
                           >
                             Reset dismissed suggestions
                           </button>
                         </div>
                       ) : (
                         <div className="space-y-3">
-                          {workforceAiCrewSuggestions.map(({ worker, rate, avail, score, matchingAiRec, fourFactorBreakdown, rationale }) => (
-                            <div
-                              key={worker.id}
-                              className="bg-slate-900/60 hover:bg-slate-900 border border-slate-800/80 rounded-xl p-3.5 transition space-y-2.5 overflow-hidden"
-                            >
-                              {/* Top Row: Primary Name, Secondary Metadata, Score Pill */}
-                              <div className="flex items-center justify-between gap-2 flex-wrap">
-                                <div className="min-w-0 flex-1 space-y-1">
-                                  <div className="flex items-center gap-2 flex-wrap">
-                                    <span title={worker.name} className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
-                                      {worker.name}
-                                    </span>
-                                    <span
-                                      title={avail.badgeText}
-                                      className={`px-2 py-0.5 rounded-md text-[11px] font-medium border truncate max-w-[200px] sm:max-w-xs ${
-                                        avail.isOverlapping
+                          {workforceAiCrewSuggestions.map(({ worker, rate, avail, score, matchingAiRec, matchedSlotLabel, fillsOpenSlot, breakdown, fourFactorBreakdown, rationale }) => {
+                            const isWhyOpen = Boolean(expandedScoreCardIds[worker.id]);
+                            return (
+                              <div
+                                key={worker.id}
+                                className="bg-slate-950/60 hover:bg-slate-950/90 border border-slate-800/90 rounded-xl p-3.5 transition space-y-2.5 overflow-hidden"
+                              >
+                                {/* Top Row: Primary Name, Secondary Metadata, Score Pill */}
+                                <div className="flex items-center justify-between gap-2 flex-wrap">
+                                  <div className="min-w-0 flex-1 space-y-1">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span title={worker.name} className="text-sm font-semibold text-white truncate max-w-[200px] sm:max-w-xs">
+                                        {worker.name}
+                                      </span>
+                                      <span
+                                        title={avail.badgeText}
+                                        className={`px-2 py-0.5 rounded-md text-[11px] font-medium border truncate max-w-[200px] sm:max-w-xs ${avail.isOverlapping
                                           ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
                                           : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                                      }`}
-                                    >
-                                      {avail.badgeText}
-                                    </span>
+                                          }`}
+                                      >
+                                        {avail.badgeText}
+                                      </span>
+                                    </div>
+                                    <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap">
+                                      <span className="truncate max-w-[200px] sm:max-w-xs">
+                                        {worker.tradeType || worker.specialty || 'General Trade'}
+                                      </span>
+                                      <span>•</span>
+                                      <span className="whitespace-nowrap font-mono text-slate-300">
+                                        ₱{rate.toLocaleString()}/day
+                                      </span>
+                                      {fillsOpenSlot && (
+                                        <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-300 border border-emerald-500/25">
+                                          Fills {matchedSlotLabel}
+                                        </span>
+                                      )}
+                                    </div>
                                   </div>
-                                  <div className="text-xs text-slate-400 flex items-center gap-2 flex-wrap">
-                                    <span className="truncate max-w-[200px] sm:max-w-xs">
-                                      {worker.tradeType || worker.specialty || 'General Trade'}
+
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <span
+                                      title={fourFactorBreakdown}
+                                      className={`px-2 py-0.5 rounded-md text-[11px] font-mono font-bold border whitespace-nowrap cursor-help ${score >= 80
+                                        ? 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300'
+                                        : score >= 60
+                                          ? 'bg-amber-500/15 border-amber-500/35 text-amber-300'
+                                          : 'bg-slate-800 border-slate-700 text-slate-300'
+                                        }`}
+                                    >
+                                      {Math.round(score)}% Match
                                     </span>
-                                    <span>•</span>
-                                    <span className="whitespace-nowrap font-mono text-slate-300">
-                                      ₱{rate.toLocaleString()}/day
-                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDismissWorkforceStagedSuggestion(worker.id)}
+                                      className="p-1 rounded-md text-slate-500 hover:text-slate-300 hover:bg-slate-800/60 transition cursor-pointer"
+                                      title="Dismiss suggestion"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
                                   </div>
                                 </div>
 
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-amber-500/15 border border-amber-500/30 text-amber-300 whitespace-nowrap">
-                                    {score} / 100 Match
-                                  </span>
+                                {/* Concise Rationale + Why This Score Toggle + Secondary Apply Action */}
+                                <div className="flex items-center justify-between gap-2 pt-0.5 flex-wrap">
+                                  <div className="min-w-0 flex-1 space-y-1">
+                                    <p className="text-xs text-slate-400 leading-relaxed line-clamp-1">
+                                      {rationale}
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        setExpandedScoreCardIds(prev => ({ ...prev, [worker.id]: !prev[worker.id] }))
+                                      }
+                                      className="text-[11px] font-mono text-amber-400/90 hover:text-amber-300 flex items-center gap-1 cursor-pointer transition"
+                                    >
+                                      <span>Why this score?</span>
+                                      <ChevronDown className={`w-3 h-3 transition-transform ${isWhyOpen ? 'rotate-180' : ''}`} />
+                                    </button>
+                                  </div>
+
                                   <button
                                     type="button"
-                                    onClick={() => handleDismissWorkforceStagedSuggestion(worker.id)}
-                                    className="p-1 rounded-md text-slate-500 hover:text-slate-300 hover:bg-slate-800/60 transition cursor-pointer"
-                                    title="Dismiss suggestion"
+                                    onClick={() => requestAssignWorker(worker, 'AI', matchingAiRec)}
+                                    className="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:border-amber-400/60 font-semibold text-xs transition cursor-pointer flex items-center gap-1.5 shrink-0 whitespace-nowrap"
                                   >
-                                    <X className="w-3.5 h-3.5" />
+                                    <Check className="w-3.5 h-3.5 stroke-[2.2]" />
+                                    <span>Apply</span>
                                   </button>
                                 </div>
-                              </div>
 
-                              {/* Clean & Compact 4-Factor Breakdown + Rationale */}
-                              <div className="bg-slate-950/60 border border-slate-800/70 rounded-lg px-3 py-2 space-y-1">
-                                <div className="text-[11px] font-mono text-slate-400">
-                                  {fourFactorBreakdown}
-                                </div>
-                                <p className="text-xs text-slate-300 leading-relaxed">
-                                  {rationale}
-                                </p>
+                                {/* Collapsible Explainable AI 4-Factor Mini Progress Bars */}
+                                {isWhyOpen && (
+                                  <div className="pt-2.5 mt-1 border-t border-slate-800/80 space-y-2 animate-fadeIn">
+                                    {[
+                                      { label: 'Trade Match', val: breakdown.tradeScore, max: 40, bar: 'bg-amber-400' },
+                                      { label: 'Availability / Zero-Conflict', val: breakdown.availabilityScore, max: 30, bar: avail.isOverlapping ? 'bg-rose-400' : 'bg-emerald-400' },
+                                      { label: 'Budget Efficiency', val: breakdown.budgetScore, max: 20, bar: 'bg-teal-400' },
+                                      { label: `Reliability / Rating (${breakdown.numericRating.toFixed(1)}★)`, val: breakdown.ratingScore, max: 10, bar: 'bg-sky-400' }
+                                    ].map(factor => (
+                                      <div key={factor.label} className="space-y-1">
+                                        <div className="flex items-center justify-between text-[11px] font-mono">
+                                          <span className="text-slate-400">{factor.label}</span>
+                                          <span className="text-slate-200 font-semibold">{factor.val}/{factor.max} pts</span>
+                                        </div>
+                                        <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                                          <div
+                                            className={`h-full rounded-full ${factor.bar}`}
+                                            style={{ width: `${Math.round((factor.val / factor.max) * 100)}%` }}
+                                          />
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
-
-                              {/* Action Footer */}
-                              <div className="flex items-center justify-end gap-2 pt-0.5">
-                                <button
-                                  type="button"
-                                  onClick={() => handleAssignWorkerToProject(worker, 'AI', matchingAiRec)}
-                                  className="px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold text-xs transition cursor-pointer flex items-center gap-1.5 shadow-xs whitespace-nowrap"
-                                >
-                                  <Check className="w-3.5 h-3.5 stroke-[2.5]" />
-                                  <span>Apply Recommendation</span>
-                                </button>
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
                   )}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ------------------------------------------------------------- */}
+      {/* PM PROJECT-SCOPED SITE ANALYTICS TAB                          */}
+      {/* ------------------------------------------------------------- */}
+      {activeSubTab === 'site-analytics' && (
+        <div className="space-y-5 animate-fadeIn">
+          {/* Site Scope Selector & Summary Header */}
+          <div className="bg-slate-900/70 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="p-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-amber-400">
+                <PieChart className="w-4 h-4" />
+              </div>
+              <div>
+                <h4 className="text-sm font-bold text-white">
+                  Site Analytics — {targetAllocationProject?.name || 'Selected Project'}
+                </h4>
+                <p className="text-xs text-slate-400">
+                  Project-scoped crew coverage, daily labor burn by trade, and deployment conflict health
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <select
+                value={targetAllocationProject?.id || ''}
+                onChange={(e) => setSelectedWorkbenchProjectId(e.target.value)}
+                className="bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-3 py-1.5 text-xs font-semibold text-white focus:outline-none cursor-pointer"
+              >
+                {projects.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={handleOpenEditReqsModal}
+                disabled={!targetAllocationProject}
+                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-medium transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Sliders className="w-3.5 h-3.5 text-amber-400" />
+                <span>Edit Requirements</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 3-Card Project-Scoped Analytics Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* CHART 1: Trade Coverage (Assigned vs. Required) */}
+            <div className="lg:col-span-7 bg-slate-900/70 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between space-y-4">
+              <div className="flex items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
+                <div>
+                  <h5 className="text-sm font-bold text-white flex items-center gap-2">
+                    <HardHat className="w-4 h-4 text-amber-400" />
+                    <span>Trade Coverage (Assigned vs. Required)</span>
+                  </h5>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Target headcount from Site Trade Requirements vs. currently assigned workers
+                  </p>
+                </div>
+                <span className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold border shrink-0 ${siteTradeCoverage.totalHeadcountFilled >= siteTradeCoverage.totalHeadcountRequired
+                  ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                  : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                  }`}>
+                  {siteTradeCoverage.totalHeadcountFilled}/{siteTradeCoverage.totalHeadcountRequired} Filled
+                </span>
+              </div>
+
+              <div className="h-64 w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <ReBarChart
+                    data={pmSiteAnalytics.coverageChartData}
+                    layout="vertical"
+                    margin={{ top: 4, right: 20, left: 10, bottom: 4 }}
+                  >
+                    <CartesianGrid strokeDasharray="3 3" stroke={siteChartGridStroke} horizontal={false} />
+                    <XAxis type="number" allowDecimals={false} tick={{ fill: siteChartAxisTick, fontSize: 11 }} axisLine={false} tickLine={false} />
+                    <YAxis type="category" dataKey="trade" width={105} tick={{ fill: siteChartAxisTick, fontSize: 11 }} axisLine={false} tickLine={false} />
+                    <Tooltip
+                      cursor={siteChartCursor}
+                      content={renderSiteChartTooltip('coverage')}
+                    />
+                    <Bar dataKey="required" name="required" fill="#475569" radius={[0, 4, 4, 0]} barSize={12} />
+                    <Bar dataKey="assigned" name="assigned" radius={[0, 4, 4, 0]} barSize={12}>
+                      {pmSiteAnalytics.coverageChartData.map((entry, idx) => (
+                        <Cell key={`cov-${idx}`} fill={entry.isFilled ? '#10b981' : '#f59e0b'} />
+                      ))}
+                    </Bar>
+                  </ReBarChart>
+                </ResponsiveContainer>
+              </div>
+
+              <div className="flex items-center gap-4 text-[11px] font-mono text-slate-400 pt-1">
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-xs bg-slate-600 inline-block" />Required</span>
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-xs bg-emerald-500 inline-block" />Assigned (Filled)</span>
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-xs bg-amber-500 inline-block" />Assigned (Shortfall)</span>
+              </div>
+            </div>
+
+            {/* CHART 3: Crew Deployment Health Donut */}
+            <div className="lg:col-span-5 bg-slate-900/70 border border-slate-800 rounded-2xl p-5 flex flex-col justify-between space-y-4">
+              <div className="border-b border-slate-800/80 pb-3">
+                <h5 className="text-sm font-bold text-white flex items-center gap-2">
+                  <UserCheck className="w-4 h-4 text-emerald-400" />
+                  <span>Crew Deployment Health</span>
+                </h5>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Dedicated On-Site vs. Dual-Site Shared / Conflict workers
+                </p>
+              </div>
+
+              {assignedCrewWorkers.length === 0 ? (
+                <div className="h-56 flex flex-col items-center justify-center text-center text-xs text-slate-400 space-y-1.5">
+                  <Users className="w-7 h-7 text-slate-600" />
+                  <div className="font-semibold text-white">No Workers Assigned Yet</div>
+                  <p>Assign crew members in Dispatch Workbench to view deployment health.</p>
+                </div>
+              ) : (
+                <div className="relative h-56 w-full flex items-center justify-center">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <RePieChart>
+                      <Pie
+                        data={pmSiteAnalytics.deploymentHealthData}
+                        dataKey="value"
+                        nameKey="name"
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={56}
+                        outerRadius={82}
+                        paddingAngle={pmSiteAnalytics.deploymentHealthData.length > 1 ? 4 : 0}
+                        stroke="none"
+                      >
+                        {pmSiteAnalytics.deploymentHealthData.map((entry, idx) => (
+                          <Cell key={`health-${idx}`} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip content={renderSiteChartTooltip('health')} />
+                    </RePieChart>
+                  </ResponsiveContainer>
+                  <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                    <span className="text-2xl font-bold font-mono text-white">{assignedCrewWorkers.length}</span>
+                    <span className="text-[10px] font-mono uppercase text-slate-400">Assigned</span>
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-2.5 pt-2 border-t border-slate-800/80 text-xs font-mono">
+                <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-2.5">
+                  <div className="flex items-center gap-1.5 text-emerald-400 text-[11px]">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                    <span>Dedicated</span>
+                  </div>
+                  <div className="text-base font-bold text-white mt-0.5">{pmSiteAnalytics.dedicatedCount}</div>
+                </div>
+                <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-2.5">
+                  <div className="flex items-center gap-1.5 text-amber-400 text-[11px]">
+                    <span className="w-2 h-2 rounded-full bg-amber-500" />
+                    <span>Dual-Site Conflict</span>
+                  </div>
+                  <div className="text-base font-bold text-white mt-0.5">{pmSiteAnalytics.conflictCount}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* CHART 2: Daily Labor Burn Breakdown by Trade */}
+            <div className="lg:col-span-12 bg-slate-900/70 border border-slate-800 rounded-2xl p-5 space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-800/80 pb-3">
+                <div>
+                  <h5 className="text-sm font-bold text-white flex items-center gap-2">
+                    <TrendingUp className="w-4 h-4 text-teal-400" />
+                    <span>Daily Labor Burn Breakdown by Trade</span>
+                  </h5>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Daily wage rate (₱/day) per trade on {targetAllocationProject?.name || 'selected site'}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3 flex-wrap font-mono">
+                  <div className="bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-1.5">
+                    <span className="text-[10px] uppercase text-slate-400 block">Total Daily Burn</span>
+                    <span className="text-sm font-bold text-teal-400">
+                      ₱{pmSiteAnalytics.totalDailyBurn.toLocaleString()}/day
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/70 border border-slate-800 rounded-xl px-3 py-1.5">
+                    <span className="text-[10px] uppercase text-slate-400 block">Projected Weekly (6-Day)</span>
+                    <span className="text-sm font-bold text-amber-400">
+                      ₱{pmSiteAnalytics.projectedWeeklyBurn.toLocaleString()}/wk
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {pmSiteAnalytics.burnByTradeData.length === 0 ? (
+                <div className="h-52 flex flex-col items-center justify-center text-center text-xs text-slate-400 space-y-1.5">
+                  <BarChart3 className="w-7 h-7 text-slate-600" />
+                  <div className="font-semibold text-white">No Active Labor Burn for This Site</div>
+                  <p>Daily and weekly burn per trade will chart automatically once workers are assigned.</p>
+                </div>
+              ) : (
+                <div className="h-60 w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ReBarChart data={pmSiteAnalytics.burnByTradeData} margin={{ top: 10, right: 16, left: 0, bottom: 4 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={siteChartGridStroke} vertical={false} />
+                      <XAxis dataKey="trade" tick={{ fill: siteChartAxisTick, fontSize: 11 }} axisLine={false} tickLine={false} />
+                      <YAxis
+                        tickFormatter={(v) => `₱${Number(v).toLocaleString()}`}
+                        tick={{ fill: siteChartAxisTick, fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                        width={68}
+                      />
+                      <Tooltip
+                        cursor={siteChartCursor}
+                        content={renderSiteChartTooltip('burn')}
+                      />
+                      <Bar dataKey="dailyBurn" fill="#14b8a6" radius={[6, 6, 0, 0]} maxBarSize={48} />
+                    </ReBarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -2153,6 +2903,405 @@ export const LaborWorkforceArtisanTrades: React.FC<LaborWorkforceArtisanTradesPr
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* EDIT SITE TRADE REQUIREMENTS MODAL */}
+      {isEditReqsModalOpen && targetAllocationProject && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-lg bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden text-slate-100">
+            <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/70 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
+                  <Sliders className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Edit Site Trade Requirements</h3>
+                  <p className="text-xs text-slate-400">
+                    {targetAllocationProject.name} • Feeds Site Coverage, AI Scoring &amp; Auto-Optimize
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditReqsModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 max-h-[70vh] overflow-y-auto">
+              {/* Quick Presets by Project Type */}
+              <div className="space-y-1.5">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
+                  Quick Presets by Project Type
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  {TRADE_REQUIREMENT_PRESETS.map(preset => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() =>
+                        setDraftTradeReqs(preset.requirements.map(r => ({ ...r, matchTerms: [...r.matchTerms] })))
+                      }
+                      className="text-left p-2.5 rounded-xl bg-slate-950/70 hover:bg-slate-800/80 border border-slate-800 hover:border-amber-500/40 transition cursor-pointer"
+                    >
+                      <div className="text-xs font-semibold text-white">{preset.name}</div>
+                      <div className="text-[10px] text-slate-400 mt-0.5 line-clamp-1">{preset.subtitle}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Current Required Trades & Headcount Steppers */}
+              <div className="space-y-2">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
+                  Required Trades &amp; Target Headcount ({draftTradeReqs.reduce((s, r) => s + r.required, 0)} total)
+                </span>
+                <div className="space-y-1.5">
+                  {draftTradeReqs.map(req => (
+                    <div
+                      key={req.id}
+                      className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/70 border border-slate-800 text-xs"
+                    >
+                      <span className="font-semibold text-white truncate">{req.label}</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex items-center bg-slate-900 border border-slate-700 rounded-lg overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDraftTradeReqs(prev =>
+                                prev.map(r => (r.id === req.id ? { ...r, required: Math.max(1, r.required - 1) } : r))
+                              )
+                            }
+                            className="px-2 py-1 text-slate-300 hover:bg-slate-800 cursor-pointer font-mono font-bold"
+                          >
+                            −
+                          </button>
+                          <span className="px-2.5 py-1 font-mono font-bold text-amber-300 min-w-[28px] text-center">
+                            {req.required}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setDraftTradeReqs(prev =>
+                                prev.map(r => (r.id === req.id ? { ...r, required: Math.min(20, r.required + 1) } : r))
+                              )
+                            }
+                            className="px-2 py-1 text-slate-300 hover:bg-slate-800 cursor-pointer font-mono font-bold"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDraftTradeReqs(prev => prev.filter(r => r.id !== req.id))}
+                          disabled={draftTradeReqs.length <= 1}
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-rose-400 hover:bg-rose-500/10 disabled:opacity-30 cursor-pointer transition"
+                          title="Remove trade requirement"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Add Custom Trade Row */}
+              <div className="pt-2 border-t border-slate-800 space-y-1.5">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold block">
+                  Add Custom Trade Role
+                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={newCustomTradeLabel}
+                    onChange={(e) => setNewCustomTradeLabel(e.target.value)}
+                    placeholder="e.g. Safety Officer, QA/QC Engineer, Welder..."
+                    className="flex-1 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-3 py-2 text-xs text-white focus:outline-none"
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={newCustomTradeQty}
+                    onChange={(e) => setNewCustomTradeQty(Math.max(1, Math.min(20, Number(e.target.value) || 1)))}
+                    className="w-16 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-2.5 py-2 text-xs font-mono text-white text-center focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    disabled={!newCustomTradeLabel.trim()}
+                    onClick={() => {
+                      const label = newCustomTradeLabel.trim();
+                      if (!label) return;
+                      const slug = `custom_${label.toLowerCase().replace(/[^a-z0-9]+/g, '_')}_${Date.now().toString().slice(-3)}`;
+                      setDraftTradeReqs(prev => [
+                        ...prev,
+                        {
+                          id: slug,
+                          label,
+                          required: newCustomTradeQty,
+                          matchTerms: buildMatchTermsForLabel(label)
+                        }
+                      ]);
+                      setNewCustomTradeLabel('');
+                      setNewCustomTradeQty(1);
+                    }}
+                    className="px-3 py-2 rounded-xl bg-teal-600 hover:bg-teal-500 disabled:opacity-40 text-white text-xs font-semibold transition cursor-pointer flex items-center gap-1 shrink-0"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Add</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-slate-800 bg-slate-950/60 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsEditReqsModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveProjectTradeReqs}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Save Requirements</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CREW OPTIMIZATION PREVIEW MODAL */}
+      {isOptimizeModalOpen && targetAllocationProject && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-xl bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl overflow-hidden text-slate-100">
+            <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/70 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
+                  <Zap className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Crew Optimization Preview</h3>
+                  <p className="text-xs text-slate-400">
+                    {targetAllocationProject.name} • Highest-scoring non-conflicting candidates
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isDeployingOptimizedCrew && setIsOptimizeModalOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {/* Impact Summary KPIs */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3">
+                  <span className="text-[10px] font-mono uppercase text-slate-400 block">Trade Coverage</span>
+                  <div className="text-sm font-bold text-white mt-1 flex items-center gap-2 font-mono">
+                    <span className="text-amber-300">{autoOptimizePlan.coverageBefore}</span>
+                    <ArrowRight className="w-3.5 h-3.5 text-slate-500" />
+                    <span className="text-emerald-400">{autoOptimizePlan.coverageAfter} Filled</span>
+                  </div>
+                </div>
+                <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3">
+                  <span className="text-[10px] font-mono uppercase text-slate-400 block">Projected Daily Burn</span>
+                  <div className="text-sm font-bold text-white mt-1 font-mono">
+                    ₱{autoOptimizePlan.projectedDailyBurn.toLocaleString()}/day
+                    <span className="text-[11px] text-teal-400 font-normal ml-1.5">
+                      (+₱{autoOptimizePlan.additionalDailyBurn.toLocaleString()})
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Proposed Assignments */}
+              {autoOptimizePlan.proposed.length === 0 ? (
+                <div className="py-6 px-4 text-center border border-dashed border-slate-800 rounded-xl bg-slate-950/40 text-xs text-slate-400 space-y-1">
+                  <AlertTriangle className="w-5 h-5 text-amber-400 mx-auto" />
+                  <div className="text-white font-semibold">No non-conflicting candidates available for open slots</div>
+                  <p>All eligible unassigned workers are already deployed. Use manual Override &amp; Assign if dual-site sharing is required.</p>
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  <span className="text-[10px] font-mono uppercase text-slate-400 block">
+                    Proposed Assignments ({autoOptimizePlan.proposed.length})
+                  </span>
+                  {autoOptimizePlan.proposed.map(item => (
+                    <div
+                      key={item.worker.id}
+                      className="bg-slate-950/70 border border-slate-800 rounded-xl px-3.5 py-2.5 flex items-center justify-between gap-3 text-xs"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-white truncate">{item.worker.name}</span>
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/15 text-emerald-300 border border-emerald-500/30">
+                            {item.slotLabel}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-400 mt-0.5">
+                          {item.worker.tradeType || item.worker.specialty || 'Field Artisan'} • Unassigned (Zero Conflict)
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0 font-mono">
+                        <div className="text-emerald-300 font-bold">{item.score}% Match</div>
+                        <div className="text-[11px] text-slate-400">₱{item.rate.toLocaleString()}/day</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Conflict / Unfilled Slot Advisories */}
+              {autoOptimizePlan.unfilledSlots.length > 0 && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <span>
+                    <strong>Remaining Open Slots:</strong> {autoOptimizePlan.unfilledSlots.join(', ')} (no unassigned conflict-free candidates found).
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-slate-800 bg-slate-950/60 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={isDeployingOptimizedCrew}
+                onClick={() => setIsOptimizeModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isDeployingOptimizedCrew || autoOptimizePlan.proposed.length === 0}
+                onClick={handleConfirmAutoOptimizeDeploy}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition cursor-pointer flex items-center gap-1.5 shadow-sm"
+              >
+                {isDeployingOptimizedCrew ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Deploying Crew...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCheck className="w-3.5 h-3.5" />
+                    <span>Confirm &amp; Deploy Crew</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DUAL-SITE CONFLICT OVERRIDE CONFIRMATION MODAL */}
+      {pendingConflictAssign && targetAllocationProject && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className="w-full max-w-md bg-slate-900 border border-amber-500/40 rounded-2xl shadow-2xl overflow-hidden text-slate-100">
+            <div className="px-5 py-4 border-b border-slate-800 bg-slate-950/70 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-white">Dual-Site Conflict Override</h3>
+                  <p className="text-xs text-slate-400">Audit reason required before dual-site assignment</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPendingConflictAssign(null)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="p-3 rounded-xl bg-slate-950 border border-slate-800 text-xs space-y-1">
+                <div className="font-bold text-white">{pendingConflictAssign.worker.name}</div>
+                <div className="text-slate-400">
+                  Currently active on:{' '}
+                  <strong className="text-amber-300">
+                    {pendingConflictAssign.conflictSites.join(', ')}
+                  </strong>
+                </div>
+                <div className="text-slate-400">
+                  Target site: <strong className="text-teal-300">{targetAllocationProject.name}</strong>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold">
+                  Override Reason *
+                </label>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {OVERRIDE_REASON_PRESETS.map(preset => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setConflictOverridePreset(preset)}
+                      className={`px-3 py-2 rounded-xl text-left text-xs font-medium border transition cursor-pointer flex items-center justify-between ${conflictOverridePreset === preset
+                        ? 'bg-amber-500/15 border-amber-500/50 text-amber-200 font-semibold'
+                        : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                        }`}
+                    >
+                      <span>{preset}</span>
+                      {conflictOverridePreset === preset && <Check className="w-3.5 h-3.5 text-amber-400" />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-mono uppercase tracking-wider text-slate-400 font-bold mb-1">
+                  {conflictOverridePreset === 'Custom Note' ? 'Custom Override Note *' : 'Additional Note (Optional)'}
+                </label>
+                <input
+                  type="text"
+                  value={conflictCustomNote}
+                  onChange={(e) => setConflictCustomNote(e.target.value)}
+                  placeholder="Enter justification for audit trail..."
+                  className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-xl px-3 py-2 text-xs text-white focus:outline-none"
+                />
+              </div>
+
+              <div className="text-[11px] font-mono text-slate-400">
+                Logged under actor: <strong className="text-teal-300">{currentActorRole}</strong>
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-slate-800 bg-slate-950/60 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingConflictAssign(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium border border-slate-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={conflictOverridePreset === 'Custom Note' && !conflictCustomNote.trim()}
+                onClick={handleConfirmConflictOverride}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>Confirm Override &amp; Assign</span>
+              </button>
             </div>
           </div>
         </div>

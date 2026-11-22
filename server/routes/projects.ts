@@ -7,7 +7,7 @@ import { Router, Request, Response } from 'express';
 import { prisma, pool } from '../db';
 import { broadcastChange, invalidateAllDataCache } from '../events';
 import { resolveProjectCoordinates, resolveLocalGeocoding } from '../services/geocoding';
-import { requireAuth, requireRole, checkUserProjectAccess, hasProjectManagementAccess } from '../middleware/auth';
+import { requireAuth, requireRole, requireExactRole, checkUserProjectAccess, hasProjectManagementAccess } from '../middleware/auth';
 
 export const projectsRouter = Router();
 
@@ -146,21 +146,31 @@ projectsRouter.get('/projects', async (req: Request, res: Response) => {
     // Pre-aggregate subcontractor payables from approved or paid contractor billings (distinguishing paid vs approved)
     const subRes = await pool.query(
       `SELECT 
-         project_site, 
+         COALESCE(NULLIF(TRIM(project_id), ''), project_site) as project_key, 
          COALESCE(SUM(CASE WHEN UPPER(TRIM(status)) IN ('PAID', 'DISBURSED', 'PAID / DISBURSED') THEN COALESCE(disbursed_amount, approved_amount, billed_amount) ELSE 0 END), 0) as paid_sub,
          COALESCE(SUM(CASE WHEN UPPER(TRIM(status)) IN ('APPROVED', 'PENDING', 'PENDING_APPROVAL') THEN COALESCE(approved_amount, billed_amount) ELSE 0 END), 0) as approved_sub,
          COALESCE(SUM(COALESCE(disbursed_amount, approved_amount, billed_amount)), 0) as total_sub
        FROM subcontractor_payables 
        WHERE UPPER(TRIM(status)) IN ('PAID', 'DISBURSED', 'PAID / DISBURSED', 'APPROVED', 'PENDING', 'PENDING_APPROVAL') 
-       GROUP BY project_site`
+       GROUP BY COALESCE(NULLIF(TRIM(project_id), ''), project_site)`
     ).catch(() => ({ rows: [] }));
     const subMap = new Map<string, { paid: number; approved: number; total: number }>();
     for (const r of subRes.rows) {
-      subMap.set(String(r.project_site).trim(), {
+      subMap.set(String(r.project_key).trim(), {
         paid: Number(r.paid_sub || 0),
         approved: Number(r.approved_sub || 0),
         total: Number(r.total_sub || 0)
       });
+    }
+
+    // Pre-load server-persisted BOM phases per project
+    const bomRes = await pool.query(
+      `SELECT project_id, phases FROM project_bom_phases`
+    ).catch(() => ({ rows: [] }));
+    const bomMap = new Map<string, any[]>();
+    for (const b of bomRes.rows) {
+      const arr = Array.isArray(b.phases) ? b.phases : [];
+      bomMap.set(String(b.project_id).trim(), arr);
     }
 
     const findMatchingEntry = (map: Map<string, { paid: number; approved: number; total: number }>, p: { id: string; name?: string }) => {
@@ -244,6 +254,8 @@ projectsRouter.get('/projects', async (req: Request, res: Response) => {
         assignedContractorIds: Array.isArray(p.assigned_contractor_ids) ? p.assigned_contractor_ids : [],
         tasksCount: Number(p.tasks_count || 0),
         milestonesCount: Number(p.milestones_count || 0),
+        bomPhases: bomMap.get(String(p.id).trim()) || [],
+        bomPhasesCount: (bomMap.get(String(p.id).trim()) || []).length,
         isPrivateAccounting: Boolean(p.is_private_accounting),
         assignedProjectManagerId: p.assigned_project_manager_id || '',
         assignedProjectManagerName: p.assigned_project_manager_name || '',
@@ -563,7 +575,7 @@ projectsRouter.patch('/projects/:id', requireRole(['ADMIN', 'OPERATIONS_MANAGER'
          COALESCE(SUM(CASE WHEN UPPER(TRIM(status)) IN ('APPROVED', 'PENDING', 'PENDING_APPROVAL') THEN COALESCE(approved_amount, billed_amount) ELSE 0 END), 0) as approved_sub,
          COALESCE(SUM(COALESCE(disbursed_amount, approved_amount, billed_amount)), 0) as total_sub
        FROM subcontractor_payables 
-       WHERE (LOWER(TRIM(project_site)) = LOWER(TRIM($1)) OR LOWER(TRIM(project_site)) = LOWER(TRIM($2)) OR project_site ILIKE '%' || $1 || '%')
+       WHERE (project_id = $2 OR LOWER(TRIM(project_site)) = LOWER(TRIM($1)) OR LOWER(TRIM(project_site)) = LOWER(TRIM($2)) OR project_site ILIKE '%' || $1 || '%')
          AND UPPER(TRIM(status)) IN ('PAID', 'DISBURSED', 'PAID / DISBURSED', 'APPROVED', 'PENDING', 'PENDING_APPROVAL')`,
       [p.name || '', id]
     ).catch(() => ({ rows: [] }));
@@ -620,8 +632,8 @@ projectsRouter.patch('/projects/:id', requireRole(['ADMIN', 'OPERATIONS_MANAGER'
   }
 });
 
-// PUT /api/projects/:id/workers — Add or remove a worker from a project (ADMIN and ENGINEER)
-projectsRouter.put('/projects/:id/workers', requireRole(['ADMIN', 'OPERATIONS_MANAGER', 'PROJECT_MANAGER', 'ENGINEER']), async (req: Request, res: Response) => {
+// PUT /api/projects/:id/workers — Add or remove a worker from a project (PM / ENGINEER ONLY — OM Read-Only)
+projectsRouter.put('/projects/:id/workers', requireExactRole(['ENGINEER']), async (req: Request, res: Response) => {
   try {
     const { id: projectId } = req.params;
     if (!hasProjectManagementAccess(req.user) && !checkUserProjectAccess(req.user, projectId)) {
@@ -699,6 +711,7 @@ projectsRouter.put('/projects/:id/workers', requireRole(['ADMIN', 'OPERATIONS_MA
     broadcastChange('contractors');
     broadcastChange('workers');
     broadcastChange('attendance');
+    invalidateAllDataCache();
     res.json({ success: true, assignedContractorIds: updated, assignedWorkersCount: updated.length });
   } catch (error) {
     console.error('Error updating project workers:', error);
@@ -1531,6 +1544,55 @@ projectsRouter.patch('/risks/:id', async (req: Request, res: Response) => {
     res.json(risk);
   } catch (error) {
     console.error('Error updating risk:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// ============================================================================
+// PROJECT BILL OF MATERIALS (BOM) PHASES PERSISTENCE
+// ============================================================================
+
+const ensureBomPhasesTable = async () => {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS project_bom_phases (
+      project_id TEXT PRIMARY KEY,
+      phases JSONB NOT NULL DEFAULT '[]'::jsonb,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+};
+
+// GET /api/projects/:id/bom
+projectsRouter.get('/projects/:id/bom', async (req: Request, res: Response) => {
+  try {
+    await ensureBomPhasesTable();
+    const { id } = req.params;
+    const r = await pool.query(`SELECT phases, updated_at FROM project_bom_phases WHERE project_id = $1`, [id]);
+    const phases = Array.isArray(r.rows[0]?.phases) ? r.rows[0].phases : [];
+    res.json({ projectId: id, phases, count: phases.length, updatedAt: r.rows[0]?.updated_at || null });
+  } catch (error) {
+    console.error('Error fetching project BOM phases:', error);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// PUT /api/projects/:id/bom
+projectsRouter.put('/projects/:id/bom', requireRole(['ADMIN', 'FINANCE', 'ENGINEER']), async (req: Request, res: Response) => {
+  try {
+    await ensureBomPhasesTable();
+    const { id } = req.params;
+    const phases = Array.isArray(req.body?.phases) ? req.body.phases : [];
+    await pool.query(
+      `INSERT INTO project_bom_phases (project_id, phases, updated_at)
+       VALUES ($1, $2::jsonb, NOW())
+       ON CONFLICT (project_id) DO UPDATE SET phases = EXCLUDED.phases, updated_at = NOW()`,
+      [id, JSON.stringify(phases)]
+    );
+    invalidateAllDataCache();
+    broadcastChange('projects');
+    res.json({ success: true, projectId: id, count: phases.length });
+  } catch (error) {
+    console.error('Error saving project BOM phases:', error);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });

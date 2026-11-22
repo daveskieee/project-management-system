@@ -487,7 +487,7 @@ export function createGanttRouter(prisma: PrismaClient) {
           });
         }
 
-        // 3. Upsert tasks — insert root/parent tasks first so parentTaskId FK references always exist
+        // 3. Batch-resolve existing task owners & contractors in 2 queries (eliminating N+1 roundtrips)
         const orderedIncomingTasks = [...tasks].sort((a: any, b: any) => {
           const aHasParent = Boolean(a.parentTaskId || (a.parent && a.parent !== 0 && a.parent !== '0'));
           const bHasParent = Boolean(b.parentTaskId || (b.parent && b.parent !== 0 && b.parent !== '0'));
@@ -495,9 +495,39 @@ export function createGanttRouter(prisma: PrismaClient) {
           return Number(a.sortOrder ?? 0) - Number(b.sortOrder ?? 0);
         });
 
+        const incomingIds = orderedIncomingTasks.map((t: any) => String(t.id)).filter(Boolean);
+        const incomingContractorIds = Array.from(
+          new Set(orderedIncomingTasks.map((t: any) => (t.assignedContractorId ? String(t.assignedContractorId) : '')).filter(Boolean))
+        );
+
+        const [existingTasksRows, existingProjectTaskRows, validContractorsRows] = await Promise.all([
+          incomingIds.length > 0
+            ? tx.projectTask.findMany({ where: { id: { in: incomingIds } }, select: { id: true, projectId: true } })
+            : Promise.resolve([]),
+          tx.projectTask.findMany({ where: { projectId }, select: { id: true } }),
+          incomingContractorIds.length > 0
+            ? tx.contractor.findMany({ where: { id: { in: incomingContractorIds } }, select: { id: true } })
+            : Promise.resolve([])
+        ]);
+
+        const ownerByTaskId = new Map<string, string>(existingTasksRows.map(r => [r.id, r.projectId]));
+        const knownProjectTaskIds = new Set<string>(existingProjectTaskRows.map(r => r.id));
+        const validContractorIds = new Set<string>(validContractorsRows.map(r => r.id));
+
+        const tasksToCreate: any[] = [];
+        const tasksToUpdate: Array<{ id: string; data: any }> = [];
+
         for (let idx = 0; idx < orderedIncomingTasks.length; idx++) {
           const t = orderedIncomingTasks[idx];
           if (!t.id) continue;
+          const taskIdStr = String(t.id);
+
+          // Never overwrite a task belonging to a different project
+          const existingOwnerProjectId = ownerByTaskId.get(taskIdStr);
+          if (existingOwnerProjectId && existingOwnerProjectId !== projectId) {
+            continue;
+          }
+
           const startRaw = t.start_date || t.startDate;
           const endRaw = t.end_date || t.endDate;
           const parsedStart = startRaw ? new Date(startRaw) : new Date();
@@ -512,17 +542,15 @@ export function createGanttRouter(prisma: PrismaClient) {
               : t.parentTaskId
                 ? String(t.parentTaskId)
                 : null;
-          let safeParentId: string | null = null;
-          if (rawParentId && rawParentId !== String(t.id)) {
-            const pExists = await tx.projectTask.findUnique({ where: { id: rawParentId }, select: { id: true } });
-            if (pExists) safeParentId = rawParentId;
-          }
+          const safeParentId =
+            rawParentId && rawParentId !== taskIdStr && knownProjectTaskIds.has(rawParentId)
+              ? rawParentId
+              : null;
 
-          let safeContractorId: string | null = null;
-          if (t.assignedContractorId) {
-            const cExists = await tx.contractor.findUnique({ where: { id: String(t.assignedContractorId) }, select: { id: true } });
-            if (cExists) safeContractorId = String(t.assignedContractorId);
-          }
+          const safeContractorId =
+            t.assignedContractorId && validContractorIds.has(String(t.assignedContractorId))
+              ? String(t.assignedContractorId)
+              : null;
 
           const rawProg = parseFloat(String(t.progress ?? 0)) || 0;
           const progress = Math.max(0, Math.min(1, rawProg > 1 ? rawProg / 100 : rawProg));
@@ -533,51 +561,49 @@ export function createGanttRouter(prisma: PrismaClient) {
               : (t.status || (progress > 0 ? 'IN_PROGRESS' : 'TODO'));
           const type = (duration === 0 || t.type === 'milestone') ? 'milestone' : (t.type || 'task');
 
-          const existingOwner = await tx.projectTask.findUnique({
-            where: { id: String(t.id) },
-            select: { projectId: true },
-          });
-          // Never overwrite a task belonging to a different project
-          if (existingOwner && existingOwner.projectId !== projectId) {
-            continue;
-          }
+          const parsedBaselineStart = t.baselineStart ? new Date(t.baselineStart) : startDate;
+          const parsedBaselineEnd = t.baselineEnd ? new Date(t.baselineEnd) : endDate;
+          const baselineStart = isNaN(parsedBaselineStart.getTime()) ? startDate : parsedBaselineStart;
+          const baselineEnd = isNaN(parsedBaselineEnd.getTime()) ? endDate : parsedBaselineEnd;
 
-          await tx.projectTask.upsert({
-            where: { id: String(t.id) },
-            update: {
-              text: t.text || t.title || 'Untitled Construction Task',
-              title: t.text || t.title || 'Untitled Construction Task',
-              startDate,
-              endDate,
-              duration,
-              progress,
-              status,
-              type,
-              parentTaskId: safeParentId,
-              wbsCode: t.wbsCode || null,
-              milestonePhase: t.milestonePhase || t.constructionPhase || null,
-              assignedContractorId: safeContractorId,
-              sortOrder: typeof t.sortOrder === 'number' ? t.sortOrder : idx,
-              updatedAt: new Date()
-            },
-            create: {
-              id: String(t.id),
-              projectId,
-              text: t.text || t.title || 'Untitled Construction Task',
-              title: t.text || t.title || 'Untitled Construction Task',
-              startDate,
-              endDate,
-              duration,
-              progress,
-              status,
-              type,
-              parentTaskId: safeParentId,
-              wbsCode: t.wbsCode || null,
-              milestonePhase: t.milestonePhase || t.constructionPhase || null,
-              assignedContractorId: safeContractorId,
-              sortOrder: typeof t.sortOrder === 'number' ? t.sortOrder : idx
-            }
-          });
+          knownProjectTaskIds.add(taskIdStr);
+
+          const baseFields = {
+            text: t.text || t.title || 'Untitled Construction Task',
+            title: t.text || t.title || 'Untitled Construction Task',
+            startDate,
+            endDate,
+            baselineStart,
+            baselineEnd,
+            duration,
+            progress,
+            status,
+            type,
+            parentTaskId: safeParentId,
+            wbsCode: t.wbsCode || null,
+            milestonePhase: t.milestonePhase || t.constructionPhase || null,
+            assignedContractorId: safeContractorId,
+            sortOrder: typeof t.sortOrder === 'number' ? t.sortOrder : idx
+          };
+
+          if (existingOwnerProjectId === projectId) {
+            tasksToUpdate.push({ id: taskIdStr, data: { ...baseFields, updatedAt: new Date() } });
+          } else {
+            tasksToCreate.push({ id: taskIdStr, projectId, ...baseFields });
+          }
+        }
+
+        // Batch-create roots first, then children, so parentTaskId FK constraints are always satisfied in 1-2 SQL statements
+        const rootCreates = tasksToCreate.filter(r => !r.parentTaskId);
+        const childCreates = tasksToCreate.filter(r => Boolean(r.parentTaskId));
+        if (rootCreates.length > 0) {
+          await tx.projectTask.createMany({ data: rootCreates, skipDuplicates: true });
+        }
+        if (childCreates.length > 0) {
+          await tx.projectTask.createMany({ data: childCreates, skipDuplicates: true });
+        }
+        for (const upd of tasksToUpdate) {
+          await tx.projectTask.update({ where: { id: upd.id }, data: upd.data });
         }
 
         // 4. Upsert explicit links & task predecessorIds
@@ -609,29 +635,18 @@ export function createGanttRouter(prisma: PrismaClient) {
             }
           }
         }
-        for (const l of normalizedLinks) {
-          const [srcExists, tgtExists] = await Promise.all([
-            tx.projectTask.findUnique({ where: { id: l.source }, select: { id: true } }),
-            tx.projectTask.findUnique({ where: { id: l.target }, select: { id: true } }),
-          ]);
-          if (!srcExists || !tgtExists) continue;
-          await tx.taskLink.upsert({
-            where: { id: l.id },
-            update: {
-              sourceId: l.source,
-              targetId: l.target,
-              type: l.type,
-              lagDays: l.lag
-            },
-            create: {
-              id: l.id,
-              projectId,
-              sourceId: l.source,
-              targetId: l.target,
-              type: l.type,
-              lagDays: l.lag
-            }
-          });
+        const validLinksToCreate = normalizedLinks
+          .filter(l => knownProjectTaskIds.has(l.source) && knownProjectTaskIds.has(l.target))
+          .map(l => ({
+            id: l.id,
+            projectId,
+            sourceId: l.source,
+            targetId: l.target,
+            type: l.type,
+            lagDays: l.lag
+          }));
+        if (validLinksToCreate.length > 0) {
+          await tx.taskLink.createMany({ data: validLinksToCreate, skipDuplicates: true });
         }
 
         // 5. Recalculate average progress & return fresh DB state
@@ -707,7 +722,7 @@ export function createGanttRouter(prisma: PrismaClient) {
             lag: l.lagDays || 0
           }))
         };
-      });
+      }, { maxWait: 15000, timeout: 30000 });
 
       broadcastChange('tasks');
       broadcastChange('projects');

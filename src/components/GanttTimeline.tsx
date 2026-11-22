@@ -10,7 +10,7 @@ import {
   X, ChevronRight, ChevronDown, Clock, ArrowRight, Link2,
   AlertCircle, ChevronLeft, CornerDownRight, ChevronsDown, ChevronsUp,
   Maximize2, Minimize2, PanelLeftClose, PanelLeftOpen, Scan,
-  Printer, Download, Wand2, BookmarkCheck, RotateCw, Sparkles
+  Printer, Download, Wand2, BookmarkCheck, RotateCw, Sparkles, SlidersHorizontal, Loader2
 } from 'lucide-react';
 import { ProjectProfile, Contractor, DailySiteLog } from '../types';
 import { useTheme } from '../context/ThemeContext';
@@ -1237,20 +1237,25 @@ export default function GanttTimeline({
     return headers;
   }, []);
 
+  const latestGanttLoadSeqRef = useRef(0);
+
   const loadGanttData = useCallback(async (projectId: string) => {
     if (!projectId) {
       setTasks([]);
       setLinks([]);
       return;
     }
+    const loadSeq = ++latestGanttLoadSeqRef.current;
     setIsLoading(true);
     try {
       const res = await fetch(`/api/projects/${projectId}/gantt`, {
         credentials: 'include',
         headers: buildGanttAuthHeaders(false),
       });
+      if (loadSeq !== latestGanttLoadSeqRef.current) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
+      if (loadSeq !== latestGanttLoadSeqRef.current) return;
 
       const rawTasks = Array.isArray(json.data) ? json.data : [];
       const rawLinks = Array.isArray(json.links) ? json.links : [];
@@ -2281,58 +2286,248 @@ export default function GanttTimeline({
     });
   };
 
-  const handleLoadStandardFitOutTemplate = async () => {
+  type TemplatePresetId = 'residential_2storey' | 'commercial_fitout' | 'condo_renovation' | 'custom_blank';
+
+  interface TemplateTaskBlueprint {
+    wbsCode: string;
+    text: string;
+    offsetDays: number;
+    duration: number;
+    type: 'task' | 'milestone';
+    constructionPhase: string;
+    parentIdx?: number;
+    predIndices?: number[];
+  }
+
+  interface TemplatePresetDef {
+    id: TemplatePresetId;
+    name: string;
+    subtitle: string;
+    estimatedDuration: string;
+    tasks: TemplateTaskBlueprint[];
+  }
+
+  const TEMPLATE_PRESETS: TemplatePresetDef[] = [
+    {
+      id: 'residential_2storey',
+      name: '2-Storey Residential Build',
+      subtitle: 'Complete civil, structural, MEPFS, architectural finishes & handover',
+      estimatedDuration: '~16 Weeks',
+      tasks: [
+        { wbsCode: '1.0', text: 'Site Mobilization & Earthworks', offsetDays: 0, duration: 10, type: 'task', constructionPhase: 'Site Preparation & Mobilization' },
+        { wbsCode: '1.1', text: 'Perimeter Fencing, Clearing & Layout', offsetDays: 0, duration: 4, type: 'task', constructionPhase: 'Site Preparation & Mobilization', parentIdx: 0 },
+        { wbsCode: '1.2', text: 'Foundation Excavation & Soil Poisoning', offsetDays: 4, duration: 6, type: 'task', constructionPhase: 'Earthworks & Excavation', parentIdx: 0, predIndices: [1] },
+        { wbsCode: '2.0', text: 'Substructure & Structural Framing', offsetDays: 10, duration: 30, type: 'task', constructionPhase: 'Structural & Concrete Works', predIndices: [0] },
+        { wbsCode: '2.1', text: 'Footings, Tie Beams & Ground Slab', offsetDays: 10, duration: 10, type: 'task', constructionPhase: 'Foundation & Footings', parentIdx: 3, predIndices: [2] },
+        { wbsCode: '2.2', text: 'Ground Floor Columns & 2F Slab Pouring', offsetDays: 20, duration: 10, type: 'task', constructionPhase: 'Structural & Concrete Works', parentIdx: 3, predIndices: [4] },
+        { wbsCode: '2.3', text: '2F Columns, Roof Beams & Steel Trusses', offsetDays: 30, duration: 10, type: 'task', constructionPhase: 'Structural & Concrete Works', parentIdx: 3, predIndices: [5] },
+        { wbsCode: '3.0', text: 'Masonry, Roofing & MEPFS Rough-Ins', offsetDays: 40, duration: 24, type: 'task', constructionPhase: 'Masonry & CHB Works', predIndices: [3] },
+        { wbsCode: '3.1', text: 'CHB Exterior & Interior Partition Walls', offsetDays: 40, duration: 10, type: 'task', constructionPhase: 'Masonry & CHB Works', parentIdx: 7, predIndices: [6] },
+        { wbsCode: '3.2', text: 'Roofing Sheets, Flashing & Waterproofing', offsetDays: 46, duration: 8, type: 'task', constructionPhase: 'Roofing & Waterproofing', parentIdx: 7, predIndices: [6] },
+        { wbsCode: '3.3', text: 'Electrical, Plumbing & Sanitary Rough-Ins', offsetDays: 50, duration: 14, type: 'task', constructionPhase: 'MEPFS Rough-Ins', parentIdx: 7, predIndices: [8] },
+        { wbsCode: '4.0', text: 'Architectural Finishes & Painting', offsetDays: 64, duration: 24, type: 'task', constructionPhase: 'Architectural Finishes', predIndices: [7] },
+        { wbsCode: '4.1', text: 'Plastering, Ceiling Framing & Tiling', offsetDays: 64, duration: 12, type: 'task', constructionPhase: 'Architectural Finishes', parentIdx: 11, predIndices: [10] },
+        { wbsCode: '4.2', text: 'Doors, Windows, Cabinetry & Fixtures', offsetDays: 74, duration: 8, type: 'task', constructionPhase: 'Doors, Windows & Glazing', parentIdx: 11, predIndices: [12] },
+        { wbsCode: '4.3', text: 'Interior & Exterior Painting Works', offsetDays: 80, duration: 8, type: 'task', constructionPhase: 'Painting & Coatings', parentIdx: 11, predIndices: [12] },
+        { wbsCode: '5.0', text: 'QA/QC Punch List & Client Handover', offsetDays: 88, duration: 0, type: 'milestone', constructionPhase: 'Testing, Commissioning & Handover', predIndices: [13, 14] }
+      ]
+    },
+    {
+      id: 'commercial_fitout',
+      name: 'Commercial / Office Fit-Out',
+      subtitle: 'Turnkey office partitions, MEPFS, ceilings, flooring & commissioning',
+      estimatedDuration: '~10 Weeks',
+      tasks: [
+        { wbsCode: '1.0', text: 'Admin Permits & Site Mobilization', offsetDays: 0, duration: 5, type: 'task', constructionPhase: 'Site Preparation & Mobilization' },
+        { wbsCode: '1.1', text: 'Building Admin Clearances & Board-Up', offsetDays: 0, duration: 3, type: 'task', constructionPhase: 'Site Preparation & Mobilization', parentIdx: 0 },
+        { wbsCode: '1.2', text: 'Demolition & Floor Protection', offsetDays: 3, duration: 2, type: 'task', constructionPhase: 'Site Preparation & Mobilization', parentIdx: 0, predIndices: [1] },
+        { wbsCode: '2.0', text: 'Partitions, Ceilings & MEPFS Rough-In', offsetDays: 5, duration: 22, type: 'task', constructionPhase: 'MEPFS Rough-Ins', predIndices: [0] },
+        { wbsCode: '2.1', text: 'Drywall Framing & Acoustic Partitions', offsetDays: 5, duration: 10, type: 'task', constructionPhase: 'Masonry & CHB Works', parentIdx: 3, predIndices: [2] },
+        { wbsCode: '2.2', text: 'Electrical, Structured Cabling & FDAS', offsetDays: 9, duration: 12, type: 'task', constructionPhase: 'MEPFS Rough-Ins', parentIdx: 3, predIndices: [4] },
+        { wbsCode: '2.3', text: 'HVAC Ducting & Fire Sprinkler Relocation', offsetDays: 11, duration: 12, type: 'task', constructionPhase: 'MEPFS Rough-Ins', parentIdx: 3, predIndices: [4] },
+        { wbsCode: '2.4', text: 'Acoustic Ceiling Grid & Lighting Trim', offsetDays: 21, duration: 6, type: 'task', constructionPhase: 'Architectural Finishes', parentIdx: 3, predIndices: [5, 6] },
+        { wbsCode: '3.0', text: 'Finishes, Glass & Custom Millwork', offsetDays: 27, duration: 20, type: 'task', constructionPhase: 'Architectural Finishes', predIndices: [3] },
+        { wbsCode: '3.1', text: 'Carpet Tiles, Vinyl & Floor Finishes', offsetDays: 27, duration: 8, type: 'task', constructionPhase: 'Architectural Finishes', parentIdx: 8, predIndices: [7] },
+        { wbsCode: '3.2', text: 'Tempered Glass Partitions & Doors', offsetDays: 33, duration: 8, type: 'task', constructionPhase: 'Doors, Windows & Glazing', parentIdx: 8, predIndices: [9] },
+        { wbsCode: '3.3', text: 'Reception Millwork, Pantry & Painting', offsetDays: 35, duration: 12, type: 'task', constructionPhase: 'Painting & Coatings', parentIdx: 8, predIndices: [9] },
+        { wbsCode: '4.0', text: 'Testing, Commissioning & Turnover', offsetDays: 47, duration: 5, type: 'task', constructionPhase: 'Testing, Commissioning & Handover', predIndices: [10, 11] },
+        { wbsCode: '4.1', text: 'Final Occupancy & Handover Milestone', offsetDays: 52, duration: 0, type: 'milestone', constructionPhase: 'Testing, Commissioning & Handover', predIndices: [12] }
+      ]
+    },
+    {
+      id: 'condo_renovation',
+      name: 'Condominium Interior Renovation',
+      subtitle: 'Stripping, rewiring, waterproofing, tiling, custom cabinetry & fixtures',
+      estimatedDuration: '~7 Weeks',
+      tasks: [
+        { wbsCode: '1.0', text: 'PMO Permits & Unit Protection', offsetDays: 0, duration: 4, type: 'task', constructionPhase: 'Site Preparation & Mobilization' },
+        { wbsCode: '1.1', text: 'Stripping, Chipping & Hauling', offsetDays: 2, duration: 4, type: 'task', constructionPhase: 'Site Preparation & Mobilization', parentIdx: 0 },
+        { wbsCode: '2.0', text: 'Electrical Rewiring & Plumbing Layout', offsetDays: 6, duration: 10, type: 'task', constructionPhase: 'MEPFS Rough-Ins', predIndices: [1] },
+        { wbsCode: '2.1', text: 'Bathroom Waterproofing & Flood Testing', offsetDays: 10, duration: 5, type: 'task', constructionPhase: 'Roofing & Waterproofing', parentIdx: 2, predIndices: [1] },
+        { wbsCode: '3.0', text: 'Ceiling, Cove Lighting & Tiling Works', offsetDays: 16, duration: 12, type: 'task', constructionPhase: 'Architectural Finishes', predIndices: [2, 3] },
+        { wbsCode: '3.1', text: 'Kitchen & Wardrobe Custom Joinery', offsetDays: 22, duration: 10, type: 'task', constructionPhase: 'Architectural Finishes', parentIdx: 4, predIndices: [4] },
+        { wbsCode: '3.2', text: 'Wall Painting, Lighting & Plumbing Trim', offsetDays: 28, duration: 8, type: 'task', constructionPhase: 'Painting & Coatings', parentIdx: 4, predIndices: [4] },
+        { wbsCode: '4.0', text: 'Deep Cleaning & Owner Turnover', offsetDays: 36, duration: 0, type: 'milestone', constructionPhase: 'Testing, Commissioning & Handover', predIndices: [5, 6] }
+      ]
+    },
+    {
+      id: 'custom_blank',
+      name: 'Custom / Blank Quick-Start',
+      subtitle: 'Minimal 4-item skeleton schedule ready for custom phases & tasks',
+      estimatedDuration: '~4 Weeks',
+      tasks: [
+        { wbsCode: '1.0', text: 'Phase 1 — Mobilization & Site Setup', offsetDays: 0, duration: 5, type: 'task', constructionPhase: 'Site Preparation & Mobilization' },
+        { wbsCode: '2.0', text: 'Phase 2 — Core Construction / Execution', offsetDays: 5, duration: 12, type: 'task', constructionPhase: 'Structural & Concrete Works', predIndices: [0] },
+        { wbsCode: '3.0', text: 'Phase 3 — Finishing & QA/QC Inspection', offsetDays: 17, duration: 6, type: 'task', constructionPhase: 'Architectural Finishes', predIndices: [1] },
+        { wbsCode: '4.0', text: 'Project Handover & Sign-Off', offsetDays: 23, duration: 0, type: 'milestone', constructionPhase: 'Testing, Commissioning & Handover', predIndices: [2] }
+      ]
+    }
+  ];
+
+  // Multi-Preset Template Modal & More Tools Dropdown State
+  const [isTemplateModalOpen, setIsTemplateModalOpen] = useState(false);
+  const [selectedTemplatePreset, setSelectedTemplatePreset] = useState<TemplatePresetId>('residential_2storey');
+  const [templateStartDate, setTemplateStartDate] = useState<string>(() => formatDateISO(new Date()));
+  const [isApplyingTemplate, setIsApplyingTemplate] = useState(false);
+  const [isMoreToolsOpen, setIsMoreToolsOpen] = useState(false);
+  const moreToolsRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isMoreToolsOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (moreToolsRef.current && !moreToolsRef.current.contains(e.target as Node)) {
+        setIsMoreToolsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isMoreToolsOpen]);
+
+  const handleOpenTemplateModal = () => {
     if (!selectedProjectId) return;
+    const projStart = activeProject?.startDate ? formatDateISO(parseDate(activeProject.startDate)) : formatDateISO(new Date());
+    setTemplateStartDate(projStart);
+    setIsTemplateModalOpen(true);
+  };
+
+  const handleApplyTemplatePreset = async () => {
+    if (!selectedProjectId) return;
+    const preset = TEMPLATE_PRESETS.find((p) => p.id === selectedTemplatePreset) || TEMPLATE_PRESETS[0];
+    setIsApplyingTemplate(true);
     setIsSyncing(true);
     try {
-      // 1. Generate new task IDs mapped to selectedProjectId
-      // All template tasks strictly initialize at 0% progress per specifications
-      const idMap = new Map<string, string>();
-      DEFAULT_EM_JAY_TASKS.forEach((t, idx) => {
-        idMap.set(t.id, `tsk-${selectedProjectId}-${idx + 1}-${Date.now().toString().slice(-4)}`);
-      });
+      const baseStart = parseDate(templateStartDate || formatDateISO(new Date()));
+      const stamp = Date.now().toString().slice(-5);
+      const generatedIds = preset.tasks.map((_, idx) => `tsk-${selectedProjectId}-${idx + 1}-${stamp}`);
 
-      const templateTasks: GanttTaskItem[] = DEFAULT_EM_JAY_TASKS.map((t) => {
-        const newId = idMap.get(t.id) || `tsk-${selectedProjectId}-${Date.now().toString().slice(-4)}`;
+      const templateTasks: GanttTaskItem[] = preset.tasks.map((bp, idx) => {
+        const startD = bp.offsetDays > 0 ? addWorkingDays(baseStart, bp.offsetDays + 1) : addWorkingDays(baseStart, 1);
+        const startStr = formatDateISO(startD);
+        const endStr = bp.type === 'milestone' || bp.duration === 0
+          ? startStr
+          : formatDateISO(addWorkingDays(startD, Math.max(1, bp.duration)));
+
         return {
-          ...t,
-          id: newId,
+          id: generatedIds[idx],
           projectId: selectedProjectId,
-          progress: 0.0, // Strictly initialize all tasks at 0% progress
-          predecessorIds: (t.predecessorIds || []).map(pId => idMap.get(pId) || pId)
+          wbsCode: bp.wbsCode,
+          text: bp.text,
+          startDate: startStr,
+          endDate: endStr,
+          duration: bp.type === 'milestone' ? 0 : Math.max(1, bp.duration),
+          progress: 0.0,
+          constructionPhase: bp.constructionPhase,
+          baselineStart: startStr,
+          baselineEnd: endStr,
+          type: bp.type,
+          parentTaskId: bp.parentIdx !== undefined ? generatedIds[bp.parentIdx] : null,
+          sortOrder: idx + 1,
+          predecessorIds: (bp.predIndices || []).map((pi) => generatedIds[pi]).filter(Boolean)
         };
       });
 
-      const templateLinks: GanttLinkItem[] = DEFAULT_EM_JAY_LINKS.map((l, idx) => ({
-        id: `lnk-${selectedProjectId}-${idx + 1}-${Date.now().toString().slice(-4)}`,
-        source: idMap.get(l.source) || l.source,
-        target: idMap.get(l.target) || l.target,
-        type: l.type || '0',
-        lag: l.lag || 0
-      }));
+      const templateLinks: GanttLinkItem[] = [];
+      preset.tasks.forEach((bp, idx) => {
+        (bp.predIndices || []).forEach((pi, lIdx) => {
+          if (generatedIds[pi]) {
+            templateLinks.push({
+              id: `lnk-${selectedProjectId}-${idx + 1}-${lIdx + 1}-${stamp}`,
+              source: generatedIds[pi],
+              target: generatedIds[idx],
+              type: '0',
+              lag: 0
+            });
+          }
+        });
+      });
 
-      setTasks(templateTasks);
-      setLinks(templateLinks);
-      saveProjectGanttTasks(selectedProjectId, templateTasks);
+      // Single bulk request/transaction to /api/projects/:projectId/gantt/sync with full auth headers
+      const res = await fetch(`/api/projects/${encodeURIComponent(selectedProjectId)}/gantt/sync`, {
+        method: 'POST',
+        headers: buildGanttAuthHeaders(true),
+        credentials: 'include',
+        body: JSON.stringify({
+          tasks: templateTasks.map((t) => ({
+            ...t,
+            start_date: t.startDate,
+            end_date: t.endDate,
+            milestonePhase: t.constructionPhase,
+          })),
+          links: templateLinks,
+          deletedTaskIds: tasks.map((t) => t.id),
+          deletedLinkIds: links.map((l) => l.id)
+        })
+      });
 
-      // Persist template tasks to backend
-      for (const t of templateTasks) {
-        await syncBackend('create', t);
+      const resData = await res.json().catch(() => null);
+      if (!res.ok || !resData?.success) {
+        const errMsg = resData?.error || `Database sync failed (HTTP ${res.status})`;
+        console.error('[Gantt Load Template] Bulk sync failed:', { status: res.status, resData, projectId: selectedProjectId });
+        throw new Error(errMsg);
       }
 
+      if (resData?.localOnly) {
+        console.error('[Gantt Load Template] Project not found in database (localOnly):', { projectId: selectedProjectId, resData });
+        throw new Error(`Project "${selectedProjectId}" was not found in the database. Template could not be saved.`);
+      }
+
+      if (!Array.isArray(resData?.data) || resData.data.length === 0) {
+        console.error('[Gantt Load Template] Database returned 0 persisted tasks:', { projectId: selectedProjectId, resData });
+        throw new Error('Database did not persist the template tasks. Please try again.');
+      }
+
+      // Hydrate directly from authoritative PostgreSQL response so refresh/project-switch matches 100%
+      const { parsedTasks: dbTasks, parsedLinks: dbLinks } = parseDbGanttPayload(
+        selectedProjectId,
+        resData.data,
+        Array.isArray(resData.links) ? resData.links : []
+      );
+      setTasks(dbTasks);
+      setLinks(dbLinks);
+      purgeStaleLocalGanttCache(selectedProjectId, dbTasks);
+
+      const unifiedProg = computeUnifiedProjectProgress(dbTasks);
+      onUpdateProject?.(selectedProjectId, {
+        progressPercentage: unifiedProg,
+        cpmProgress: unifiedProg,
+        tasksCount: dbTasks.length
+      });
+
+      setIsTemplateModalOpen(false);
       setSyncFeedback({
         type: 'success',
-        message: 'Standard Fit-Out Template loaded: All tasks initialized at 0% progress.'
+        message: `${preset.name} saved to DB (${dbTasks.length} tasks starting ${templateStartDate}, 0% progress).`
       });
-      setTimeout(() => setSyncFeedback(null), 3500);
-    } catch (err) {
-      console.error('Failed to load standard fit-out template:', err);
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } catch (err: any) {
+      console.error('Failed to load & persist schedule template:', err);
       setSyncFeedback({
         type: 'error',
-        message: 'Failed to load standard fit-out template'
+        message: err?.message || 'Failed to save schedule template to database.'
       });
-      setTimeout(() => setSyncFeedback(null), 3500);
+      setTimeout(() => setSyncFeedback(null), 5000);
     } finally {
+      setIsApplyingTemplate(false);
       setIsSyncing(false);
     }
   };
@@ -2377,239 +2572,59 @@ export default function GanttTimeline({
         : 'space-y-4 select-none'
         }`}
     >
-      {/* 1. Header Toolbar */}
-      <div className={`${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200/80 shadow-xs'
-        } border rounded-xl transition-all ${isFullscreen ? 'p-3 mb-2 shrink-0' : 'p-4'
-        }`}>
-        {!isFullscreen ? (
-          <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold tracking-wider uppercase border ${isDark ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' : 'bg-amber-50 text-amber-700 border-amber-200'
-                  }`}>
-                  Critical Path Method
-                </span>
-                <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                  React 19 Direct Manipulation • 6-Day Workweek
-                </span>
-              </div>
-              <h2 className={`text-base font-bold tracking-tight flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'
-                }`}>
-                <Layers className={`w-5 h-5 ${isDark ? 'text-amber-400' : 'text-amber-600'}`} />
-                Construction CPM Scheduling & Task Management
-              </h2>
-              <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                Drag bars to reschedule, drag edges to adjust duration, or double-click to configure predecessors and dependencies.
-              </p>
-            </div>
-
-            {/* Metrics summary */}
-            <div className={`flex items-center gap-3 text-xs font-mono px-3.5 py-1.5 rounded-xl border self-start xl:self-auto ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200/80 shadow-2xs'
-              }`}>
-              <div className="text-center px-1">
-                <span className={`text-[10px] uppercase block tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Total</span>
-                <span className={`font-bold text-xs ${isDark ? 'text-white' : 'text-slate-800'}`}>{metrics.total}</span>
-              </div>
-              <div className={`h-5 w-px ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`} />
-              <div className="text-center px-1">
-                <span className={`text-[10px] uppercase block tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Done</span>
-                <span className={`font-bold text-xs ${isDark ? 'text-white' : 'text-slate-800'}`}>{metrics.completed}</span>
-              </div>
-              <div className={`h-5 w-px ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`} />
-              <div className="text-center px-1">
-                <span className={`text-[10px] uppercase block tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Milestones</span>
-                <span className={`font-bold text-xs ${isDark ? 'text-white' : 'text-slate-800'}`}>{metrics.milestones}</span>
-              </div>
-              <div className={`h-5 w-px ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`} />
-              <div className="text-center px-1">
-                <span className={`text-[10px] uppercase block tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Progress</span>
-                <span className={`font-bold text-xs ${isDark ? 'text-white' : 'text-slate-800'}`}>{currentProjectProgress}%</span>
-              </div>
-            </div>
-          </div>
-        ) : (
-          /* Sleek Fullscreen Status Banner */
-          <div className={`flex items-center justify-between gap-4 text-xs font-mono pb-2 border-b ${isDark ? 'border-slate-800/80' : 'border-slate-200'
-            }`}>
-            <div className="flex items-center gap-3">
-              <span className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span className={`font-bold text-sm tracking-tight flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-900'
-                }`}>
-                <Layers className={`w-4 h-4 ${isDark ? 'text-amber-400' : 'text-amber-600'}`} />
-                {activeProject?.name || 'Project Schedule'}
-              </span>
-              <span className={`text-xs font-bold px-2 py-0.5 rounded border ${isDark ? 'text-amber-400 bg-amber-500/10 border-amber-500/20' : 'text-amber-700 bg-amber-50 border-amber-200'
-                }`}>
-                {currentProjectProgress}% Done ({metrics.completed}/{metrics.total} Tasks • {metrics.milestones} Milestones)
-              </span>
-            </div>
-            <div className={`flex items-center gap-2 text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              <span>Press <kbd className={`px-1.5 py-0.5 rounded border ${isDark ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-slate-100 border-slate-300 text-slate-700'
-                }`}>Esc</kbd> to exit full screen</span>
-            </div>
-          </div>
-        )}
-
-        {/* Action Controls Bar */}
-        <div className={`no-print mt-3 pt-3 border-t flex flex-wrap items-center justify-between gap-2.5 ${isDark ? 'border-slate-800/80' : 'border-slate-200'
-          }`}>
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Project Switcher */}
+      {/* Streamlined 2-Row Gantt Toolbar */}
+      <div className={`no-print ${isDark ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200/80 shadow-xs'} border rounded-xl transition-all ${isFullscreen ? 'p-3 mb-2 shrink-0' : 'px-4 py-3 space-y-2.5'}`}>
+        {/* ROW 1: Project Selector (Left) + Primary Schedule Actions (Right) */}
+        <div className="flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5 min-w-0">
             {projects.length > 0 ? (
               <select
                 value={selectedProjectId}
                 onChange={(e) => setSelectedProjectId(e.target.value)}
                 aria-label="Select Commercial Project"
-                className={`rounded-lg px-2.5 py-1.5 text-xs font-semibold focus:border-amber-500 focus:outline-none cursor-pointer border ${isDark
-                  ? 'bg-slate-950 border-slate-700 text-slate-200'
-                  : 'bg-white border-slate-300 text-slate-800 shadow-2xs'
-                  }`}
+                className={`rounded-lg px-3 py-1.5 text-xs font-semibold focus:border-amber-500 focus:outline-none cursor-pointer border max-w-[260px] sm:max-w-xs truncate ${isDark ? 'bg-slate-950 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800 shadow-2xs'}`}
               >
                 {projects.map(p => (
                   <option key={p.id} value={p.id}>
-                    {p.name} ({p.id === selectedProjectId ? currentProjectProgress : getCanonicalProjectProgress(p, tasksProp || [])}% Complete)
+                    {p.name} ({p.id === selectedProjectId ? currentProjectProgress : getCanonicalProjectProgress(p, tasksProp || [])}%)
                   </option>
                 ))}
               </select>
             ) : (
-              <span className={`text-xs font-mono px-2.5 py-1.5 rounded-lg border ${isDark ? 'text-slate-400 bg-slate-950 border-slate-800' : 'text-slate-500 bg-slate-50 border-slate-200'
-                }`}>
+              <span className={`text-xs font-mono px-2.5 py-1.5 rounded-lg border ${isDark ? 'text-slate-400 bg-slate-950 border-slate-800' : 'text-slate-500 bg-slate-50 border-slate-200'}`}>
                 No Commercial Sites Registered
               </span>
             )}
 
-            {/* Active Project Physical Progress Bar Indicator */}
             {activeProject && (
-              <div className={`flex items-center gap-2.5 border rounded-xl px-3 py-1.5 ${isDark ? 'bg-slate-900/60 border-slate-800' : 'bg-slate-50 border-slate-200 shadow-2xs'
-                }`}>
-                <div className="flex items-center gap-2 text-[10px] font-mono">
-                  <span className={isDark ? 'text-slate-400 font-medium' : 'text-slate-500 font-medium'}>Progress:</span>
-                  <span className={`font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{currentProjectProgress}%</span>
-                </div>
-                <div className={`w-20 h-1.5 rounded-full overflow-hidden border ${isDark ? 'bg-slate-800 border-slate-700/50' : 'bg-slate-200 border-slate-300/80'
-                  }`}>
+              <div className={`hidden sm:flex items-center gap-2 border rounded-lg px-2.5 py-1 text-[11px] font-mono ${isDark ? 'bg-slate-950/70 border-slate-800 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>
+                <span className="font-bold text-amber-400">{currentProjectProgress}%</span>
+                <div className={`w-16 h-1.5 rounded-full overflow-hidden ${isDark ? 'bg-slate-800' : 'bg-slate-200'}`}>
                   <div
                     className="h-full bg-amber-500 rounded-full transition-all duration-300"
                     style={{ width: `${Math.min(100, Math.max(0, currentProjectProgress))}%` }}
                   />
                 </div>
+                <span className={isDark ? 'text-slate-400' : 'text-slate-500'}>
+                  {metrics.completed}/{metrics.total} tasks
+                </span>
               </div>
             )}
 
-            {/* Full Screen Mode */}
-            <button
-              type="button"
-              onClick={toggleFullscreen}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer border ${isDark
-                ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300/80 shadow-2xs'
-                }`}
-              title={isFullscreen ? 'Exit Full Screen Mode (Esc)' : 'Open Full Screen Mode (Auto-fits entire schedule across monitor)'}
-            >
-              {isFullscreen ? (
-                <>
-                  <Minimize2 className={`w-3.5 h-3.5 ${isDark ? 'text-slate-300' : 'text-slate-600'}`} />
-                  <span>Exit Full Screen</span>
-                </>
-              ) : (
-                <>
-                  <Maximize2 className={`w-3.5 h-3.5 ${isDark ? 'text-slate-300' : 'text-slate-600'}`} />
-                  <span>Full Screen</span>
-                </>
-              )}
-            </button>
+            {isSyncing && (
+              <span className={`text-[11px] font-mono px-2 py-1 rounded-lg flex items-center gap-1.5 border ${isDark ? 'text-indigo-400 bg-indigo-950/60 border-indigo-700' : 'text-indigo-700 bg-indigo-50 border-indigo-200'}`}>
+                <RefreshCw className="w-3 h-3 animate-spin" />
+                <span>Syncing...</span>
+              </span>
+            )}
+          </div>
 
-            {/* Left Task Grid Pane Toggle (Wide Timeline View) */}
-            <button
-              type="button"
-              onClick={() => setIsLeftPaneCollapsed(prev => !prev)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${isLeftPaneCollapsed
-                ? isDark
-                  ? 'bg-indigo-950/70 text-indigo-300 border-indigo-700/60 hover:bg-indigo-900/60'
-                  : 'bg-indigo-50 text-indigo-700 border-indigo-200 hover:bg-indigo-100 shadow-2xs'
-                : isDark
-                  ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                  : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300/80 shadow-2xs'
-                }`}
-              title={isLeftPaneCollapsed ? 'Show Task Grid' : 'Maximize Timeline (Hide Task Grid)'}
-            >
-              {isLeftPaneCollapsed ? <PanelLeftOpen className="w-3.5 h-3.5" /> : <PanelLeftClose className="w-3.5 h-3.5" />}
-              <span>{isLeftPaneCollapsed ? 'Show Grid' : 'Wide Timeline'}</span>
-            </button>
-
-            {/* Timescale Zoom Controls with Zoom In & Zoom Out */}
-            <div className={`flex items-center border rounded-lg p-0.5 gap-0.5 ${isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-100/90 border-slate-200'
-              }`}>
-              <button
-                type="button"
-                onClick={handleZoomOut}
-                className={`p-1 rounded-md transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-amber-300 hover:bg-slate-800' : 'text-slate-600 hover:text-amber-700 hover:bg-white'
-                  }`}
-                title="Zoom Out Timeline (-)"
-              >
-                <ZoomOut className="w-3.5 h-3.5" />
-              </button>
-
-              <div className={`flex items-center gap-0.5 border-x px-1 ${isDark ? 'border-slate-800/80' : 'border-slate-200'
-                }`}>
-                {(['year', 'quarter', 'month', 'week', 'day'] as ZoomLevel[]).map(z => (
-                  <button
-                    key={z}
-                    type="button"
-                    onClick={() => { setZoomLevel(z); setZoomFactor(1); }}
-                    className={`px-2 py-0.5 text-xs rounded font-mono font-medium transition cursor-pointer capitalize ${zoomLevel === z
-                      ? (isDark ? 'bg-slate-800 text-amber-400 font-bold' : 'bg-white text-amber-700 font-bold shadow-2xs')
-                      : (isDark ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')
-                      }`}
-                  >
-                    {z}
-                  </button>
-                ))}
-              </div>
-
-              <button
-                type="button"
-                onClick={handleZoomIn}
-                className={`p-1 rounded-md transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-amber-300 hover:bg-slate-800' : 'text-slate-600 hover:text-amber-700 hover:bg-white'
-                  }`}
-                title="Zoom In Timeline (+)"
-              >
-                <ZoomIn className="w-3.5 h-3.5" />
-              </button>
-
-              {/* Quick Auto-Fit Helper Button inside zoom group */}
-              <button
-                type="button"
-                onClick={handleFitToScreen}
-                className={`p-1 rounded-md transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-amber-300 hover:bg-slate-800' : 'text-slate-600 hover:text-amber-700 hover:bg-white'
-                  }`}
-                title="Auto-Fit Timeline into current window width"
-              >
-                <Scan className="w-3.5 h-3.5" />
-              </button>
-
-              <button
-                type="button"
-                onClick={handleResetZoom}
-                className={`text-[10px] font-mono px-1.5 py-0.5 rounded transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-amber-300' : 'text-slate-600 hover:text-amber-700'
-                  }`}
-                title="Reset Zoom to 100%"
-              >
-                {Math.round(zoomFactor * 100)}%
-              </button>
-            </div>
-
-            {/* Add Task / Milestone Buttons */}
+          <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
               disabled={!selectedProjectId}
               onClick={() => handleAddNewTask()}
-              className={`flex items-center gap-1.5 px-3.5 py-1.5 font-bold rounded-lg text-xs transition cursor-pointer ${!selectedProjectId
-                ? isDark
-                  ? 'bg-slate-800/60 text-slate-500 cursor-not-allowed border border-slate-800'
-                  : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200'
-                : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs'
-                }`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 font-bold rounded-lg text-xs transition cursor-pointer ${!selectedProjectId ? (isDark ? 'bg-slate-800/60 text-slate-500 cursor-not-allowed border border-slate-800' : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200') : 'bg-amber-500 hover:bg-amber-400 text-slate-950 shadow-xs'}`}
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Task</span>
@@ -2618,106 +2633,264 @@ export default function GanttTimeline({
               type="button"
               disabled={!selectedProjectId}
               onClick={handleAddNewMilestone}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${!selectedProjectId
-                ? isDark
-                  ? 'bg-slate-800/60 text-slate-500 cursor-not-allowed border-slate-800'
-                  : 'bg-slate-100 text-slate-400 cursor-not-allowed border-slate-200'
-                : isDark
-                  ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                  : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300/80 shadow-2xs'
-                }`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${!selectedProjectId ? (isDark ? 'bg-slate-800/60 text-slate-500 cursor-not-allowed border border-slate-800' : 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200') : (isDark ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300/80 shadow-2xs')}`}
             >
               <span className={isDark ? 'text-amber-400 text-xs' : 'text-amber-600 text-xs'}>◆</span>
               <span>Add Milestone</span>
             </button>
-            {tasks.length === 0 && selectedProjectId && (
+            {selectedProjectId && (
               <button
                 type="button"
-                onClick={handleLoadStandardFitOutTemplate}
+                onClick={handleOpenTemplateModal}
                 disabled={isSyncing}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${isDark
-                  ? 'bg-slate-800 hover:bg-slate-700 text-amber-400 border-amber-500/30'
-                  : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300 shadow-2xs'
-                  }`}
-                title="Load Standard Fit-Out Template (initialized at 0% progress)"
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${isDark ? 'bg-slate-800 hover:bg-slate-700 text-amber-400 border-amber-500/30' : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-300 shadow-2xs'}`}
+                title="Choose a schedule preset & start date"
               >
                 <Sparkles className="w-3.5 h-3.5 text-amber-500" />
                 <span>Load Template</span>
               </button>
             )}
           </div>
+        </div>
 
-          <div className="flex items-center gap-2">
-            {/* Tree Expand / Collapse All Quick Controls */}
-            <div className={`flex items-center gap-0.5 border rounded-lg p-0.5 ${isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-100/90 border-slate-200'
-              }`}>
+        {/* ROW 2: Single Zoom Control + Today + Expand/Collapse + Compact Legend + More Tools Dropdown */}
+        <div className={`pt-2.5 border-t flex flex-wrap items-center justify-between gap-2.5 ${isDark ? 'border-slate-800/80' : 'border-slate-200'}`}>
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Single Zoom Control: Year | Quarter | Month | Week | Day */}
+            <div className={`flex items-center border rounded-lg p-0.5 gap-0.5 ${isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-100/90 border-slate-200'}`}>
+              <button
+                type="button"
+                onClick={handleZoomOut}
+                className={`p-1 rounded-md transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-amber-300 hover:bg-slate-800' : 'text-slate-600 hover:text-amber-700 hover:bg-white'}`}
+                title="Zoom Out (-)"
+              >
+                <ZoomOut className="w-3.5 h-3.5" />
+              </button>
+              <div className={`flex items-center gap-0.5 border-x px-1 ${isDark ? 'border-slate-800/80' : 'border-slate-200'}`}>
+                {(['year', 'quarter', 'month', 'week', 'day'] as ZoomLevel[]).map(z => (
+                  <button
+                    key={z}
+                    type="button"
+                    onClick={() => { setZoomLevel(z); setZoomFactor(1); }}
+                    className={`px-2 py-0.5 text-xs rounded font-mono font-medium transition cursor-pointer capitalize ${zoomLevel === z ? (isDark ? 'bg-amber-500 text-slate-950 font-bold' : 'bg-white text-amber-700 font-bold shadow-2xs') : (isDark ? 'text-slate-400 hover:text-white' : 'text-slate-600 hover:text-slate-900')}`}
+                  >
+                    {z}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={handleZoomIn}
+                className={`p-1 rounded-md transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-amber-300 hover:bg-slate-800' : 'text-slate-600 hover:text-amber-700 hover:bg-white'}`}
+                title="Zoom In (+)"
+              >
+                <ZoomIn className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={handleFitToScreen}
+                className={`p-1 rounded-md transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-amber-300 hover:bg-slate-800' : 'text-slate-600 hover:text-amber-700 hover:bg-white'}`}
+                title="Fit Timeline to Window"
+              >
+                <Scan className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Today Button */}
+            <button
+              type="button"
+              onClick={handleScrollToToday}
+              className={`px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold border transition cursor-pointer ${isDark ? 'bg-slate-950 hover:bg-slate-800 text-rose-400 border-slate-800' : 'bg-white hover:bg-slate-50 text-rose-600 border-slate-200 shadow-2xs'}`}
+              title="Scroll Timeline to Today"
+            >
+              Today
+            </button>
+
+            {/* Expand / Collapse All */}
+            <div className={`flex items-center gap-0.5 border rounded-lg p-0.5 ${isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-100/90 border-slate-200'}`}>
               <button
                 type="button"
                 onClick={handleExpandAll}
-                className={`px-2 py-1 rounded text-xs font-mono transition flex items-center gap-1 cursor-pointer ${isDark ? 'text-slate-300 hover:text-white hover:bg-slate-800' : 'text-slate-600 hover:text-slate-900 hover:bg-white shadow-2xs'
-                  }`}
-                title="Expand All Subtasks"
+                className={`px-2 py-1 rounded text-xs font-mono transition flex items-center gap-1 cursor-pointer ${isDark ? 'text-slate-300 hover:text-white hover:bg-slate-800' : 'text-slate-600 hover:text-slate-900 hover:bg-white'}`}
+                title="Expand All Phases"
               >
                 <ChevronsDown className={`w-3.5 h-3.5 ${isDark ? 'text-amber-400' : 'text-amber-600'}`} />
-                <span className="hidden sm:inline">Expand All</span>
+                <span className="hidden md:inline">Expand</span>
               </button>
               <button
                 type="button"
                 onClick={handleCollapseAll}
-                className={`px-2 py-1 rounded text-xs font-mono transition flex items-center gap-1 cursor-pointer ${isDark ? 'text-slate-300 hover:text-white hover:bg-slate-800' : 'text-slate-600 hover:text-slate-900 hover:bg-white shadow-2xs'
-                  }`}
-                title="Collapse All Subtasks"
+                className={`px-2 py-1 rounded text-xs font-mono transition flex items-center gap-1 cursor-pointer ${isDark ? 'text-slate-300 hover:text-white hover:bg-slate-800' : 'text-slate-600 hover:text-slate-900 hover:bg-white'}`}
+                title="Collapse All Phases"
               >
                 <ChevronsUp className={`w-3.5 h-3.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`} />
-                <span className="hidden sm:inline">Collapse All</span>
+                <span className="hidden md:inline">Collapse</span>
               </button>
             </div>
+          </div>
 
-            {/* Quick Timeline Scroll Jumper */}
-            <div className={`flex items-center gap-0.5 border rounded-lg p-0.5 ${isDark ? 'bg-slate-950 border-slate-800' : 'bg-slate-100/90 border-slate-200'
-              }`}>
-              <button
-                type="button"
-                onClick={handleScrollToToday}
-                className={`px-2 py-1 rounded text-xs font-mono transition flex items-center gap-1 cursor-pointer ${isDark ? 'text-rose-400 hover:text-white hover:bg-slate-800' : 'text-rose-600 hover:text-rose-700 hover:bg-white font-semibold shadow-2xs'
-                  }`}
-                title="Scroll Timeline View to Today"
-              >
-                <span>Today</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleScrollToFirstTask}
-                className={`px-2 py-1 rounded text-xs font-mono transition flex items-center gap-1 cursor-pointer ${isDark ? 'text-amber-400 hover:text-white hover:bg-slate-800' : 'text-amber-700 hover:text-amber-900 hover:bg-white font-semibold shadow-2xs'
-                  }`}
-                title="Scroll Timeline View to First Scheduled Task"
-              >
-                <span>Jump to Tasks</span>
-              </button>
+          <div className="flex items-center gap-3">
+            {/* Compact Legend */}
+            <div className="hidden xl:flex items-center gap-3 text-[11px] font-medium">
+              <span className="flex items-center gap-1.5 text-slate-400"><span className="w-2 h-2 rounded-2xs bg-emerald-600 inline-block" />Task</span>
+              <span className="flex items-center gap-1.5 text-slate-400"><span className="w-2 h-2 rounded-2xs bg-red-600 inline-block" />Critical</span>
+              <span className="flex items-center gap-1 text-slate-400"><span className="text-amber-400 font-bold">◆</span>Milestone</span>
+              <span className="flex items-center gap-1.5 text-slate-400"><span className="w-3 h-[2px] bg-slate-400/80 inline-block" />Baseline</span>
             </div>
 
-            {/* Sync status & Refresh */}
-            <div className="flex items-center gap-2">
-              {isSyncing && (
-                <span className={`text-[11px] font-mono px-2.5 py-1 rounded-lg flex items-center gap-1.5 animate-pulse border ${isDark ? 'text-indigo-400 bg-indigo-950/60 border-indigo-700' : 'text-indigo-700 bg-indigo-50 border-indigo-200'
-                  }`}>
-                  <RefreshCw className="w-3 h-3 animate-spin" />
-                  <span>Auto-syncing to DB...</span>
-                </span>
+            {/* More Tools Dropdown */}
+            <div ref={moreToolsRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setIsMoreToolsOpen((prev) => !prev)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold border transition cursor-pointer ${isDark ? 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300/80 shadow-2xs'}`}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-amber-400" />
+                <span>More Tools</span>
+                <ChevronDown className={`w-3.5 h-3.5 transition-transform ${isMoreToolsOpen ? 'rotate-180' : ''}`} />
+              </button>
+
+              {isMoreToolsOpen && (
+                <div className={`absolute right-0 mt-1.5 w-52 rounded-xl border shadow-2xl py-1.5 z-50 text-xs ${isDark ? 'bg-slate-900 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      setSyncFeedback({
+                        type: 'success',
+                        message: 'Link mode enabled: Drag connectors between tasks to define Finish-to-Start relationships'
+                      });
+                      setTimeout(() => setSyncFeedback(null), 3500);
+                    }}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    <Link2 className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Link Tasks</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      const { updatedTasks, shiftedCount } = autoScheduleProject(tasks, links);
+                      setTasks(updatedTasks);
+                      if (selectedProjectId) {
+                        saveProjectGanttTasks(selectedProjectId, updatedTasks);
+                        updatedTasks.forEach(t => {
+                          const orig = tasks.find(ot => ot.id === t.id);
+                          if (orig && (orig.startDate !== t.startDate || orig.endDate !== t.endDate)) {
+                            syncBackend('update', t);
+                          }
+                        });
+                      }
+                      setSyncFeedback({
+                        type: 'success',
+                        message: `Auto-schedule completed: Cascaded ${shiftedCount} ${shiftedCount === 1 ? 'dependency' : 'dependencies'}`
+                      });
+                      setTimeout(() => setSyncFeedback(null), 3500);
+                    }}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    <Wand2 className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Auto-Schedule</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      if (!selectedProjectId) return;
+                      const rebaselined = tasks.map(t => ({
+                        ...t,
+                        baselineStart: t.startDate,
+                        baselineEnd: t.endDate
+                      }));
+                      setTasks(rebaselined);
+                      saveProjectGanttTasks(selectedProjectId, rebaselined);
+                      rebaselined.forEach(t => syncBackend('update', t));
+                      setSyncFeedback({
+                        type: 'success',
+                        message: 'Re-baseline complete: Contract baseline synchronized to current dates'
+                      });
+                      setTimeout(() => setSyncFeedback(null), 3500);
+                    }}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    <BookmarkCheck className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Re-baseline</span>
+                  </button>
+
+                  <div className={`my-1 border-t ${isDark ? 'border-slate-800' : 'border-slate-100'}`} />
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      window.print();
+                    }}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    <Printer className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Print</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      const headers = ['WBS,Task,Start,End,Duration,Progress,Type\n'];
+                      const rows = tasks.map(t =>
+                        `"${t.wbsCode}","${t.text.replace(/"/g, '""')}","${t.startDate}","${t.endDate}",${t.duration},${Math.round(t.progress * 100)}%,"${t.type}"`
+                      );
+                      const blob = new Blob([...headers, ...rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = `Gantt_Schedule_${activeProject?.name?.replace(/\s+/g, '_') || 'LDM'}.csv`;
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    <Download className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Export CSV</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      toggleFullscreen();
+                    }}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    {isFullscreen ? <Minimize2 className="w-3.5 h-3.5 text-slate-400" /> : <Maximize2 className="w-3.5 h-3.5 text-slate-400" />}
+                    <span>{isFullscreen ? 'Exit Full Screen' : 'Full Screen'}</span>
+                  </button>
+
+                  <div className={`my-1 border-t ${isDark ? 'border-slate-800' : 'border-slate-100'}`} />
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      handleScrollToFirstTask();
+                    }}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                    <span>Jump to First Task</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMoreToolsOpen(false);
+                      loadGanttData(selectedProjectId);
+                    }}
+                    disabled={isLoading}
+                    className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
+                  >
+                    <RotateCw className={`w-3.5 h-3.5 text-slate-400 ${isLoading ? 'animate-spin text-amber-400' : ''}`} />
+                    <span>Reload from Server</span>
+                  </button>
+                </div>
               )}
-
-              <button
-                type="button"
-                onClick={() => loadGanttData(selectedProjectId)}
-                disabled={isLoading}
-                className={`p-1.5 rounded-lg text-xs border transition cursor-pointer ${isDark
-                  ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border-slate-700'
-                  : 'bg-white hover:bg-slate-100 text-slate-600 border-slate-300/80 shadow-2xs'
-                  }`}
-                title="Reload from Server"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-amber-500' : ''}`} />
-              </button>
             </div>
           </div>
         </div>
@@ -2727,15 +2900,7 @@ export default function GanttTimeline({
           <div
             role="status"
             aria-live="polite"
-            className={`no-print fixed bottom-5 right-5 z-[9990] px-3.5 py-2 rounded-xl border text-xs font-medium shadow-xl backdrop-blur-md flex items-center gap-2 animate-fadeIn ${
-              syncFeedback.type === 'success'
-                ? isDark
-                  ? 'bg-slate-900/95 border-emerald-500/40 text-emerald-300'
-                  : 'bg-white/95 border-emerald-300 text-emerald-800'
-                : isDark
-                  ? 'bg-slate-900/95 border-rose-500/40 text-rose-300'
-                  : 'bg-white/95 border-rose-300 text-rose-800'
-            }`}
+            className={`no-print fixed bottom-5 right-5 z-[9990] px-3.5 py-2 rounded-xl border text-xs font-medium shadow-xl backdrop-blur-md flex items-center gap-2 animate-fadeIn ${syncFeedback.type === 'success' ? (isDark ? 'bg-slate-900/95 border-emerald-500/40 text-emerald-300' : 'bg-white/95 border-emerald-300 text-emerald-800') : (isDark ? 'bg-slate-900/95 border-rose-500/40 text-rose-300' : 'bg-white/95 border-rose-300 text-rose-800')}`}
           >
             {syncFeedback.type === 'success' ? (
               <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
@@ -2747,181 +2912,12 @@ export default function GanttTimeline({
         )}
       </div>
 
-      {/* 2. Em Jay Construction CPM Gantt Toolbar & Legend */}
-      {!isFullscreen && (
-        <div className={`border rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs font-mono select-none ${isDark ? 'bg-slate-950/90 border-slate-800 text-slate-300' : 'bg-slate-900 border-slate-800 text-slate-200 shadow-md'
-          }`}>
-          {/* Left: View Mode Pills & Action Tools */}
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* View Mode Pills: Day / Week / Month */}
-            <div className="flex items-center rounded-lg overflow-hidden bg-slate-900/90 border border-slate-700/80 p-0.5">
-              {(['day', 'week', 'month'] as ZoomLevel[]).map(z => {
-                const isActive = zoomLevel === z;
-                return (
-                  <button
-                    key={z}
-                    type="button"
-                    onClick={() => { setZoomLevel(z); setZoomFactor(1); }}
-                    className={`px-3 py-1 text-xs rounded-md font-medium transition cursor-pointer capitalize ${isActive
-                      ? 'bg-[#ea580c] text-white font-bold shadow-xs'
-                      : 'text-slate-400 hover:text-white hover:bg-slate-800'
-                      }`}
-                  >
-                    {z === 'day' ? 'Day' : z === 'week' ? 'Week' : 'Month'}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Link mode */}
-            <button
-              type="button"
-              onClick={() => {
-                setSyncFeedback({
-                  type: 'success',
-                  message: 'Link mode enabled: Drag connectors between tasks to define Finish-to-Start relationships'
-                });
-                setTimeout(() => setSyncFeedback(null), 3500);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/80 bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white transition cursor-pointer shadow-2xs"
-              title="Link Mode"
-            >
-              <Link2 className="w-3.5 h-3.5 text-slate-400" />
-              <span>Link mode</span>
-            </button>
-
-            {/* Auto-schedule */}
-            <button
-              type="button"
-              onClick={() => {
-                const { updatedTasks, shiftedCount } = autoScheduleProject(tasks, links);
-                setTasks(updatedTasks);
-                if (selectedProjectId) {
-                  saveProjectGanttTasks(selectedProjectId, updatedTasks);
-                  updatedTasks.forEach(t => {
-                    const orig = tasks.find(ot => ot.id === t.id);
-                    if (orig && (orig.startDate !== t.startDate || orig.endDate !== t.endDate)) {
-                      syncBackend('update', t);
-                    }
-                  });
-                }
-                setSyncFeedback({
-                  type: 'success',
-                  message: `Auto-schedule completed: Cascaded ${shiftedCount} ${shiftedCount === 1 ? 'dependency' : 'dependencies'}`
-                });
-                setTimeout(() => setSyncFeedback(null), 3500);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/80 bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white transition cursor-pointer shadow-2xs"
-              title="Auto-Schedule CPM"
-            >
-              <Wand2 className="w-3.5 h-3.5 text-amber-400" />
-              <span>Auto-schedule</span>
-            </button>
-
-            {/* Re-baseline */}
-            <button
-              type="button"
-              onClick={() => {
-                if (!selectedProjectId) return;
-                const rebaselined = tasks.map(t => ({
-                  ...t,
-                  baselineStart: t.startDate,
-                  baselineEnd: t.endDate
-                }));
-                setTasks(rebaselined);
-                saveProjectGanttTasks(selectedProjectId, rebaselined);
-                rebaselined.forEach(t => syncBackend('update', t));
-                setSyncFeedback({
-                  type: 'success',
-                  message: 'Re-baseline complete: Contract baseline synchronized to current dates'
-                });
-                setTimeout(() => setSyncFeedback(null), 3500);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/80 bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white transition cursor-pointer shadow-2xs"
-              title="Re-baseline Schedule"
-            >
-              <BookmarkCheck className="w-3.5 h-3.5 text-slate-400" />
-              <span>Re-baseline</span>
-            </button>
-
-            {/* Print */}
-            <button
-              type="button"
-              onClick={() => window.print()}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/80 bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white transition cursor-pointer shadow-2xs"
-              title="Print Gantt Chart"
-            >
-              <Printer className="w-3.5 h-3.5 text-slate-400" />
-              <span>Print</span>
-            </button>
-
-            {/* Export */}
-            <button
-              type="button"
-              onClick={() => {
-                const headers = ['WBS,Task,Start,End,Duration,Progress,Type\n'];
-                const rows = tasks.map(t =>
-                  `"${t.wbsCode}","${t.text.replace(/"/g, '""')}","${t.startDate}","${t.endDate}",${t.duration},${Math.round(t.progress * 100)}%,"${t.type}"`
-                );
-                const blob = new Blob([...headers, ...rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `Gantt_Schedule_${activeProject?.name?.replace(/\s+/g, '_') || 'LDM'}.csv`;
-                a.click();
-                URL.revokeObjectURL(url);
-              }}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border border-slate-700/80 bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white transition cursor-pointer shadow-2xs"
-              title="Export CSV"
-            >
-              <Download className="w-3.5 h-3.5 text-slate-400" />
-              <span>Export</span>
-            </button>
-
-            {/* Reload */}
-            <button
-              type="button"
-              onClick={() => loadGanttData(selectedProjectId)}
-              disabled={isLoading}
-              className="p-1.5 rounded-lg text-xs border border-slate-700/80 bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-white transition cursor-pointer shadow-2xs"
-              title="Reload from Server"
-            >
-              <RotateCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-amber-500' : ''}`} />
-            </button>
-          </div>
-
-          {/* Right: Reference Legend Items */}
-          <div className="flex flex-wrap items-center gap-4 text-xs font-medium">
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-2xs bg-emerald-600 inline-block" />
-              <span className="text-slate-300">Task</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 rounded-2xs bg-red-600 inline-block" />
-              <span className="text-slate-300">Critical</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="text-amber-400 font-bold text-xs select-none">◆</span>
-              <span className="text-slate-300">Milestone</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-3.5 h-[2.5px] bg-slate-400/80 rounded-full inline-block" />
-              <span className="text-slate-300">Baseline</span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <span className="w-0.5 h-3 bg-red-500 inline-block" />
-              <span className="text-slate-300">Today</span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 3. Dual-Pane Synchronized Gantt Canvas */}
       <div className={`gantt-print-canvas border rounded-2xl overflow-hidden flex flex-col xl:flex-row ${isDark ? 'bg-slate-950 border-slate-800 shadow-2xl' : 'bg-white border-slate-200/90 shadow-sm'
         } ${isFullscreen ? 'flex-1 min-h-0' : 'h-[520px] sm:h-[600px] xl:h-[660px]'
         }`}>
         {/* LEFT PANE: WBS Data Grid (Collapsible to maximize Timeline Canvas) */}
-        <div className={`${isLeftPaneCollapsed ? 'w-14 shrink-0' : 'w-full xl:w-[480px] shrink-0'
+        <div className={`${isLeftPaneCollapsed ? 'w-14 shrink-0' : 'w-full xl:w-[540px] shrink-0'
           } border-r flex flex-col transition-all duration-200 select-none ${isDark ? 'border-slate-800 bg-slate-950' : 'border-slate-200 bg-white'
           }`}>
           {isLeftPaneCollapsed ? (
@@ -2970,13 +2966,13 @@ export default function GanttTimeline({
                 >
                   <PanelLeftClose className="w-3.5 h-3.5" />
                 </button>
-                <div className="w-12 text-center">WBS</div>
-                <div className="flex-1 px-2 min-w-[140px] truncate">TASK</div>
+                <div className="w-11 text-center">WBS</div>
+                <div className="flex-1 px-2 min-w-[210px] truncate">TASK</div>
                 <div className="w-14 text-center">START</div>
                 <div className="w-14 text-center">END</div>
-                <div className="w-10 text-center">DUR</div>
-                <div className="w-10 text-center">%</div>
-                <div className="w-10 text-center">EDIT</div>
+                <div className="w-9 text-center">DUR</div>
+                <div className="w-9 text-center">%</div>
+                <div className="w-9 text-center">EDIT</div>
               </div>
 
               {/* Table Body (Synchronized Scroll) */}
@@ -3010,7 +3006,7 @@ export default function GanttTimeline({
                       onDoubleClick={() => handleOpenEditModal(task)}
                       className={`flex items-center px-3 text-xs font-mono transition group cursor-pointer ${rowBgClass}`}
                     >
-                      <div className={`w-12 text-center truncate ${isDark
+                      <div className={`w-11 text-center truncate ${isDark
                         ? (depth === 0 ? 'font-bold text-amber-400/90 text-[11px]' : 'text-slate-400 text-[10px]')
                         : (depth === 0 ? 'font-bold text-amber-700 text-[11px]' : 'text-slate-500 text-[10px]')
                         }`}>
@@ -3019,7 +3015,7 @@ export default function GanttTimeline({
 
                       {/* Hierarchical Tree Item */}
                       <div
-                        className="flex-1 px-2 truncate flex items-center min-w-[140px]"
+                        className="flex-1 px-2 truncate flex items-center min-w-[210px]"
                         style={{ paddingLeft: `${depth * 16}px` }}
                       >
                         {hasChildren && (
@@ -3089,7 +3085,7 @@ export default function GanttTimeline({
                         }`}>
                         {formatDateMMDD(isMilestone ? task.startDate : task.endDate)}
                       </div>
-                      <div className={`w-10 text-center text-[11px] font-bold font-mono ${isDark ? 'text-slate-200' : 'text-slate-700'
+                      <div className={`w-9 text-center text-[11px] font-bold font-mono ${isDark ? 'text-slate-200' : 'text-slate-700'
                         }`}>
                         {isMilestone ? (
                           <span className="text-amber-400 font-bold select-none">◆</span>
@@ -3097,11 +3093,11 @@ export default function GanttTimeline({
                           task.duration
                         )}
                       </div>
-                      <div className={`w-10 text-center text-[11px] font-medium font-mono ${isDark ? 'text-slate-300' : 'text-slate-700'
+                      <div className={`w-9 text-center text-[11px] font-medium font-mono ${isDark ? 'text-slate-300' : 'text-slate-700'
                         }`}>
                         {pct}
                       </div>
-                      <div className="w-10 flex items-center justify-center gap-1">
+                      <div className="w-9 flex items-center justify-center gap-1">
                         <button
                           type="button"
                           onClick={(e) => { e.stopPropagation(); handleOpenEditModal(task); }}
@@ -3151,7 +3147,7 @@ export default function GanttTimeline({
                       </button>
                       <button
                         type="button"
-                        onClick={handleLoadStandardFitOutTemplate}
+                        onClick={handleOpenTemplateModal}
                         disabled={isSyncing}
                         className={`flex items-center gap-1.5 px-3 py-1.5 font-medium rounded-lg text-xs transition cursor-pointer border ${isDark
                           ? 'bg-slate-900 hover:bg-slate-800 text-amber-400 border-amber-500/30'
@@ -3876,6 +3872,126 @@ export default function GanttTimeline({
                   {isNewTaskDraft ? 'Create & Add to Schedule' : 'Save Changes'}
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Multi-Preset Schedule Template Modal */}
+      {isTemplateModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
+          <div className={`w-full max-w-xl rounded-2xl border shadow-2xl overflow-hidden ${isDark ? 'bg-slate-900 border-slate-800 text-slate-100' : 'bg-white border-slate-200 text-slate-900'}`}>
+            <div className={`px-5 py-4 border-b flex items-center justify-between ${isDark ? 'border-slate-800 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-400">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-900'}`}>Load Schedule Template</h3>
+                  <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                    Choose a preset &amp; start date — all tasks initialize at 0% progress in one bulk sync.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => !isApplyingTemplate && setIsTemplateModalOpen(false)}
+                className={`p-1.5 rounded-lg transition cursor-pointer ${isDark ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100'}`}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              {/* Schedule Start Date Picker */}
+              <div>
+                <label className={`block text-[11px] font-mono font-bold uppercase tracking-wider mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  Schedule Start Date
+                </label>
+                <input
+                  type="date"
+                  value={templateStartDate}
+                  onChange={(e) => setTemplateStartDate(e.target.value)}
+                  className={`w-full rounded-xl px-3.5 py-2 text-xs font-mono border focus:outline-none focus:border-amber-500 ${isDark ? 'bg-slate-950 border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-900'}`}
+                />
+              </div>
+
+              {/* Preset Selection Grid */}
+              <div className="space-y-2">
+                <span className={`block text-[11px] font-mono font-bold uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  Construction Schedule Preset
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {TEMPLATE_PRESETS.map((preset) => {
+                    const isSelected = selectedTemplatePreset === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => setSelectedTemplatePreset(preset.id)}
+                        className={`text-left p-3.5 rounded-xl border transition cursor-pointer space-y-1 ${isSelected
+                          ? isDark
+                            ? 'bg-amber-500/10 border-amber-500/60 ring-1 ring-amber-500/40'
+                            : 'bg-amber-50 border-amber-400 ring-1 ring-amber-300'
+                          : isDark
+                            ? 'bg-slate-950/60 border-slate-800 hover:border-slate-700'
+                            : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                          }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className={`text-xs font-bold ${isSelected ? (isDark ? 'text-amber-300' : 'text-amber-900') : (isDark ? 'text-white' : 'text-slate-900')}`}>
+                            {preset.name}
+                          </span>
+                          <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded shrink-0 ${isDark ? 'bg-slate-800 text-slate-300' : 'bg-slate-200/80 text-slate-700'}`}>
+                            {preset.tasks.length} tasks
+                          </span>
+                        </div>
+                        <p className={`text-[11px] leading-snug ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                          {preset.subtitle}
+                        </p>
+                        <div className="text-[10px] font-mono text-amber-400 pt-0.5">
+                          Est. {preset.estimatedDuration} • 6-day workweek
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {tasks.length > 0 && (
+                <div className={`p-3 rounded-xl border text-[11px] flex items-center gap-2 ${isDark ? 'bg-amber-950/30 border-amber-500/30 text-amber-200' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Applying a template replaces the {tasks.length} existing task(s) in this project schedule.</span>
+                </div>
+              )}
+            </div>
+
+            <div className={`px-5 py-3.5 border-t flex items-center justify-end gap-2 ${isDark ? 'border-slate-800 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
+              <button
+                type="button"
+                disabled={isApplyingTemplate}
+                onClick={() => setIsTemplateModalOpen(false)}
+                className={`px-4 py-2 rounded-xl text-xs font-medium border transition cursor-pointer ${isDark ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={isApplyingTemplate || !templateStartDate}
+                onClick={handleApplyTemplatePreset}
+                className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-xs transition cursor-pointer flex items-center gap-2 shadow-sm"
+              >
+                {isApplyingTemplate ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Applying Template...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Apply Template</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>
