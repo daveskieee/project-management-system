@@ -172,14 +172,15 @@ export function createGanttRouter(prisma: PrismaClient) {
             const taskId = String(effectiveData?.id || '');
             if (action === 'delete') {
               if (taskId) {
-                // Delete connected dependency links first
+                // Delete connected dependency links first (strictly scoped to projectId)
                 await tx.taskLink.deleteMany({
                   where: {
+                    projectId,
                     OR: [{ sourceId: taskId }, { targetId: taskId }]
                   }
                 });
                 await tx.projectTask.deleteMany({
-                  where: { id: taskId }
+                  where: { id: taskId, projectId }
                 });
               }
             } else if (action === 'create') {
@@ -206,7 +207,7 @@ export function createGanttRouter(prisma: PrismaClient) {
                 : (effectiveData?.parentTaskId ? String(effectiveData.parentTaskId) : null);
               let safeParentId: string | null = null;
               if (rawParentId && rawParentId !== id) {
-                const parentExists = await tx.projectTask.findUnique({ where: { id: rawParentId }, select: { id: true } });
+                const parentExists = await tx.projectTask.findFirst({ where: { id: rawParentId, projectId }, select: { id: true } });
                 if (parentExists) safeParentId = rawParentId;
               }
               let safeContractorId: string | null = null;
@@ -237,12 +238,12 @@ export function createGanttRouter(prisma: PrismaClient) {
                 }
               });
 
-              // Predecessors linking
+              // Predecessors linking (strictly scoped to projectId)
               if (Array.isArray(effectiveData?.predecessorIds) && effectiveData.predecessorIds.length > 0) {
                 for (let idx = 0; idx < effectiveData.predecessorIds.length; idx++) {
                   const predId = effectiveData.predecessorIds[idx];
                   if (!predId || predId === id) continue;
-                  const predExists = await tx.projectTask.findUnique({ where: { id: String(predId) }, select: { id: true } });
+                  const predExists = await tx.projectTask.findFirst({ where: { id: String(predId), projectId }, select: { id: true } });
                   if (predExists) {
                     await tx.taskLink.create({
                       data: {
@@ -259,6 +260,11 @@ export function createGanttRouter(prisma: PrismaClient) {
               }
             } else if (action === 'update') {
               if (taskId) {
+                const existingOwner = await tx.projectTask.findUnique({ where: { id: taskId }, select: { projectId: true } });
+                if (existingOwner && existingOwner.projectId !== projectId) {
+                  // Never overwrite a task owned by a different project
+                  return null;
+                }
                 const startRaw = effectiveData?.startDate || effectiveData?.start_date;
                 const endRaw = effectiveData?.endDate || effectiveData?.end_date;
                 const parsedStart = startRaw ? new Date(startRaw) : new Date();
@@ -284,7 +290,7 @@ export function createGanttRouter(prisma: PrismaClient) {
                   : (effectiveData?.parentTaskId !== undefined ? effectiveData.parentTaskId : undefined);
                 let safeParentId: string | null | undefined = rawParentId === undefined ? undefined : null;
                 if (rawParentId && rawParentId !== taskId) {
-                  const parentExists = await tx.projectTask.findUnique({ where: { id: String(rawParentId) }, select: { id: true } });
+                  const parentExists = await tx.projectTask.findFirst({ where: { id: String(rawParentId), projectId }, select: { id: true } });
                   if (parentExists) safeParentId = String(rawParentId);
                 }
                 let safeContractorId: string | null | undefined = effectiveData?.assignedContractorId === undefined ? undefined : null;
@@ -341,7 +347,7 @@ export function createGanttRouter(prisma: PrismaClient) {
                   for (let idx = 0; idx < effectiveData.predecessorIds.length; idx++) {
                     const predId = effectiveData.predecessorIds[idx];
                     if (predId && predId !== taskId) {
-                      const predExists = await tx.projectTask.findUnique({ where: { id: String(predId) }, select: { id: true } });
+                      const predExists = await tx.projectTask.findFirst({ where: { id: String(predId), projectId }, select: { id: true } });
                       if (predExists) {
                         await tx.taskLink.create({
                           data: {
@@ -364,7 +370,7 @@ export function createGanttRouter(prisma: PrismaClient) {
             if (action === 'delete') {
               if (linkId) {
                 await tx.taskLink.deleteMany({
-                  where: { id: linkId }
+                  where: { id: linkId, projectId }
                 });
               }
             } else if (action === 'create') {
@@ -387,8 +393,8 @@ export function createGanttRouter(prisma: PrismaClient) {
               const source = effectiveData?.source || effectiveData?.sourceId;
               const target = effectiveData?.target || effectiveData?.targetId;
               if (linkId && source && target) {
-                await tx.taskLink.update({
-                  where: { id: linkId },
+                await tx.taskLink.updateMany({
+                  where: { id: linkId, projectId },
                   data: {
                     sourceId: String(source),
                     targetId: String(target),
@@ -477,6 +483,12 @@ export function createGanttRouter(prisma: PrismaClient) {
             }))
           };
         });
+
+        if (!opResult) {
+          return res.status(409).json({
+            error: 'Task belongs to a different project and cannot be modified under this projectId.'
+          });
+        }
 
         ganttCache.set(projectId, {
           data: opResult.data,

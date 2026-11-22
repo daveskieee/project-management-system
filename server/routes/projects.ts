@@ -116,7 +116,10 @@ projectsRouter.get('/projects', async (req: Request, res: Response) => {
     `;
     let dbProjectsQuery = `${selectProjectsSql} ORDER BY p.created_at ASC`;
     const params: any[] = [];
-    if (req.user && req.user.role !== 'ADMIN' && req.user.role !== 'FINANCE') {
+    const hasPortfolioProjectAccess = Boolean(
+      req.user && (req.user.role === 'ADMIN' || req.user.role === 'FINANCE' || hasProjectManagementAccess(req.user))
+    );
+    if (req.user && !hasPortfolioProjectAccess) {
       if (!req.user.projectIds || req.user.projectIds.length === 0) {
         return res.json([]);
       }
@@ -358,10 +361,6 @@ projectsRouter.post('/projects', requireRole(['ADMIN', 'ENGINEER']), async (req:
       }
     }).catch(() => {});
 
-    broadcastChange('projects');
-    broadcastChange('auditLogs');
-    invalidateAllDataCache();
-
     // If created by an Engineer / Project Manager, automatically assign creator to the project
     if (req.user && req.user.role !== 'ADMIN') {
       await prisma.user.update({
@@ -374,14 +373,18 @@ projectsRouter.post('/projects', requireRole(['ADMIN', 'ENGINEER']), async (req:
       if (!req.user.projectIds.includes(id)) req.user.projectIds.push(id);
     }
 
-    // Also grant active Timekeeper & Engineer accounts access to newly created commercial sites for daily roll-call
+    // Also grant active Timekeeper, Engineer & PM accounts access to newly created commercial sites
     await pool.query(
       `UPDATE users
-       SET "projectIds" = array_append(COALESCE("projectIds", '{}'), $1)
-       WHERE role IN ('TIMEKEEPER', 'ENGINEER')
-         AND NOT ($1 = ANY(COALESCE("projectIds", '{}')))`,
-      [id]
-    ).catch(() => {});
+       SET project_ids = array_append(COALESCE(project_ids, ARRAY[]::text[]), $1)
+       WHERE (role::text IN ('TIMEKEEPER', 'ENGINEER', 'PROJECT_MANAGER') OR id = $2)
+         AND NOT ($1 = ANY(COALESCE(project_ids, ARRAY[]::text[])))`,
+      [id, assignedProjectManagerId || null]
+    ).catch(err => console.warn('Could not auto-assign project to field accounts:', err));
+
+    invalidateAllDataCache();
+    broadcastChange('projects');
+    broadcastChange('auditLogs');
 
     const pRes = await pool.query('SELECT * FROM commercial_projects WHERE id = $1', [id]);
     const p = pRes.rows[0] || {};

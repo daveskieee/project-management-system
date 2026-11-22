@@ -875,31 +875,38 @@ export default function GanttTimeline({
     return true;
   }, []);
 
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+
   // Keep selectedProjectId synchronized with available projects & cross-tab navigation requests
+  // Never reset selectedProjectId or wipe displayed tasks when projects momentarily refreshes to []
   useEffect(() => {
     const requestedProjId = localStorage.getItem('ctvill_gantt_selected_project');
     if (requestedProjId && projects.some(p => p.id === requestedProjId)) {
       localStorage.removeItem('ctvill_gantt_selected_project');
       if (selectedProjectId !== requestedProjId) {
+        latestSelectedProjectIdRef.current = requestedProjId;
         setSelectedProjectId(requestedProjId);
       }
       return;
     }
     if (projects.length > 0) {
-      if (!selectedProjectId || !projects.some(p => p.id === selectedProjectId)) {
-        setSelectedProjectId(projects[0].id);
+      if (!selectedProjectId) {
+        const nextId = projects[0].id;
+        latestSelectedProjectIdRef.current = nextId;
+        setSelectedProjectId(nextId);
+      } else if (!isSyncing && !projects.some(p => p.id === selectedProjectId)) {
+        const nextId = projects[0].id;
+        latestSelectedProjectIdRef.current = nextId;
+        setSelectedProjectId(nextId);
       }
-    } else if (selectedProjectId) {
-      setSelectedProjectId('');
-      setTasks([]);
-      setLinks([]);
     }
-  }, [projects, selectedProjectId]);
+  }, [projects, selectedProjectId, isSyncing]);
 
   useEffect(() => {
     const onSelectProject = (e: Event) => {
       const detail = (e as CustomEvent)?.detail;
       if (detail?.projectId && projects.some(p => p.id === detail.projectId)) {
+        latestSelectedProjectIdRef.current = detail.projectId;
         setSelectedProjectId(detail.projectId);
       }
       if (detail?.phaseName) {
@@ -922,7 +929,6 @@ export default function GanttTimeline({
   const timelineScrollRef = useRef<HTMLDivElement>(null);
   const isScrollingSync = useRef<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncFeedback, setSyncFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Synchronize dynamic container width for zero-scroll auto-fit
@@ -1016,26 +1022,74 @@ export default function GanttTimeline({
     });
   }, []);
 
+  const latestGanttLoadSeqRef = useRef(0);
+  const latestSelectedProjectIdRef = useRef(selectedProjectId);
+  latestSelectedProjectIdRef.current = selectedProjectId;
+  const latestTasksRef = useRef<GanttTaskItem[]>(tasks);
+  latestTasksRef.current = tasks;
+  const lastKnownActiveProjectRef = useRef<ProjectProfile | null>(null);
+  const ganttMemoryCacheRef = useRef<Map<string, { tasks: GanttTaskItem[]; links: GanttLinkItem[]; ts: number }>>(new Map());
+  const [cacheVersion, setCacheVersion] = useState(0);
+
+  const buildGanttAuthHeaders = useCallback((includeJson = false): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    if (includeJson) {
+      headers['Content-Type'] = 'application/json';
+    }
+    const csrf = getCsrfToken();
+    if (csrf) {
+      headers['x-csrf-token'] = csrf;
+    }
+    const stored = getStoredSession() as any;
+    const bearer = stored?.sessionToken || stored?.token;
+    if (typeof bearer === 'string' && bearer.trim().length >= 16) {
+      headers['Authorization'] = `Bearer ${bearer.trim()}`;
+    }
+    return headers;
+  }, []);
+
   const activeProject = useMemo(() => {
-    return projects.find(p => p.id === selectedProjectId) || null;
+    const exactMatch = projects.find(p => p.id === selectedProjectId);
+    if (exactMatch) {
+      lastKnownActiveProjectRef.current = exactMatch;
+      return exactMatch;
+    }
+    if (projects.length > 0) {
+      lastKnownActiveProjectRef.current = projects[0];
+      return projects[0];
+    }
+    return lastKnownActiveProjectRef.current;
   }, [projects, selectedProjectId]);
 
+  const scopedProjectTasks = useMemo(
+    () => (selectedProjectId ? tasks.filter(t => String(t.projectId || '') === String(selectedProjectId)) : []),
+    [tasks, selectedProjectId]
+  );
+
   const currentProjectProgress = useMemo(() => {
+    void cacheVersion;
     if (activeProject) {
-      return getCanonicalProjectProgress(activeProject, tasks);
+      if (scopedProjectTasks.length > 0) {
+        return getCanonicalProjectProgress(activeProject, scopedProjectTasks);
+      }
+      const cached = ganttMemoryCacheRef.current.get(activeProject.id);
+      if (cached && cached.tasks.length > 0) {
+        return getCanonicalProjectProgress(activeProject, cached.tasks as any);
+      }
+      return getCanonicalProjectProgress(activeProject, []);
     }
-    return computeProjectProgress(tasks);
-  }, [activeProject, tasks, computeProjectProgress]);
+    return computeProjectProgress(scopedProjectTasks);
+  }, [activeProject, scopedProjectTasks, computeProjectProgress, cacheVersion]);
 
   // Critical Path Method (CPM) and Float Calculation
   const { criticalTaskIds, taskFloatMap, criticalLinkKeys } = useMemo(() => {
-    return computeCriticalPath(tasks, links);
-  }, [tasks, links]);
+    return computeCriticalPath(scopedProjectTasks, links);
+  }, [scopedProjectTasks, links]);
 
   // Unified, deduplicated dependency connections (from links array and task.predecessorIds)
   const dependencyConnections = useMemo(() => {
     const pairMap = new Map<string, { predId: string; succId: string }>();
-    const taskById = new Map<string, GanttTaskItem>(tasks.map(t => [t.id, t]));
+    const taskById = new Map<string, GanttTaskItem>(scopedProjectTasks.map(t => [t.id, t]));
 
     // Read from links state array
     links.forEach(l => {
@@ -1187,9 +1241,9 @@ export default function GanttTimeline({
         weight: typeof t.weight === 'number' && t.weight > 0
           ? t.weight
           : (() => {
-              const m = String(t.text || t.title || '').match(/\((\d+(?:\.\d+)?)%\)\s*$/);
-              return m ? Number(m[1]) : undefined;
-            })(),
+            const m = String(t.text || t.title || '').match(/\((\d+(?:\.\d+)?)%\)\s*$/);
+            return m ? Number(m[1]) : undefined;
+          })(),
         constructionPhase: resolvedPhase,
         baselineStart: t.baselineStart ? formatDateISO(parseDate(t.baselineStart)) : null,
         baselineEnd: t.baselineEnd ? formatDateISO(parseDate(t.baselineEnd)) : null,
@@ -1225,30 +1279,33 @@ export default function GanttTimeline({
     }
   }, []);
 
-  const buildGanttAuthHeaders = useCallback((includeJson = false): Record<string, string> => {
-    const headers: Record<string, string> = {};
-    if (includeJson) {
-      headers['Content-Type'] = 'application/json';
+  // Strict project switch handler: immediately swap state to the target project's cached tasks (or empty + loading)
+  // so another project's task list or progress percentage NEVER leaks across switches.
+  const handleSelectProject = useCallback((nextProjectId: string) => {
+    if (nextProjectId === selectedProjectId) return;
+    latestSelectedProjectIdRef.current = nextProjectId;
+    setSelectedProjectId(nextProjectId);
+    const cached = nextProjectId ? ganttMemoryCacheRef.current.get(nextProjectId) : undefined;
+    if (cached) {
+      const strictTasks = cached.tasks.filter(t => String(t.projectId || '') === String(nextProjectId));
+      setTasks(strictTasks);
+      setLinks(cached.links);
+      setIsLoading(false);
+    } else {
+      setTasks([]);
+      setLinks([]);
+      setIsLoading(Boolean(nextProjectId));
     }
-    const csrf = getCsrfToken();
-    if (csrf) {
-      headers['x-csrf-token'] = csrf;
-    }
-    const stored = getStoredSession() as any;
-    const bearer = stored?.sessionToken || stored?.token;
-    if (typeof bearer === 'string' && bearer.trim().length >= 16) {
-      headers['Authorization'] = `Bearer ${bearer.trim()}`;
-    }
-    return headers;
-  }, []);
+  }, [selectedProjectId]);
 
-  const latestGanttLoadSeqRef = useRef(0);
-  const ganttMemoryCacheRef = useRef<Map<string, { tasks: GanttTaskItem[]; links: GanttLinkItem[]; ts: number }>>(new Map());
-  const [cacheVersion, setCacheVersion] = useState(0);
-
-  // Keep memory cache in sync when active project's tasks/links change locally
+  // Keep memory cache in sync ONLY when every task strictly belongs to selectedProjectId
   useEffect(() => {
-    if (selectedProjectId && !isLoading && tasks.length > 0 && tasks.every(t => !t.projectId || t.projectId === selectedProjectId)) {
+    if (
+      selectedProjectId &&
+      !isLoading &&
+      tasks.length > 0 &&
+      tasks.every(t => String(t.projectId || '') === String(selectedProjectId))
+    ) {
       ganttMemoryCacheRef.current.set(selectedProjectId, { tasks, links, ts: Date.now() });
     }
   }, [selectedProjectId, tasks, links, isLoading]);
@@ -1289,70 +1346,81 @@ export default function GanttTimeline({
   }, [projectIdsKey, buildGanttAuthHeaders, parseDbGanttPayload, purgeStaleLocalGanttCache]);
 
   const loadGanttData = useCallback(async (projectId: string, forceFresh = false) => {
-    if (!projectId) {
-      setTasks([]);
-      setLinks([]);
+    const targetProjectId = projectId;
+    if (!targetProjectId) {
       return;
     }
     const loadSeq = ++latestGanttLoadSeqRef.current;
 
-    // Instant 0ms render from in-memory cache (or localStorage snapshot) while refreshing silently in background
-    const memCached = ganttMemoryCacheRef.current.get(projectId);
-    if (memCached && !forceFresh) {
-      setTasks(memCached.tasks);
-      setLinks(memCached.links);
-      setIsLoading(false);
-    } else {
-      const localSnap = !forceFresh ? loadProjectGanttTasksFromStorage(projectId, false) : null;
-      if (localSnap && localSnap.length > 0) {
-        setTasks(localSnap as GanttTaskItem[]);
-        setLinks([]);
+    // Instant 0ms render from in-memory cache (or localStorage snapshot) while refreshing silently in background.
+    // Never wipe already-cached tasks to [] just because a background refresh or forceFresh starts.
+    const memCached = ganttMemoryCacheRef.current.get(targetProjectId);
+    if (memCached) {
+      const strictCached = memCached.tasks.filter(t => String(t.projectId || '') === String(targetProjectId));
+      if (latestSelectedProjectIdRef.current === targetProjectId) {
+        setTasks(strictCached);
+        setLinks(memCached.links);
         setIsLoading(false);
-      } else {
+      }
+    } else {
+      const localSnap = !forceFresh ? loadProjectGanttTasksFromStorage(targetProjectId, false) : null;
+      if (localSnap && localSnap.length > 0) {
+        const stampedSnap = (localSnap as GanttTaskItem[]).map(t => ({ ...t, projectId: targetProjectId }));
+        if (latestSelectedProjectIdRef.current === targetProjectId) {
+          setTasks(stampedSnap);
+          setLinks([]);
+          setIsLoading(false);
+        }
+      } else if (latestSelectedProjectIdRef.current === targetProjectId) {
+        setTasks([]);
+        setLinks([]);
         setIsLoading(true);
       }
     }
 
     try {
-      const url = forceFresh ? `/api/projects/${encodeURIComponent(projectId)}/gantt?fresh=1` : `/api/projects/${encodeURIComponent(projectId)}/gantt`;
+      const url = forceFresh
+        ? `/api/projects/${encodeURIComponent(targetProjectId)}/gantt?fresh=1`
+        : `/api/projects/${encodeURIComponent(targetProjectId)}/gantt`;
       const res = await fetch(url, {
         credentials: 'include',
         headers: buildGanttAuthHeaders(false),
       });
-      if (loadSeq !== latestGanttLoadSeqRef.current) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      if (loadSeq !== latestGanttLoadSeqRef.current) return;
 
       const rawTasks = Array.isArray(json.data) ? json.data : [];
       const rawLinks = Array.isArray(json.links) ? json.links : [];
-      const { parsedTasks: validTasks, parsedLinks: validLinks } = parseDbGanttPayload(projectId, rawTasks, rawLinks);
+      const { parsedTasks: validTasks, parsedLinks: validLinks } = parseDbGanttPayload(targetProjectId, rawTasks, rawLinks);
 
-      ganttMemoryCacheRef.current.set(projectId, { tasks: validTasks, links: validLinks, ts: Date.now() });
+      // Always store authoritative payload under targetProjectId's cache key
+      ganttMemoryCacheRef.current.set(targetProjectId, { tasks: validTasks, links: validLinks, ts: Date.now() });
+      purgeStaleLocalGanttCache(targetProjectId, validTasks);
       setCacheVersion((v) => v + 1);
 
-      if (validTasks.length > 0) {
-        setTasks(validTasks);
-        setLinks(validLinks);
-        purgeStaleLocalGanttCache(projectId, validTasks);
-      } else {
-        setTasks([]);
-        setLinks([]);
-        purgeStaleLocalGanttCache(projectId, []);
+      // Only apply to active UI state if user is still viewing targetProjectId and this is the latest request
+      if (latestSelectedProjectIdRef.current !== targetProjectId || loadSeq !== latestGanttLoadSeqRef.current) {
+        return;
       }
+
+      setTasks(validTasks);
+      setLinks(validLinks);
     } catch (err) {
       console.error('Failed to load project gantt data:', err);
-      if (ganttMemoryCacheRef.current.has(projectId)) return;
-      const cached = loadProjectGanttTasksFromStorage(projectId, false);
+      if (latestSelectedProjectIdRef.current !== targetProjectId || loadSeq !== latestGanttLoadSeqRef.current) {
+        return;
+      }
+      if (ganttMemoryCacheRef.current.has(targetProjectId)) return;
+      const cached = loadProjectGanttTasksFromStorage(targetProjectId, false);
       if (cached && cached.length > 0) {
-        setTasks(cached as GanttTaskItem[]);
+        setTasks((cached as GanttTaskItem[]).map(t => ({ ...t, projectId: targetProjectId })));
         setLinks([]);
-      } else if (tasksProp && tasksProp.length > 0 && tasksProp.some(t => t.projectId === projectId)) {
+      } else if (tasksProp && tasksProp.length > 0 && tasksProp.some(t => t.projectId === targetProjectId)) {
         const mappedFallback: GanttTaskItem[] = tasksProp
-          .filter(t => t.projectId === projectId)
+          .filter(t => t.projectId === targetProjectId)
           .map((t: any, idx: number) => ({
             id: String(t.id),
-            projectId,
+            projectId: targetProjectId,
             wbsCode: t.wbsCode || `${idx + 1}.0`,
             text: t.title || t.text || 'Construction Task',
             startDate: formatDateISO(parseDate(t.startDate)),
@@ -1367,7 +1435,7 @@ export default function GanttTimeline({
           }));
         setTasks(mappedFallback);
         setLinks([]);
-      } else if (projectId === 'default') {
+      } else if (targetProjectId === 'default') {
         setTasks(DEFAULT_EM_JAY_TASKS);
         setLinks(DEFAULT_EM_JAY_LINKS);
       } else {
@@ -1375,7 +1443,7 @@ export default function GanttTimeline({
         setLinks([]);
       }
     } finally {
-      if (loadSeq === latestGanttLoadSeqRef.current) {
+      if (latestSelectedProjectIdRef.current === targetProjectId && loadSeq === latestGanttLoadSeqRef.current) {
         setIsLoading(false);
       }
     }
@@ -1391,12 +1459,15 @@ export default function GanttTimeline({
 
   const syncBackend = useCallback(async (
     action: 'create' | 'update' | 'delete',
-    task: Partial<GanttTaskItem> & { id: string }
+    task: Partial<GanttTaskItem> & { id: string },
+    projectIdOverride?: string
   ) => {
+    const targetProjectId = projectIdOverride || selectedProjectId;
+    if (!targetProjectId) return;
     setIsSyncing(true);
     try {
       const resolvedPhase = task.constructionPhase || resolveTaskConstructionPhase(task);
-      const res = await fetch(`/api/projects/${selectedProjectId}/gantt/sync`, {
+      const res = await fetch(`/api/projects/${encodeURIComponent(targetProjectId)}/gantt/sync`, {
         method: 'POST',
         credentials: 'include',
         headers: buildGanttAuthHeaders(true),
@@ -1426,24 +1497,31 @@ export default function GanttTimeline({
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const resData = await res.json().catch(() => null);
 
-      // Hydrate state directly from authoritative PostgreSQL response & purge stale cache
+      // Always write authoritative DB response under targetProjectId's cache key
       if (Array.isArray(resData?.data)) {
         const { parsedTasks: dbTasks, parsedLinks: dbLinks } = parseDbGanttPayload(
-          selectedProjectId,
+          targetProjectId,
           resData.data,
           Array.isArray(resData.links) ? resData.links : []
         );
-        setTasks(dbTasks);
-        setLinks(dbLinks);
-        purgeStaleLocalGanttCache(selectedProjectId, dbTasks);
+        ganttMemoryCacheRef.current.set(targetProjectId, { tasks: dbTasks, links: dbLinks, ts: Date.now() });
+        purgeStaleLocalGanttCache(targetProjectId, dbTasks);
+        setCacheVersion((v) => v + 1);
+
+        // Only hydrate active UI state if user is still viewing targetProjectId
+        if (latestSelectedProjectIdRef.current === targetProjectId) {
+          setTasks(dbTasks);
+          setLinks(dbLinks);
+        }
+
         const unifiedProg = computeUnifiedProjectProgress(dbTasks);
-        onUpdateProject?.(selectedProjectId, {
+        onUpdateProject?.(targetProjectId, {
           progressPercentage: unifiedProg,
           cpmProgress: unifiedProg,
           tasksCount: dbTasks.length
         });
       } else if (resData?.result?.projectProgress !== undefined) {
-        onUpdateProject?.(selectedProjectId, {
+        onUpdateProject?.(targetProjectId, {
           progressPercentage: resData.result.projectProgress,
           cpmProgress: resData.result.projectProgress,
           tasksCount: resData.result.tasksCount
@@ -1458,19 +1536,20 @@ export default function GanttTimeline({
     } finally {
       setIsSyncing(false);
     }
-  }, [selectedProjectId, onUpdateProject, parseDbGanttPayload, purgeStaleLocalGanttCache]);
+  }, [selectedProjectId, onUpdateProject, buildGanttAuthHeaders, parseDbGanttPayload, purgeStaleLocalGanttCache]);
 
   const queueDebouncedSync = useCallback((
     action: 'create' | 'update' | 'delete',
     task: Partial<GanttTaskItem> & { id: string }
   ) => {
+    const targetProjectId = selectedProjectId;
     if (pendingSyncTimerRef.current) {
       clearTimeout(pendingSyncTimerRef.current);
     }
     pendingSyncTimerRef.current = setTimeout(() => {
-      syncBackend(action, task);
+      syncBackend(action, task, targetProjectId);
     }, 150);
-  }, [syncBackend]);
+  }, [selectedProjectId, syncBackend]);
 
   // ==========================================
   // 6b. Multi-Level Task Tree & Collapsible Subtasks
@@ -1505,12 +1584,12 @@ export default function GanttTimeline({
   }, [tasks]);
 
   const { visibleTasks, depthMap, hasChildrenMap, descendantCountMap } = useMemo(() => {
-    const allIds = new Set(tasks.map(t => t.id));
+    const allIds = new Set(scopedProjectTasks.map(t => t.id));
     const childMap = new Map<string, GanttTaskItem[]>();
     const rootTasks: GanttTaskItem[] = [];
 
     // Group tasks into parent-children buckets
-    tasks.forEach(t => {
+    scopedProjectTasks.forEach(t => {
       if (t.parentTaskId && allIds.has(t.parentTaskId)) {
         if (!childMap.has(t.parentTaskId)) childMap.set(t.parentTaskId, []);
         childMap.get(t.parentTaskId)!.push(t);
@@ -1939,14 +2018,15 @@ export default function GanttTimeline({
     const onPointerUp = () => {
       document.body.style.userSelect = originalUserSelect;
 
-      setTasks(currentTasks => {
-        const finalTask = currentTasks.find(t => t.id === dragState.taskId);
-        if (finalTask) {
-          saveProjectGanttTasks(selectedProjectId, currentTasks);
-          queueDebouncedSync('update', finalTask);
-        }
-        return currentTasks;
-      });
+      const currentTasks = latestTasksRef.current;
+      const finalTask = currentTasks.find(t => t.id === dragState.taskId);
+      if (finalTask) {
+        const targetProjectId = latestSelectedProjectIdRef.current || selectedProjectId;
+        const scopedTasks = currentTasks.filter(t => String(t.projectId || '') === String(targetProjectId));
+        saveProjectGanttTasks(targetProjectId, scopedTasks);
+        ganttMemoryCacheRef.current.set(targetProjectId, { tasks: scopedTasks, links, ts: Date.now() });
+        queueDebouncedSync('update', finalTask);
+      }
 
       setDragState(prev => ({ ...prev, active: false }));
     };
@@ -1992,7 +2072,8 @@ export default function GanttTimeline({
     if (!editingTask) return;
 
     const contractor = contractors.find(c => c.id === editFormData.assignedContractorId);
-    const progressVal = Math.max(0, Math.min(1, editFormData.progress / 100));
+    const rawFormProgress = Number.isFinite(Number(editFormData.progress)) ? Number(editFormData.progress) : 0;
+    const progressVal = Math.max(0, Math.min(1, rawFormProgress / 100));
     const sDate = parseDate(editFormData.startDate);
     const isMs = Number(editFormData.duration) === 0 || editFormData.type === 'milestone';
     const eDate = isMs ? sDate : (editFormData.endDate ? parseDate(editFormData.endDate) : addWorkingDays(sDate, Number(editFormData.duration) || 1));
@@ -2006,82 +2087,91 @@ export default function GanttTimeline({
     const taskNames = rawNames.length > 0 ? rawNames : ['Construction Task'];
 
     if (isNewTaskDraft && taskNames.length > 1) {
+      const targetProjectId = selectedProjectId;
       const perTaskWeight = Math.max(1, Math.round((editFormData.weight || 100) / taskNames.length));
       const newBatchTasks: GanttTaskItem[] = [];
+      let newlyCreatedPhaseParent: GanttTaskItem | null = null;
 
-      setTasks(prev => {
-        let baseList = [...prev];
-        // Find or create parent Phase summary row for selectedPhaseName
-        let phaseParent = baseList.find(t => !t.parentTaskId && t.text.toLowerCase() === selectedPhaseName.toLowerCase());
-        if (!phaseParent) {
-          const phaseId = `phase-${Date.now()}`;
-          phaseParent = {
-            id: phaseId,
-            projectId: selectedProjectId,
-            wbsCode: `${baseList.filter(t => !t.parentTaskId).length + 1}.0`,
-            text: selectedPhaseName,
-            startDate: formatDateISO(sDate),
-            endDate: formatDateISO(eDate),
-            duration: dur,
-            progress: progressVal,
-            weight: 100,
-            constructionPhase: selectedPhaseName,
-            type: 'project',
-            parentTaskId: null,
-            sortOrder: baseList.length + 1,
-            assignedContractorId: editFormData.assignedContractorId || null,
-            contractorName: contractor?.name || 'LDM Construction Crew',
-            predecessorIds: []
-          };
-          baseList.push(phaseParent);
-        }
+      const baseList = scopedProjectTasks.slice();
+      // Find or create parent Phase summary row for selectedPhaseName
+      let phaseParent = baseList.find(t => !t.parentTaskId && t.text.toLowerCase() === selectedPhaseName.toLowerCase());
+      if (!phaseParent) {
+        const phaseId = `phase-${Date.now()}`;
+        phaseParent = {
+          id: phaseId,
+          projectId: targetProjectId,
+          wbsCode: `${baseList.filter(t => !t.parentTaskId).length + 1}.0`,
+          text: selectedPhaseName,
+          startDate: formatDateISO(sDate),
+          endDate: formatDateISO(eDate),
+          duration: dur,
+          progress: progressVal,
+          weight: 100,
+          constructionPhase: selectedPhaseName,
+          type: 'project',
+          parentTaskId: null,
+          sortOrder: baseList.length + 1,
+          assignedContractorId: editFormData.assignedContractorId || null,
+          contractorName: contractor?.name || 'LDM Construction Crew',
+          predecessorIds: []
+        };
+        newlyCreatedPhaseParent = phaseParent;
+        baseList.push(phaseParent);
+      }
 
-        const existingChildCount = baseList.filter(t => t.parentTaskId === phaseParent!.id).length;
-        const parentWbsPrefix = (phaseParent.wbsCode || '1.0').replace(/\.0$/, '');
+      const existingChildCount = baseList.filter(t => t.parentTaskId === phaseParent!.id).length;
+      const parentWbsPrefix = (phaseParent.wbsCode || '1.0').replace(/\.0$/, '');
 
-        taskNames.forEach((tName, idx) => {
-          const newTaskObj: GanttTaskItem = {
-            id: `task-${Date.now()}-${idx}`,
-            projectId: selectedProjectId,
-            wbsCode: `${parentWbsPrefix}.${existingChildCount + idx + 1}`,
-            text: tName,
-            startDate: formatDateISO(sDate),
-            endDate: formatDateISO(eDate),
-            duration: dur,
-            progress: progressVal,
-            weight: perTaskWeight,
-            constructionPhase: selectedPhaseName,
-            type: 'task',
-            parentTaskId: phaseParent!.id,
-            sortOrder: baseList.length + idx + 1,
-            assignedContractorId: editFormData.assignedContractorId || null,
-            contractorName: contractor?.name || 'LDM Construction Crew',
-            predecessorIds: [...editFormData.predecessorIds]
-          };
-          newBatchTasks.push(newTaskObj);
-          baseList.push(newTaskObj);
-        });
-
-        const rolledUp = rollUpParentPhaseProgress(baseList);
-        const scheduled = cascadeDownstreamSchedule(rolledUp, links, newBatchTasks[0].id);
-        const newProg = computeProjectProgress(scheduled);
-        saveProjectGanttTasks(selectedProjectId, scheduled);
-        onUpdateProject?.(selectedProjectId, {
-          progressPercentage: newProg,
-          cpmProgress: newProg,
-          tasksCount: scheduled.length
-        });
-        return scheduled;
+      taskNames.forEach((tName, idx) => {
+        const newTaskObj: GanttTaskItem = {
+          id: `task-${Date.now()}-${idx}`,
+          projectId: targetProjectId,
+          wbsCode: `${parentWbsPrefix}.${existingChildCount + idx + 1}`,
+          text: tName,
+          startDate: formatDateISO(sDate),
+          endDate: formatDateISO(eDate),
+          duration: dur,
+          progress: progressVal,
+          weight: perTaskWeight,
+          constructionPhase: selectedPhaseName,
+          type: 'task',
+          parentTaskId: phaseParent!.id,
+          sortOrder: baseList.length + idx + 1,
+          assignedContractorId: editFormData.assignedContractorId || null,
+          contractorName: contractor?.name || 'LDM Construction Crew',
+          predecessorIds: [...editFormData.predecessorIds]
+        };
+        newBatchTasks.push(newTaskObj);
+        baseList.push(newTaskObj);
       });
 
-      newBatchTasks.forEach(t => syncBackend('create', t));
+      const rolledUp = rollUpParentPhaseProgress(baseList);
+      const scheduled = cascadeDownstreamSchedule(rolledUp, links, newBatchTasks[0].id);
+      const newProg = computeProjectProgress(scheduled);
+
+      setTasks(scheduled);
+      saveProjectGanttTasks(targetProjectId, scheduled);
+      ganttMemoryCacheRef.current.set(targetProjectId, { tasks: scheduled, links, ts: Date.now() });
+      setCacheVersion((v) => v + 1);
+      onUpdateProject?.(targetProjectId, {
+        progressPercentage: newProg,
+        cpmProgress: newProg,
+        tasksCount: scheduled.length
+      });
+
+      if (newlyCreatedPhaseParent) {
+        syncBackend('create', newlyCreatedPhaseParent, targetProjectId);
+      }
+      newBatchTasks.forEach(t => syncBackend('create', t, targetProjectId));
       setIsNewTaskDraft(false);
       setEditingTask(null);
       return;
     }
 
+    const targetProjectId = selectedProjectId;
     const updatedTask: GanttTaskItem = {
       ...editingTask,
+      projectId: targetProjectId,
       text: taskNames[0],
       startDate: formatDateISO(sDate),
       endDate: formatDateISO(eDate),
@@ -2112,36 +2202,36 @@ export default function GanttTimeline({
     setLinks(updatedLinks);
 
     if (isNewTaskDraft) {
-      setTasks(prev => {
-        const next = rollUpParentPhaseProgress([...prev, updatedTask]);
-        const scheduled = cascadeDownstreamSchedule(next, updatedLinks, updatedTask.id);
-        const newProg = computeProjectProgress(scheduled);
-        saveProjectGanttTasks(selectedProjectId, scheduled);
-        onUpdateProject?.(selectedProjectId, {
-          progressPercentage: newProg,
-          cpmProgress: newProg,
-          tasksCount: scheduled.length
-        });
-        return scheduled;
+      const next = rollUpParentPhaseProgress([...scopedProjectTasks, updatedTask]);
+      const scheduled = cascadeDownstreamSchedule(next, updatedLinks, updatedTask.id);
+      const newProg = computeProjectProgress(scheduled);
+      setTasks(scheduled);
+      saveProjectGanttTasks(targetProjectId, scheduled);
+      ganttMemoryCacheRef.current.set(targetProjectId, { tasks: scheduled, links: updatedLinks, ts: Date.now() });
+      setCacheVersion((v) => v + 1);
+      onUpdateProject?.(targetProjectId, {
+        progressPercentage: newProg,
+        cpmProgress: newProg,
+        tasksCount: scheduled.length
       });
-      syncBackend('create', updatedTask);
+      syncBackend('create', updatedTask, targetProjectId);
     } else {
-      setTasks(prev => {
-        const idx = prev.findIndex(t => t.id === updatedTask.id);
-        const copy = [...prev];
-        if (idx !== -1) copy[idx] = updatedTask;
-        const rolledUp = rollUpParentPhaseProgress(copy);
-        const scheduled = cascadeDownstreamSchedule(rolledUp, updatedLinks, updatedTask.id);
-        const newProg = computeProjectProgress(scheduled);
-        saveProjectGanttTasks(selectedProjectId, scheduled);
-        onUpdateProject?.(selectedProjectId, {
-          progressPercentage: newProg,
-          cpmProgress: newProg,
-          tasksCount: scheduled.length
-        });
-        return scheduled;
+      const idx = scopedProjectTasks.findIndex(t => t.id === updatedTask.id);
+      const copy = [...scopedProjectTasks];
+      if (idx !== -1) copy[idx] = updatedTask;
+      const rolledUp = rollUpParentPhaseProgress(copy);
+      const scheduled = cascadeDownstreamSchedule(rolledUp, updatedLinks, updatedTask.id);
+      const newProg = computeProjectProgress(scheduled);
+      setTasks(scheduled);
+      saveProjectGanttTasks(targetProjectId, scheduled);
+      ganttMemoryCacheRef.current.set(targetProjectId, { tasks: scheduled, links: updatedLinks, ts: Date.now() });
+      setCacheVersion((v) => v + 1);
+      onUpdateProject?.(targetProjectId, {
+        progressPercentage: newProg,
+        cpmProgress: newProg,
+        tasksCount: scheduled.length
       });
-      syncBackend('update', updatedTask);
+      syncBackend('update', updatedTask, targetProjectId);
     }
 
     setIsNewTaskDraft(false);
@@ -2149,8 +2239,9 @@ export default function GanttTimeline({
   };
 
   const handleDeleteTask = async (taskId: string) => {
-    const task = tasks.find(t => t.id === taskId);
-    if (!task) return;
+    const targetProjectId = selectedProjectId;
+    const task = scopedProjectTasks.find(t => t.id === taskId && String(t.projectId || '') === String(targetProjectId));
+    if (!task || !targetProjectId) return;
 
     const ok = await confirmDialog({
       title: 'Delete Gantt Task',
@@ -2165,22 +2256,40 @@ export default function GanttTimeline({
     // Tombstone for 15 seconds to guarantee zero ghost reappearances
     recentlyDeletedTaskIdsRef.current.set(taskId, Date.now() + 15000);
 
-    setTasks(prev => {
-      const remaining = prev.filter(t => t.id !== taskId).map(t => ({
+    // Update targetProjectId's cache entry strictly without touching any other project
+    const existingCache = ganttMemoryCacheRef.current.get(targetProjectId);
+    const baseTasks = existingCache
+      ? existingCache.tasks.filter(t => String(t.projectId || '') === String(targetProjectId))
+      : scopedProjectTasks;
+    const remainingForProject = baseTasks
+      .filter(t => t.id !== taskId)
+      .map(t => ({
         ...t,
         predecessorIds: t.predecessorIds.filter(id => id !== taskId)
       }));
-      const newProg = computeProjectProgress(remaining);
-      saveProjectGanttTasks(selectedProjectId, remaining);
-      onUpdateProject?.(selectedProjectId, {
-        progressPercentage: newProg,
-        cpmProgress: newProg,
-        tasksCount: remaining.length
-      });
-      return remaining;
+    const remainingLinksForProject = (existingCache ? existingCache.links : links).filter(
+      l => l.source !== taskId && l.target !== taskId
+    );
+    ganttMemoryCacheRef.current.set(targetProjectId, {
+      tasks: remainingForProject,
+      links: remainingLinksForProject,
+      ts: Date.now()
+    });
+    setCacheVersion((v) => v + 1);
+
+    const newProg = computeProjectProgress(remainingForProject);
+    saveProjectGanttTasks(targetProjectId, remainingForProject);
+    onUpdateProject?.(targetProjectId, {
+      progressPercentage: newProg,
+      cpmProgress: newProg,
+      tasksCount: remainingForProject.length
     });
 
-    setLinks(prev => prev.filter(l => l.source !== taskId && l.target !== taskId));
+    // Only mutate visible UI state if user is still viewing targetProjectId
+    if (latestSelectedProjectIdRef.current === targetProjectId) {
+      setTasks(remainingForProject);
+      setLinks(remainingLinksForProject);
+    }
     setCollapsedTaskIds(prev => {
       const next = new Set(prev);
       next.delete(taskId);
@@ -2190,7 +2299,7 @@ export default function GanttTimeline({
     // Notify parent App component to drop task from App state immediately
     onDeleteTask?.(taskId);
 
-    syncBackend('delete', { id: taskId });
+    syncBackend('delete', { id: taskId }, targetProjectId);
     if (editingTask && editingTask.id === taskId) {
       setEditingTask(null);
       setIsNewTaskDraft(false);
@@ -2231,37 +2340,39 @@ export default function GanttTimeline({
       predecessorIds: []
     };
 
+    const targetProjectId = selectedProjectId;
     // Auto-expand parent task if it was collapsed
     setCollapsedTaskIds(prev => {
       const next = new Set(prev);
       next.delete(parentTask.id);
       return next;
     });
-    setTasks(prev => {
-      // Find parent index and insert immediately below it (or after existing children of that parent)
-      const parentIdx = prev.findIndex(t => t.id === parentTask.id);
-      if (parentIdx === -1) {
-        const nextList = [...prev, newSubtask];
-        saveProjectGanttTasks(selectedProjectId, nextList);
-        return nextList;
-      }
+
+    const parentIdx = scopedProjectTasks.findIndex(t => t.id === parentTask.id);
+    let nextTasks: GanttTaskItem[];
+    if (parentIdx === -1) {
+      nextTasks = [...scopedProjectTasks, newSubtask];
+    } else {
       let insertIdx = parentIdx + 1;
-      while (insertIdx < prev.length && prev[insertIdx].parentTaskId === parentTask.id) {
+      while (insertIdx < scopedProjectTasks.length && scopedProjectTasks[insertIdx].parentTaskId === parentTask.id) {
         insertIdx++;
       }
-      const next = [...prev];
+      const next = [...scopedProjectTasks];
       next.splice(insertIdx, 0, newSubtask);
-      const reindexed = next.map((t, idx) => ({ ...t, sortOrder: idx + 1 }));
-      const newProg = computeProjectProgress(reindexed);
-      saveProjectGanttTasks(selectedProjectId, reindexed);
-      onUpdateProject?.(selectedProjectId, {
-        progressPercentage: newProg,
-        cpmProgress: newProg,
-        tasksCount: reindexed.length
-      });
-      return reindexed;
+      nextTasks = next.map((t, idx) => ({ ...t, sortOrder: idx + 1 }));
+    }
+
+    const newProg = computeProjectProgress(nextTasks);
+    setTasks(nextTasks);
+    saveProjectGanttTasks(targetProjectId, nextTasks);
+    ganttMemoryCacheRef.current.set(targetProjectId, { tasks: nextTasks, links, ts: Date.now() });
+    setCacheVersion((v) => v + 1);
+    onUpdateProject?.(targetProjectId, {
+      progressPercentage: newProg,
+      cpmProgress: newProg,
+      tasksCount: nextTasks.length
     });
-    syncBackend('create', newSubtask);
+    syncBackend('create', newSubtask, targetProjectId);
   };
 
   const handleAddNewTask = useCallback((prefillPhase?: string) => {
@@ -2482,14 +2593,15 @@ export default function GanttTimeline({
   };
 
   const handleApplyTemplatePreset = async () => {
-    if (!selectedProjectId) return;
+    const targetProjectId = selectedProjectId;
+    if (!targetProjectId) return;
     const preset = TEMPLATE_PRESETS.find((p) => p.id === selectedTemplatePreset) || TEMPLATE_PRESETS[0];
     setIsApplyingTemplate(true);
     setIsSyncing(true);
     try {
       const baseStart = parseDate(templateStartDate || formatDateISO(new Date()));
       const stamp = Date.now().toString().slice(-5);
-      const generatedIds = preset.tasks.map((_, idx) => `tsk-${selectedProjectId}-${idx + 1}-${stamp}`);
+      const generatedIds = preset.tasks.map((_, idx) => `tsk-${targetProjectId}-${idx + 1}-${stamp}`);
 
       const templateTasks: GanttTaskItem[] = preset.tasks.map((bp, idx) => {
         const startD = bp.offsetDays > 0 ? addWorkingDays(baseStart, bp.offsetDays + 1) : addWorkingDays(baseStart, 1);
@@ -2500,7 +2612,7 @@ export default function GanttTimeline({
 
         return {
           id: generatedIds[idx],
-          projectId: selectedProjectId,
+          projectId: targetProjectId,
           wbsCode: bp.wbsCode,
           text: bp.text,
           startDate: startStr,
@@ -2522,7 +2634,7 @@ export default function GanttTimeline({
         (bp.predIndices || []).forEach((pi, lIdx) => {
           if (generatedIds[pi]) {
             templateLinks.push({
-              id: `lnk-${selectedProjectId}-${idx + 1}-${lIdx + 1}-${stamp}`,
+              id: `lnk-${targetProjectId}-${idx + 1}-${lIdx + 1}-${stamp}`,
               source: generatedIds[pi],
               target: generatedIds[idx],
               type: '0',
@@ -2533,7 +2645,7 @@ export default function GanttTimeline({
       });
 
       // Single bulk request/transaction to /api/projects/:projectId/gantt/sync with full auth headers
-      const res = await fetch(`/api/projects/${encodeURIComponent(selectedProjectId)}/gantt/sync`, {
+      const res = await fetch(`/api/projects/${encodeURIComponent(targetProjectId)}/gantt/sync`, {
         method: 'POST',
         headers: buildGanttAuthHeaders(true),
         credentials: 'include',
@@ -2545,7 +2657,7 @@ export default function GanttTimeline({
             milestonePhase: t.constructionPhase,
           })),
           links: templateLinks,
-          deletedTaskIds: tasks.map((t) => t.id),
+          deletedTaskIds: scopedProjectTasks.map((t) => t.id),
           deletedLinkIds: links.map((l) => l.id)
         })
       });
@@ -2553,32 +2665,37 @@ export default function GanttTimeline({
       const resData = await res.json().catch(() => null);
       if (!res.ok || !resData?.success) {
         const errMsg = resData?.error || `Database sync failed (HTTP ${res.status})`;
-        console.error('[Gantt Load Template] Bulk sync failed:', { status: res.status, resData, projectId: selectedProjectId });
+        console.error('[Gantt Load Template] Bulk sync failed:', { status: res.status, resData, projectId: targetProjectId });
         throw new Error(errMsg);
       }
 
       if (resData?.localOnly) {
-        console.error('[Gantt Load Template] Project not found in database (localOnly):', { projectId: selectedProjectId, resData });
-        throw new Error(`Project "${selectedProjectId}" was not found in the database. Template could not be saved.`);
+        console.error('[Gantt Load Template] Project not found in database (localOnly):', { projectId: targetProjectId, resData });
+        throw new Error(`Project "${targetProjectId}" was not found in the database. Template could not be saved.`);
       }
 
       if (!Array.isArray(resData?.data) || resData.data.length === 0) {
-        console.error('[Gantt Load Template] Database returned 0 persisted tasks:', { projectId: selectedProjectId, resData });
+        console.error('[Gantt Load Template] Database returned 0 persisted tasks:', { projectId: targetProjectId, resData });
         throw new Error('Database did not persist the template tasks. Please try again.');
       }
 
       // Hydrate directly from authoritative PostgreSQL response so refresh/project-switch matches 100%
       const { parsedTasks: dbTasks, parsedLinks: dbLinks } = parseDbGanttPayload(
-        selectedProjectId,
+        targetProjectId,
         resData.data,
         Array.isArray(resData.links) ? resData.links : []
       );
-      setTasks(dbTasks);
-      setLinks(dbLinks);
-      purgeStaleLocalGanttCache(selectedProjectId, dbTasks);
+      ganttMemoryCacheRef.current.set(targetProjectId, { tasks: dbTasks, links: dbLinks, ts: Date.now() });
+      purgeStaleLocalGanttCache(targetProjectId, dbTasks);
+      setCacheVersion((v) => v + 1);
+
+      if (latestSelectedProjectIdRef.current === targetProjectId) {
+        setTasks(dbTasks);
+        setLinks(dbLinks);
+      }
 
       const unifiedProg = computeUnifiedProjectProgress(dbTasks);
-      onUpdateProject?.(selectedProjectId, {
+      onUpdateProject?.(targetProjectId, {
         progressPercentage: unifiedProg,
         cpmProgress: unifiedProg,
         tasksCount: dbTasks.length
@@ -2605,11 +2722,11 @@ export default function GanttTimeline({
 
   // Quick Metrics
   const metrics = useMemo(() => {
-    const total = tasks.length;
-    const completed = tasks.filter(t => t.progress >= 1).length;
-    const milestones = tasks.filter(t => t.type === 'milestone' || t.duration === 0).length;
+    const total = scopedProjectTasks.length;
+    const completed = scopedProjectTasks.filter(t => t.progress >= 1).length;
+    const milestones = scopedProjectTasks.filter(t => t.type === 'milestone' || t.duration === 0).length;
     return { total, completed, milestones };
-  }, [tasks]);
+  }, [scopedProjectTasks]);
 
   const totalGridHeight = useMemo(() => {
     return Math.max(600, visibleTasks.length * ROW_HEIGHT);
@@ -2651,19 +2768,22 @@ export default function GanttTimeline({
             {projects.length > 0 ? (
               <select
                 value={selectedProjectId}
-                onChange={(e) => setSelectedProjectId(e.target.value)}
+                onChange={(e) => handleSelectProject(e.target.value)}
                 aria-label="Select Commercial Project"
                 className={`rounded-lg px-3 py-1.5 text-xs font-semibold focus:border-amber-500 focus:outline-none cursor-pointer border max-w-[260px] sm:max-w-xs truncate ${isDark ? 'bg-slate-950 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800 shadow-2xs'}`}
               >
                 {projects.map(p => {
                   void cacheVersion;
                   const cachedEntry = ganttMemoryCacheRef.current.get(p.id);
+                  const projectScopedFallbackTasks = (tasksProp || []).filter(
+                    t => String(t.projectId || '') === String(p.id)
+                  );
                   const dropdownPct =
                     p.id === selectedProjectId
                       ? currentProjectProgress
-                      : cachedEntry && cachedEntry.tasks.length > 0
+                      : cachedEntry
                         ? getCanonicalProjectProgress(p, cachedEntry.tasks as any)
-                        : getCanonicalProjectProgress(p, tasksProp || []);
+                        : getCanonicalProjectProgress(p, projectScopedFallbackTasks);
                   return (
                     <option key={p.id} value={p.id}>
                       {p.name} ({dropdownPct}%)
@@ -2671,6 +2791,10 @@ export default function GanttTimeline({
                   );
                 })}
               </select>
+            ) : activeProject ? (
+              <span className={`text-xs font-semibold px-3 py-1.5 rounded-lg border truncate max-w-[260px] sm:max-w-xs ${isDark ? 'bg-slate-950 border-slate-700 text-slate-100' : 'bg-white border-slate-300 text-slate-800 shadow-2xs'}`}>
+                {activeProject.name} ({currentProjectProgress}%)
+              </span>
             ) : (
               <span className={`text-xs font-mono px-2.5 py-1.5 rounded-lg border ${isDark ? 'text-slate-400 bg-slate-950 border-slate-800' : 'text-slate-500 bg-slate-50 border-slate-200'}`}>
                 No Commercial Sites Registered
@@ -3561,9 +3685,9 @@ export default function GanttTimeline({
                             </div>
                           )}
 
-                          {/* 0% progress indicator */}
+                          {/* 0% progress indicator (slate/upcoming instead of solid emerald completed) */}
                           {pct === 0 && (
-                            <div className={`h-full px-2 flex items-center justify-center shrink-0 pointer-events-none select-none ${isRedAlert ? 'bg-red-600' : 'bg-emerald-600'
+                            <div className={`h-full px-2 flex items-center justify-center shrink-0 pointer-events-none select-none ${isRedAlert ? 'bg-red-600' : (isDark ? 'bg-slate-600' : 'bg-slate-500')
                               }`}>
                               <span className="font-mono font-bold text-[10px] text-white select-none">
                                 0%

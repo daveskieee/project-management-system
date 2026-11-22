@@ -472,7 +472,7 @@ export default function App() {
 
   const fetchProjects = useCallback(async () => {
     try {
-      const res = await fetch('/api/projects');
+      const res = await fetch('/api/projects', { cache: 'no-store' });
       if (res.ok) {
         const data = await res.json();
         setProjects(mergeWithCachedProjects(Array.isArray(data) ? data : []));
