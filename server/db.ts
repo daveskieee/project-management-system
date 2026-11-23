@@ -365,6 +365,30 @@ export async function initializeDatabaseTables() {
 
       -- Extended Payroll column enhancements for exact payroll_run_id matching
       ALTER TABLE extended_payroll ADD COLUMN IF NOT EXISTS payroll_run_id TEXT;
+
+      -- Site Material Directory & Delivery Tracking Ledger
+      CREATE TABLE IF NOT EXISTS site_materials (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        project_name TEXT NOT NULL,
+        week TEXT NOT NULL DEFAULT 'Week 1',
+        date TEXT NOT NULL,
+        material_description TEXT NOT NULL,
+        category TEXT NOT NULL DEFAULT 'General',
+        ordered DOUBLE PRECISION NOT NULL DEFAULT 1,
+        unit TEXT NOT NULL DEFAULT 'pcs',
+        received DOUBLE PRECISION NOT NULL DEFAULT 0,
+        used_issued DOUBLE PRECISION NOT NULL DEFAULT 0,
+        remaining_stock DOUBLE PRECISION NOT NULL DEFAULT 0,
+        balance_order DOUBLE PRECISION NOT NULL DEFAULT 1,
+        stock_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'Incomplete',
+        supplier TEXT NOT NULL DEFAULT 'Approved Builders Supply',
+        unit_cost DOUBLE PRECISION NOT NULL DEFAULT 0,
+        notes TEXT DEFAULT '',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
     `);
 
     // High-performance database indexing (executed individually for schema resilience)
@@ -398,6 +422,7 @@ export async function initializeDatabaseTables() {
       'CREATE INDEX IF NOT EXISTS idx_cash_advances_project ON cash_advances(project_id)',
       'CREATE INDEX IF NOT EXISTS idx_payroll_runs_project ON payroll_runs(project_id)',
       'CREATE INDEX IF NOT EXISTS idx_project_worker_assignments_project ON project_worker_assignments(project_id)',
+      'CREATE INDEX IF NOT EXISTS idx_site_materials_project_id ON site_materials(project_id)',
     ];
 
     for (const stmt of indexStatements) {

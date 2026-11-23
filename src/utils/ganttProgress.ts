@@ -183,18 +183,18 @@ function resolveTaskWeight(
   return Math.max(1, Number(task.duration ?? 1));
 }
 
-export function computeUnifiedProjectProgress(taskList: UnifiedGanttTaskLike[]): number {
-  if (!taskList || taskList.length === 0) return 0;
-  const targetList = getLeafGanttTasks(taskList);
-  const hasExplicitWeights = targetList.some(t => typeof t.weight === 'number' && t.weight > 0);
-
-  // Hierarchical weighting: if parent phases carry explicit weights (e.g. RN-01 = 12%, RN-03 = 25%)
-  // and their child sub-phases carry relative weights summing to 100% per phase, scale each child
-  // by (parent.weight * child.weight / siblingWeightSum).
+function computeEffectiveLeafWeights(taskList: UnifiedGanttTaskLike[]): {
+  leafTasks: UnifiedGanttTaskLike[];
+  weightById: Map<string, number>;
+  totalWeight: number;
+} {
+  const leafTasks = getLeafGanttTasks(taskList);
+  const hasExplicitWeights = leafTasks.some(t => typeof t.weight === 'number' && t.weight > 0);
   const byId = new Map<string, UnifiedGanttTaskLike>(taskList.map(t => [String(t.id), t]));
   const siblingWeightTotals = new Map<string, number>();
+
   if (hasExplicitWeights) {
-    for (const t of targetList) {
+    for (const t of leafTasks) {
       const pid = t.parentTaskId ? String(t.parentTaskId) : '';
       if (!pid) continue;
       const w = Math.max(0, Number(t.weight ?? 0));
@@ -202,22 +202,48 @@ export function computeUnifiedProjectProgress(taskList: UnifiedGanttTaskLike[]):
     }
   }
 
+  const weightById = new Map<string, number>();
+  // Compute average explicit parent weight so a sibling phase with null weight doesn't collapse to ~0.6%
+  const explicitParentWeights: number[] = [];
+  for (const t of taskList) {
+    if (!t.parentTaskId && typeof t.weight === 'number' && t.weight > 0) {
+      explicitParentWeights.push(t.weight);
+    }
+  }
+  const avgExplicitParentWeight =
+    explicitParentWeights.length > 0
+      ? explicitParentWeights.reduce((a, b) => a + b, 0) / explicitParentWeights.length
+      : 0;
+
   let totalWeight = 0;
-  let weightedSum = 0;
-  for (const t of targetList) {
+  for (const t of leafTasks) {
     let w = resolveTaskWeight(t, hasExplicitWeights);
     if (hasExplicitWeights && t.parentTaskId) {
       const parent = byId.get(String(t.parentTaskId));
-      const parentWeight = typeof parent?.weight === 'number' && parent.weight > 0 ? parent.weight : 0;
+      const parentWeight =
+        typeof parent?.weight === 'number' && parent.weight > 0
+          ? parent.weight
+          : avgExplicitParentWeight;
       const sibSum = siblingWeightTotals.get(String(t.parentTaskId)) || 0;
       if (parentWeight > 0 && sibSum > 0) {
         w = parentWeight * (Math.max(0, Number(t.weight ?? 0)) / sibSum);
       }
     }
+    weightById.set(String(t.id), w);
     totalWeight += w;
-    weightedSum += normalizeTaskProgressFraction(t) * w;
   }
 
+  return { leafTasks, weightById, totalWeight };
+}
+
+export function computeUnifiedProjectProgress(taskList: UnifiedGanttTaskLike[]): number {
+  if (!taskList || taskList.length === 0) return 0;
+  const { leafTasks, weightById, totalWeight } = computeEffectiveLeafWeights(taskList);
+  let weightedSum = 0;
+  for (const t of leafTasks) {
+    const w = weightById.get(String(t.id)) || 0;
+    weightedSum += normalizeTaskProgressFraction(t) * w;
+  }
   return totalWeight > 0 ? Math.round((weightedSum / totalWeight) * 100) : 0;
 }
 
@@ -246,14 +272,11 @@ export function computeUnifiedProjectPlannedProgress(
   referenceDate: Date = new Date()
 ): number {
   if (!taskList || taskList.length === 0) return 0;
-  const targetList = getLeafGanttTasks(taskList);
-  const hasExplicitWeights = targetList.some(t => typeof t.weight === 'number' && t.weight > 0);
+  const { leafTasks, weightById, totalWeight } = computeEffectiveLeafWeights(taskList);
 
-  let totalWeight = 0;
   let weightedSum = 0;
-  for (const t of targetList) {
-    const w = resolveTaskWeight(t, hasExplicitWeights);
-    totalWeight += w;
+  for (const t of leafTasks) {
+    const w = weightById.get(String(t.id)) || 0;
     weightedSum += (computeTaskPlannedPct(t, referenceDate) / 100) * w;
   }
 
@@ -303,7 +326,7 @@ export function computePhaseProgressSummary(
     };
   }
 
-  const leafTasks = getLeafGanttTasks(taskList);
+  const { leafTasks, weightById, totalWeight: totalEffectiveWeight } = computeEffectiveLeafWeights(taskList);
   const parentTasks = taskList.filter(
     t => t.type === 'phase' || t.type === 'project' || taskList.some(c => c.parentTaskId === t.id)
   );
@@ -312,46 +335,56 @@ export function computePhaseProgressSummary(
 
   // Case 1: Project has explicit parent Phase containers (e.g., from BOM or WBS hierarchy)
   if (parentTasks.length > 0) {
-    const totalExplicitPhaseWeights = parentTasks.reduce(
-      (sum, p) => sum + (typeof p.weight === 'number' && p.weight > 0 ? p.weight : 0),
-      0
+    // Include standalone root tasks/milestones (e.g. "5.0 Final QA/QC Turnover") so 100% of leaf tasks are accounted for
+    const parentIdSet = new Set(parentTasks.map(p => String(p.id)));
+    const standaloneRoots = taskList.filter(
+      t => !t.parentTaskId && !parentIdSet.has(String(t.id))
     );
+    const orderedTopLevel = [...parentTasks, ...standaloneRoots];
 
-    rows = parentTasks.map((phaseTask, idx) => {
-      // Find all leaf children under this phase container
-      const childTasks = leafTasks.filter(
-        c => c.parentTaskId === phaseTask.id ||
-             (c.wbsCode && phaseTask.wbsCode && c.wbsCode.startsWith(phaseTask.wbsCode)) ||
-             (c.constructionPhase && phaseTask.text && c.constructionPhase.toLowerCase() === phaseTask.text.toLowerCase())
-      );
+    const claimedLeafIds = new Set<string>();
+    const rawRows = orderedTopLevel.map((phaseTask, idx) => {
+      const isParentContainer = parentIdSet.has(String(phaseTask.id));
+      const matched = isParentContainer
+        ? leafTasks.filter(c => {
+          if (claimedLeafIds.has(String(c.id))) return false;
+          if (c.parentTaskId) {
+            return String(c.parentTaskId) === String(phaseTask.id);
+          }
+          return Boolean(
+            c.wbsCode &&
+            phaseTask.wbsCode &&
+            c.wbsCode.startsWith(phaseTask.wbsCode.replace(/\.0$/, '') + '.')
+          );
+        })
+        : [phaseTask];
 
-      const matched = childTasks.length > 0 ? childTasks : [phaseTask];
-      const hasExplicitChildWeights = matched.some(t => typeof t.weight === 'number' && t.weight > 0);
+      const effectiveMatched = matched.length > 0 ? matched : [phaseTask];
+      effectiveMatched.forEach(c => claimedLeafIds.add(String(c.id)));
 
-      let totalW = 0;
+      let rowEffWeight = 0;
       let sumActual = 0;
       let sumPlanned = 0;
 
-      for (const t of matched) {
-        const w = resolveTaskWeight(t, hasExplicitChildWeights);
-        totalW += w;
-        sumActual += normalizeTaskProgressFraction(t) * 100 * w;
-        sumPlanned += computeTaskPlannedPct(t, referenceDate) * w;
+      for (const t of effectiveMatched) {
+        const w = weightById.get(String(t.id)) ?? Math.max(1, Number(t.weight ?? t.duration ?? 1));
+        rowEffWeight += w;
+        sumActual += normalizeTaskProgressFraction(t) * w;
+        sumPlanned += (computeTaskPlannedPct(t, referenceDate) / 100) * w;
       }
 
-      const actualPct = totalW > 0 ? Math.round(sumActual / totalW) : normalizeTaskProgressFraction(phaseTask) * 100;
-      const plannedPct = totalW > 0 ? Math.round(sumPlanned / totalW) : computeTaskPlannedPct(phaseTask, referenceDate);
+      const actualFrac = rowEffWeight > 0 ? sumActual / rowEffWeight : normalizeTaskProgressFraction(phaseTask);
+      const plannedFrac = rowEffWeight > 0 ? sumPlanned / rowEffWeight : computeTaskPlannedPct(phaseTask, referenceDate) / 100;
+      const actualPct = Math.round(actualFrac * 100);
+      const plannedPct = Math.round(plannedFrac * 100);
       const variancePct = actualPct - plannedPct;
 
-      let weight = 0;
-      if (totalExplicitPhaseWeights > 0 && typeof phaseTask.weight === 'number' && phaseTask.weight > 0) {
-        weight = +((phaseTask.weight / totalExplicitPhaseWeights) * 100).toFixed(1);
-      } else {
-        weight = +(100 / parentTasks.length).toFixed(1);
-      }
+      const weight = totalEffectiveWeight > 0
+        ? +((rowEffWeight / totalEffectiveWeight) * 100).toFixed(1)
+        : +(100 / orderedTopLevel.length).toFixed(1);
 
-      const weightedActual = +((actualPct * weight) / 100).toFixed(2);
-      const weightedPlanned = +((plannedPct * weight) / 100).toFixed(2);
+      const weightedActual = +((actualFrac * weight)).toFixed(2);
+      const weightedPlanned = +((plannedFrac * weight)).toFixed(2);
 
       return {
         wbs: phaseTask.wbsCode || `${idx + 1}.0`,
@@ -362,10 +395,29 @@ export function computePhaseProgressSummary(
         variancePct,
         weightedActual,
         weightedPlanned,
-        matchedCount: matched.length,
+        matchedCount: effectiveMatched.length,
         isScheduled: true,
+        _actualFrac: actualFrac,
+        _plannedFrac: plannedFrac,
       };
     });
+
+    // Normalize rounding remainder so displayed weights ALWAYS sum to exactly 100.0%
+    if (rawRows.length > 0) {
+      const sumW = +rawRows.reduce((s, r) => s + r.weight, 0).toFixed(1);
+      const diff = +(100 - sumW).toFixed(1);
+      if (Math.abs(diff) > 0 && Math.abs(diff) <= 1.0) {
+        let maxIdx = 0;
+        for (let i = 1; i < rawRows.length; i++) {
+          if (rawRows[i].weight > rawRows[maxIdx].weight) maxIdx = i;
+        }
+        rawRows[maxIdx].weight = +(rawRows[maxIdx].weight + diff).toFixed(1);
+        rawRows[maxIdx].weightedActual = +(rawRows[maxIdx]._actualFrac * rawRows[maxIdx].weight).toFixed(2);
+        rawRows[maxIdx].weightedPlanned = +(rawRows[maxIdx]._plannedFrac * rawRows[maxIdx].weight).toFixed(2);
+      }
+    }
+
+    rows = rawRows.map(({ _actualFrac, _plannedFrac, ...rest }) => rest);
   } else {
     // Case 2: Flat tasks or resolved construction phases.
     // Display all 14 standard WBS construction phases so Summary Progress Report is always complete and 100% synced

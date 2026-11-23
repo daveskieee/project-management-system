@@ -246,15 +246,54 @@ const handleCreateWorkers = async (req: Request, res: Response) => {
     const lNameSingle = String(lastName || last_name || '').trim();
     const workerStatus = status || 'Active';
 
+    // Deduplicate within incoming batch and skip active workers already registered with the same LOWER(TRIM(name)) + project_id
+    const seenBatchNames = new Set<string>();
+    const uniqueIncomingNames: string[] = [];
+    for (const rawN of individualNames) {
+      const key = rawN.trim().toLowerCase();
+      if (!key || seenBatchNames.has(key)) continue;
+      seenBatchNames.add(key);
+      uniqueIncomingNames.push(rawN.trim());
+    }
+
+    const existingRes = await pool.query(
+      `SELECT LOWER(TRIM(COALESCE(name, CONCAT(first_name, ' ', last_name)))) AS norm_name
+       FROM workers
+       WHERE LOWER(TRIM(COALESCE(name, CONCAT(first_name, ' ', last_name)))) = ANY($1::text[])
+         AND COALESCE(assigned_project_id, '') = COALESCE($2, '')
+         AND LOWER(COALESCE(status, 'active')) NOT IN ('inactive', 'terminated', 'deleted')`,
+      [uniqueIncomingNames.map(n => n.toLowerCase()), primaryProjId || '']
+    );
+    const existingNameSet = new Set<string>(existingRes.rows.map((r: any) => String(r.norm_name || '')));
+    const skippedDuplicates: string[] = [];
+    const namesToInsert: string[] = [];
+    for (const n of uniqueIncomingNames) {
+      if (existingNameSet.has(n.toLowerCase())) {
+        skippedDuplicates.push(n);
+      } else {
+        namesToInsert.push(n);
+      }
+    }
+
+    if (namesToInsert.length === 0) {
+      return res.status(200).json({
+        success: true,
+        count: 0,
+        skippedDuplicates,
+        message: 'All specified worker(s) already exist for this project.',
+        workers: []
+      });
+    }
+
     const createdWorkers: any[] = [];
     const contractorRows: any[] = [];
     const nowStamp = Date.now().toString(36).toUpperCase();
 
-    for (let i = 0; i < individualNames.length; i++) {
-      const fullName = individualNames[i];
+    for (let i = 0; i < namesToInsert.length; i++) {
+      const fullName = namesToInsert[i];
       const nameParts = fullName.split(/\s+/);
-      const indFirst = individualNames.length === 1 && fNameSingle ? fNameSingle : (nameParts[0] || fullName);
-      const indLast = individualNames.length === 1 && lNameSingle ? lNameSingle : (nameParts.slice(1).join(' ') || indFirst);
+      const indFirst = namesToInsert.length === 1 && fNameSingle ? fNameSingle : (nameParts[0] || fullName);
+      const indLast = namesToInsert.length === 1 && lNameSingle ? lNameSingle : (nameParts.slice(1).join(' ') || indFirst);
       const workerId = `CONT-${nowStamp}-${i + 1}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
 
       createdWorkers.push({
@@ -314,7 +353,7 @@ const handleCreateWorkers = async (req: Request, res: Response) => {
       }
       await client.query('COMMIT');
     } catch (txErr) {
-      await client.query('ROLLBACK').catch(() => {});
+      await client.query('ROLLBACK').catch(() => { });
       throw txErr;
     } finally {
       client.release();
@@ -334,6 +373,7 @@ const handleCreateWorkers = async (req: Request, res: Response) => {
     res.status(201).json({
       success: true,
       count: createdWorkers.length,
+      skippedDuplicates,
       worker: createdWorkers[0],
       workers: createdWorkers
     });
@@ -463,7 +503,7 @@ const handleUpdateWorkerRoute = async (req: Request, res: Response) => {
       await prisma.contractor.updateMany({
         where: { id },
         data: contractorUpdate,
-      }).catch(() => {});
+      }).catch(() => { });
     }
 
     broadcastChange('workers');
@@ -493,6 +533,96 @@ const handleUpdateWorkerRoute = async (req: Request, res: Response) => {
 
 workersRouter.patch('/:id', requireRole(['ADMIN', 'FINANCE']), handleUpdateWorkerRoute);
 workersRouter.put('/:id', requireRole(['ADMIN', 'FINANCE']), handleUpdateWorkerRoute);
+
+// ============================================================================
+// POST /api/workers/bulk-delete & DELETE /api/workers/bulk — Atomic Bulk Delete
+// Allowed: ADMIN, OPERATIONS_MANAGER, PROJECT_MANAGER, ENGINEER, FINANCE
+// ============================================================================
+const handleBulkDeleteWorkers = async (req: Request, res: Response) => {
+  const rawIds = req.body?.ids;
+  if (!Array.isArray(rawIds) || rawIds.length === 0) {
+    return res.status(400).json({ error: 'ids array with at least one worker ID is required.' });
+  }
+  const ids = Array.from(new Set(rawIds.map((x: any) => String(x || '').trim()).filter(Boolean)));
+  if (ids.length === 0) {
+    return res.status(400).json({ error: 'No valid worker IDs provided.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // Collect affected project IDs before deletion so we can refresh assigned_workers_count
+    const affectedProjectsRes = await client.query(
+      `SELECT DISTINCT project_id FROM project_worker_assignments WHERE worker_id = ANY($1::text[])
+       UNION
+       SELECT DISTINCT assigned_project_id AS project_id FROM workers WHERE id = ANY($1::text[]) AND assigned_project_id IS NOT NULL`,
+      [ids]
+    );
+    const affectedProjectIds = affectedProjectsRes.rows.map((r: any) => r.project_id).filter(Boolean);
+
+    // Clean dependent foreign-key references safely inside the same transaction
+    await client.query('UPDATE punch_list_defects SET "contractorId" = NULL WHERE "contractorId" = ANY($1::text[])', [ids]);
+    await client.query('UPDATE project_tasks SET "assignedContractorId" = NULL WHERE "assignedContractorId" = ANY($1::text[])', [ids]);
+    await client.query('DELETE FROM project_worker_assignments WHERE worker_id = ANY($1::text[])', [ids]);
+    await client.query('DELETE FROM attendance_logs WHERE worker_id = ANY($1::text[])', [ids]);
+    await client.query('DELETE FROM cash_advances WHERE worker_id = ANY($1::text[])', [ids]);
+    await client.query('DELETE FROM payroll_items WHERE worker_id = ANY($1::text[])', [ids]);
+
+    const delWorkersRes = await client.query('DELETE FROM workers WHERE id = ANY($1::text[]) RETURNING id', [ids]);
+    const delContractorsRes = await client.query('DELETE FROM contractors WHERE id = ANY($1::text[]) RETURNING id', [ids]);
+
+    // Remove deleted IDs from commercial_projects.assigned_contractor_ids and refresh counts
+    await client.query(
+      `UPDATE commercial_projects
+       SET assigned_contractor_ids = ARRAY(
+         SELECT elem FROM unnest(COALESCE(assigned_contractor_ids, ARRAY[]::text[])) AS elem
+         WHERE NOT (elem = ANY($1::text[]))
+       )
+       WHERE assigned_contractor_ids && $1::text[]`,
+      [ids]
+    );
+
+    for (const pId of affectedProjectIds) {
+      await client.query(
+        `UPDATE commercial_projects
+         SET assigned_workers_count = (
+           SELECT COUNT(DISTINCT worker_id)::int FROM project_worker_assignments
+           WHERE project_id = $1 AND UPPER(status) = 'ACTIVE'
+         )
+         WHERE id = $1`,
+        [pId]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const deletedSet = new Set<string>([
+      ...delWorkersRes.rows.map((r: any) => r.id),
+      ...delContractorsRes.rows.map((r: any) => r.id)
+    ]);
+
+    invalidateAllDataCache();
+    broadcastChange('workers');
+    broadcastChange('contractors');
+    if (affectedProjectIds.length > 0) broadcastChange('projects');
+
+    return res.json({
+      success: true,
+      deletedCount: deletedSet.size,
+      deletedIds: Array.from(deletedSet)
+    });
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('Error bulk deleting workers:', error);
+    return res.status(500).json({ error: 'Failed to bulk delete workers.' });
+  } finally {
+    client.release();
+  }
+};
+
+workersRouter.post('/bulk-delete', requireRole(['ADMIN', 'OPERATIONS_MANAGER', 'PROJECT_MANAGER', 'ENGINEER', 'FINANCE']), handleBulkDeleteWorkers);
+workersRouter.delete('/bulk', requireRole(['ADMIN', 'OPERATIONS_MANAGER', 'PROJECT_MANAGER', 'ENGINEER', 'FINANCE']), handleBulkDeleteWorkers);
 
 // ============================================================================
 // DELETE /api/workers/:id — Delete or inactivate worker

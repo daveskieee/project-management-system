@@ -469,14 +469,32 @@ export default function BillOfMaterialsManager({
     return [];
   });
 
-  // Re-load BOM when switching project (hydrate from server-persisted BOM phases if localStorage is empty)
+  // Dedicated accordion expansion state decoupled from fetched phases/refetches (keyed strictly by stable phase.id)
+  const [expandedPhaseIds, setExpandedPhaseIds] = useState<Set<string>>(() => new Set());
+  const prevSelectedProjectIdRef = useRef<string>(selectedProjectId);
+
+  // Only reset expandedPhaseIds when selectedProjectId actually changes (never on activeProject reference or phases refetch)
   useEffect(() => {
+    if (prevSelectedProjectIdRef.current !== selectedProjectId) {
+      prevSelectedProjectIdRef.current = selectedProjectId;
+      setExpandedPhaseIds(new Set());
+    }
+  }, [selectedProjectId]);
+
+  // Re-load BOM when switching project (hydrate from server-persisted BOM phases if localStorage is empty)
+  const loadedBomProjectIdRef = useRef<string>('');
+  useEffect(() => {
+    const isProjectSwitch = loadedBomProjectIdRef.current !== selectedProjectId;
+    if (!isProjectSwitch && phases.length > 0) {
+      return;
+    }
     try {
       const saved = localStorage.getItem(`ldm_bom_${selectedProjectId}`);
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const normalized = normalizeBomPhases(parsed);
+          loadedBomProjectIdRef.current = selectedProjectId;
           setPhases(normalized);
           localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(normalized));
           return;
@@ -486,15 +504,19 @@ export default function BillOfMaterialsManager({
     const serverPhases = Array.isArray((activeProject as any)?.bomPhases) ? (activeProject as any).bomPhases : [];
     if (serverPhases.length > 0) {
       const normalized = normalizeBomPhases(serverPhases);
+      loadedBomProjectIdRef.current = selectedProjectId;
       setPhases(normalized);
       try {
         localStorage.setItem(`ldm_bom_${selectedProjectId}`, JSON.stringify(normalized));
       } catch { }
       return;
     }
-    setPhases([]);
-    setProjectType('');
-  }, [selectedProjectId, activeProject, normalizeBomPhases]);
+    if (isProjectSwitch) {
+      loadedBomProjectIdRef.current = selectedProjectId;
+      setPhases([]);
+      setProjectType('');
+    }
+  }, [selectedProjectId, activeProject, normalizeBomPhases, phases.length]);
 
   const [materialSyncTick, setMaterialSyncTick] = useState(0);
 
@@ -533,6 +555,7 @@ export default function BillOfMaterialsManager({
   const executeApplyTemplate = (templateType: ProjectTypology) => {
     const freshPhases = generateDefaultBomPhases(templateType);
     saveBomToStorage(freshPhases);
+    setExpandedPhaseIds(new Set(freshPhases.map(p => p.id)));
     setPendingTemplateApply(null);
     onNotify?.(`Applied "${templateType}" Bill of Materials template with ${freshPhases.length} WBS phases.`);
   };
@@ -583,9 +606,17 @@ export default function BillOfMaterialsManager({
     onNotify?.(`Added Phase ${nextCodeChar} to "${projectTitle}".`);
   };
 
-  // Phase collapse/expand toggle
+  // Phase collapse/expand toggle (pure local UI state — never triggers DB refetch or collapses on SSE)
   const togglePhaseExpand = (phaseId: string) => {
-    saveBomToStorage(phases.map(p => p.id === phaseId ? { ...p, isExpanded: !p.isExpanded } : p));
+    setExpandedPhaseIds(prev => {
+      const next = new Set(prev);
+      if (next.has(phaseId)) {
+        next.delete(phaseId);
+      } else {
+        next.add(phaseId);
+      }
+      return next;
+    });
   };
 
   // Batch-apply Profit % to all items in phase
@@ -1681,7 +1712,7 @@ export default function BillOfMaterialsManager({
                       type="button"
                       className="w-6 h-6 rounded-md bg-slate-800 flex items-center justify-center text-slate-300 hover:text-white"
                     >
-                      {phase.isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                      {expandedPhaseIds.has(phase.id) ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
                     </button>
                     <div>
                       <span className="text-[10px] font-mono text-amber-400 uppercase font-bold tracking-wider">
@@ -1751,7 +1782,7 @@ export default function BillOfMaterialsManager({
                 </div>
 
                 {/* Sub-Phases & Items Content */}
-                {phase.isExpanded && (
+                {expandedPhaseIds.has(phase.id) && (
                   <div className="p-3 sm:p-4 space-y-4">
                     {phase.subPhases.map((sp) => (
                       <div key={sp.id} className="bg-slate-950/40 border border-slate-800 rounded-xl overflow-hidden">

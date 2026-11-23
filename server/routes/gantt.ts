@@ -897,11 +897,18 @@ export function createGanttRouter(prisma: PrismaClient) {
 
           knownProjectTaskIds.add(taskIdStr);
 
+          const parsedBaselineStart = t.baselineStart ? new Date(t.baselineStart) : null;
+          const parsedBaselineEnd = t.baselineEnd ? new Date(t.baselineEnd) : null;
+          const validBaselineStart = parsedBaselineStart && !isNaN(parsedBaselineStart.getTime()) ? parsedBaselineStart : undefined;
+          const validBaselineEnd = parsedBaselineEnd && !isNaN(parsedBaselineEnd.getTime()) ? parsedBaselineEnd : undefined;
+
           const baseFields = {
             text: t.text || t.title || 'New Construction Task',
             title: t.text || t.title || 'New Construction Task',
             startDate,
             endDate,
+            ...(validBaselineStart ? { baselineStart: validBaselineStart } : {}),
+            ...(validBaselineEnd ? { baselineEnd: validBaselineEnd } : {}),
             duration,
             progress,
             ...(t.weight !== undefined && t.weight !== null ? { weight: Number(t.weight) } : {}),

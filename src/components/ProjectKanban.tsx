@@ -228,7 +228,7 @@ export default function ProjectKanban({
 
     setIsLoadingGantt(true);
     try {
-      const res = await fetch(`/api/projects/${projectId}/gantt`);
+      const res = await fetch(`/api/projects/${encodeURIComponent(projectId)}/gantt`, { cache: 'no-store' });
       if (res.ok) {
         const json = await res.json().catch(() => null);
         const rawTasks = Array.isArray(json?.data) ? json.data : [];

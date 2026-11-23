@@ -80,6 +80,8 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
   const [siteFilter, setSiteFilter] = useState<string>('ALL');
   const [viewMode, setViewMode] = useState<'MESSENGER' | 'GRID'>('MESSENGER');
   const [dossierTab, setDossierTab] = useState<'DEPLOYMENT' | 'PERFORMANCE' | 'CREDENTIALS'>('DEPLOYMENT');
+  const [selectedWorkerIds, setSelectedWorkerIds] = useState<Set<string>>(new Set());
+  const [isBulkDeleting, setIsBulkDeleting] = useState(false);
 
   // Reallocation Requests State (Synced between PM Submission & OM Approvals)
   const [reallocations, setReallocations] = useState<WorkerReallocationRequest[]>(() => {
@@ -313,6 +315,76 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
     }
   };
 
+  // Prune any selectedWorkerIds that no longer exist in contractors
+  useEffect(() => {
+    const validIds = new Set(contractors.map(c => c.id));
+    setSelectedWorkerIds(prev => {
+      if (prev.size === 0) return prev;
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach(id => {
+        if (validIds.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [contractors]);
+
+  const toggleSelectWorker = (workerId: string, e?: React.MouseEvent | React.ChangeEvent) => {
+    e?.stopPropagation();
+    setSelectedWorkerIds(prev => {
+      const next = new Set(prev);
+      if (next.has(workerId)) next.delete(workerId);
+      else next.add(workerId);
+      return next;
+    });
+  };
+
+  const handleBulkDeleteSelected = async () => {
+    const ids = Array.from(selectedWorkerIds);
+    if (ids.length === 0 || isBulkDeleting) return;
+
+    const ok = await confirmDialog({
+      title: `Delete ${ids.length} Selected Worker${ids.length > 1 ? 's' : ''}`,
+      message: `Are you sure you want to permanently remove ${ids.length} selected worker${ids.length > 1 ? 's' : ''} from the Workforce Directory, Roster, and Masterlist? This action cannot be undone.`,
+      confirmLabel: `Delete Selected (${ids.length})`,
+      variant: 'danger',
+    });
+    if (!ok) return;
+
+    setIsBulkDeleting(true);
+    try {
+      const res = await fetch('/api/workers/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ ids })
+      });
+      const json = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(json?.error || `HTTP ${res.status}`);
+      }
+
+      const deletedSet = new Set<string>(ids);
+      const remaining = contractors.filter(c => !deletedSet.has(c.id));
+      if (onUpdateContractors) {
+        onUpdateContractors(remaining);
+      } else if (onDeleteContractor) {
+        ids.forEach(id => onDeleteContractor(id));
+      }
+      if (deletedSet.has(selectedId)) {
+        setSelectedId(remaining[0]?.id || '');
+      }
+      setSelectedWorkerIds(new Set());
+      notify(`Deleted ${ids.length} worker${ids.length > 1 ? 's' : ''} from Workforce Directory`);
+    } catch (err: any) {
+      console.error('Bulk delete workers failed:', err);
+      notify(err?.message || 'Failed to delete selected workers.');
+    } finally {
+      setIsBulkDeleting(false);
+    }
+  };
+
   // Handle status toggle
   const handleToggleStatus = (newStatus: 'ONLINE' | 'BREAK' | 'OFFLINE') => {
     if (!selectedContractor) return;
@@ -409,6 +481,24 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
       a.contractorName?.toLowerCase() === selectedContractor.name?.toLowerCase()
     );
   }, [selectedContractor, manpowerAudits]);
+
+  const allFilteredSelected = filteredContractors.length > 0 && filteredContractors.every(c => selectedWorkerIds.has(c.id));
+
+  const handleToggleSelectAll = () => {
+    if (allFilteredSelected) {
+      setSelectedWorkerIds(prev => {
+        const next = new Set(prev);
+        filteredContractors.forEach(c => next.delete(c.id));
+        return next;
+      });
+    } else {
+      setSelectedWorkerIds(prev => {
+        const next = new Set(prev);
+        filteredContractors.forEach(c => next.add(c.id));
+        return next;
+      });
+    }
+  };
 
   return (
     <div className="space-y-4 font-sans">
@@ -537,7 +627,18 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
           </div>
 
           {/* Action buttons & View Mode */}
-          <div className="flex items-center gap-2 self-start sm:self-center">
+          <div className="flex items-center gap-2 self-start sm:self-center flex-wrap">
+            {filteredContractors.length > 0 && (
+              <label className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-slate-900 border border-slate-800 hover:border-slate-700 rounded-lg text-[11px] font-medium text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={allFilteredSelected}
+                  onChange={handleToggleSelectAll}
+                  className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-950 text-teal-500 focus:ring-teal-500 cursor-pointer accent-teal-500"
+                />
+                <span>Select All</span>
+              </label>
+            )}
             <div className="flex items-center bg-slate-900 border border-slate-800 p-0.5 rounded-lg text-xs">
               <button
                 type="button"
@@ -639,6 +740,39 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
             </button>
           </div>
         </div>
+
+        {/* MULTI-SELECT BULK ACTION BAR */}
+        {selectedWorkerIds.size > 0 && (
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-rose-950/50 border border-rose-500/40 text-xs animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center justify-center w-5 h-5 rounded-md bg-rose-500/20 text-rose-300 font-mono font-bold text-[11px]">
+                {selectedWorkerIds.size}
+              </span>
+              <span className="font-semibold text-rose-200">
+                {selectedWorkerIds.size} worker{selectedWorkerIds.size > 1 ? 's' : ''} selected
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={isBulkDeleting}
+                onClick={() => setSelectedWorkerIds(new Set())}
+                className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Clear Selection
+              </button>
+              <button
+                type="button"
+                disabled={isBulkDeleting}
+                onClick={handleBulkDeleteSelected}
+                className="px-3 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-60"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isBulkDeleting ? 'Deleting...' : `Delete Selected (${selectedWorkerIds.size})`}</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* MAIN TWO-COLUMN WORKFORCE WORKSPACE */}
@@ -679,15 +813,28 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
                   const isCorp = isOfficeOrExecutive(c);
                   const siteName = c.activeProjectSite || 'Standby';
 
+                  const isChecked = selectedWorkerIds.has(c.id);
                   return (
                     <div
                       key={c.id}
                       onClick={() => setSelectedId(c.id)}
-                      className={`p-3 rounded-xl transition-all cursor-pointer flex items-center gap-3 relative ${isSelected
-                          ? 'bg-slate-900 border border-teal-500/40 shadow-xs'
-                          : 'hover:bg-slate-900/60 border border-transparent'
+                      className={`p-3 rounded-xl transition-all cursor-pointer flex items-center gap-3 relative ${isChecked
+                          ? 'bg-rose-950/20 border border-rose-500/40 shadow-xs'
+                          : isSelected
+                            ? 'bg-slate-900 border border-teal-500/40 shadow-xs'
+                            : 'hover:bg-slate-900/60 border border-transparent'
                         }`}
                     >
+                      {/* Multi-select checkbox */}
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onClick={(e) => e.stopPropagation()}
+                        onChange={(e) => toggleSelectWorker(c.id, e)}
+                        aria-label={`Select ${c.name}`}
+                        className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-950 text-teal-500 focus:ring-teal-500 shrink-0 cursor-pointer accent-teal-500"
+                      />
+
                       {/* Avatar with Presence Indicator */}
                       <div className="relative shrink-0">
                         {avatarUrl ? (
@@ -1115,16 +1262,27 @@ export const WorkforceMessengerRoster: React.FC<WorkforceMessengerRosterProps> =
             const avatarUrl = getWorkerAvatar(c);
             const presenceConfig = getPresenceLabel(presence);
 
+            const isChecked = selectedWorkerIds.has(c.id);
             return (
               <div
                 key={c.id}
-                className={`${isDark
-                    ? 'bg-slate-950 border-slate-800 hover:border-slate-700'
-                    : 'bg-white border-slate-200/80 hover:border-slate-300 shadow-xs'
-                  } border rounded-xl p-4 space-y-3 transition-all`}
+                className={`${isChecked
+                    ? (isDark ? 'bg-rose-950/20 border-rose-500/50' : 'bg-rose-50/70 border-rose-300 shadow-xs')
+                    : isDark
+                      ? 'bg-slate-950 border-slate-800 hover:border-slate-700'
+                      : 'bg-white border-slate-200/80 hover:border-slate-300 shadow-xs'
+                  } border rounded-xl p-4 space-y-3 transition-all relative`}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-center gap-2.5">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <input
+                      type="checkbox"
+                      checked={isChecked}
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => toggleSelectWorker(c.id, e)}
+                      aria-label={`Select ${c.name}`}
+                      className="w-3.5 h-3.5 rounded border-slate-600 bg-slate-950 text-teal-500 focus:ring-teal-500 shrink-0 cursor-pointer accent-teal-500 self-start mt-1"
+                    />
                     <div className="relative shrink-0">
                       {avatarUrl ? (
                         <img src={avatarUrl} alt={c.name} className={`w-10 h-10 rounded-full object-cover border ${isDark ? 'border-slate-700' : 'border-slate-200'}`} />

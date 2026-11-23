@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Plus, CheckCircle2, Clock, AlertTriangle, Search,
   ShieldCheck, Building2, FileText, Check, X, Truck,
   Package, ShoppingCart, ClipboardCheck, ArrowRight, Printer,
   Layers, Download, Edit2, Trash2, Filter, Sliders, DollarSign, Database,
-  Eye, Camera
+  Eye, Camera, Loader2
 } from 'lucide-react';
 import { ProjectRFI, ProjectProfile } from '../types';
 import { normalizeRole, UserRole } from '../utils/rbac';
@@ -19,10 +19,12 @@ import { logAuditEvent } from '../utils/auditLogger';
 import { useTheme } from '../context/ThemeContext';
 import { uploadFileToServer, compressImageToDataUrl } from '../utils/imageCompression';
 import { notifyBomProfitSync } from '../utils/bomProfitSync';
+import { getCsrfToken } from '../utils/apiClient';
 
 interface RfiManagerProps {
   rfis: ProjectRFI[];
   projects?: ProjectProfile[];
+  activeProjectId?: string;
   isAdmin?: boolean;
   userRole?: string;
   onSubmitRfi?: (rfi: Partial<ProjectRFI>) => Promise<void> | void;
@@ -39,6 +41,7 @@ export const MATERIAL_CATEGORIES = [
 
 export interface MaterialLedgerItem {
   id: string;
+  projectId?: string;
   projectName: string;
   week: string; // e.g. 'Week 1', 'Week 2'
   date: string;
@@ -48,103 +51,18 @@ export interface MaterialLedgerItem {
   unit: string;
   received: number;
   used: number; // Used / Issued
+  usedIssued?: number;
+  remainingStock?: number;
+  balanceOrder?: number;
+  stockValue?: number;
+  status?: string;
   supplier: string;
   unitCostPhp: number;
+  unitCost?: number;
   notes?: string;
 }
 
-export const DEFAULT_MATERIAL_DIRECTORY: MaterialLedgerItem[] = [
-  {
-    id: 'MAT-DIR-001',
-    projectName: 'LDM Prime Residential Build',
-    week: 'Week 1',
-    date: '2026-11-01',
-    materialDescription: 'Portland Cement Type 1 (40kg)',
-    category: 'Structural',
-    ordered: 500,
-    unit: 'bags',
-    received: 350,
-    used: 280,
-    supplier: 'Holcim Philippines Industrial',
-    unitCostPhp: 270,
-    notes: 'Footings & columns concrete mix'
-  },
-  {
-    id: 'MAT-DIR-002',
-    projectName: 'LDM Prime Residential Build',
-    week: 'Week 1',
-    date: '2026-11-02',
-    materialDescription: 'Deformed Reinforcing Steel Bars 16mm x 6m',
-    category: 'Structural',
-    ordered: 200,
-    unit: 'lengths',
-    received: 200,
-    used: 160,
-    supplier: 'Pag-Asa Steel Works',
-    unitCostPhp: 520,
-    notes: 'Column & footing rebar cages completed'
-  },
-  {
-    id: 'MAT-DIR-003',
-    projectName: 'LDM Prime Residential Build',
-    week: 'Week 2',
-    date: '2026-11-05',
-    materialDescription: 'Concrete Hollow Blocks (CHB 6" Load Bearing)',
-    category: 'Masonry',
-    ordered: 2000,
-    unit: 'pcs',
-    received: 1200,
-    used: 800,
-    supplier: 'Luzon Concrete Aggregates Inc.',
-    unitCostPhp: 22,
-    notes: 'Perimeter and ground exterior walls'
-  },
-  {
-    id: 'MAT-DIR-004',
-    projectName: 'LDM Prime Residential Build',
-    week: 'Week 2',
-    date: '2026-11-06',
-    materialDescription: 'Phenolic Board 3/4" Film Faced Formwork',
-    category: 'Formworks',
-    ordered: 80,
-    unit: 'sheets',
-    received: 80,
-    used: 65,
-    supplier: 'CW Home Depot Commercial Pro',
-    unitCostPhp: 850,
-    notes: '2nd floor suspended slab formworks'
-  },
-  {
-    id: 'MAT-DIR-005',
-    projectName: 'LDM Prime Residential Build',
-    week: 'Week 3',
-    date: '2026-11-08',
-    materialDescription: 'Washed River Sand (Fine Aggregates)',
-    category: 'Structural',
-    ordered: 30,
-    unit: 'cu.m.',
-    received: 20,
-    used: 15,
-    supplier: 'Metro Aggregates & Hauling',
-    unitCostPhp: 1200,
-    notes: 'Mortar batching and concrete works'
-  },
-  {
-    id: 'MAT-DIR-006',
-    projectName: 'LDM Prime Residential Build',
-    week: 'Week 3',
-    date: '2026-11-09',
-    materialDescription: 'PPR Hot & Cold Water Pipes 1/2"',
-    category: 'Plumbing',
-    ordered: 45,
-    unit: 'lengths',
-    received: 45,
-    used: 30,
-    supplier: 'Vesbo Piping Solutions',
-    unitCostPhp: 380,
-    notes: 'Ground & 2nd floor roughing-in'
-  }
-];
+export const DEFAULT_MATERIAL_DIRECTORY: MaterialLedgerItem[] = [];
 
 function guessMaterialCategory(desc: string, phase: string): MaterialLedgerItem['category'] {
   const text = `${desc} ${phase}`.toLowerCase();
@@ -199,6 +117,7 @@ const DEFAULT_MATERIAL_CATALOG = [
 
 export default function RfiManager({
   projects = [],
+  activeProjectId,
   isAdmin = false,
   userRole,
   onSubmitRfi,
@@ -223,8 +142,14 @@ export default function RfiManager({
 
   // Form states for submitting a new Material / Purchase Request
   const [selectedProjectName, setSelectedProjectName] = useState<string>(
-    projects[0]?.name || 'LDM Prime Residential Build'
+    projects[0]?.name || ''
   );
+
+  useEffect(() => {
+    if (!selectedProjectName && projects.length > 0) {
+      setSelectedProjectName(projects[0].name);
+    }
+  }, [projects, selectedProjectName]);
   const [selectedMaterial, setSelectedMaterial] = useState<string>(DEFAULT_MATERIAL_CATALOG[0]);
   const [quantity, setQuantity] = useState<number>(150);
   const [unit, setUnit] = useState<string>('bags');
@@ -235,25 +160,32 @@ export default function RfiManager({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [toastBanner, setToastBanner] = useState<string | null>(null);
 
-  // Material Directory Ledger State & Filters
-  const [materialLedger, setMaterialLedger] = useState<MaterialLedgerItem[]>(() => {
-    try {
-      const raw = localStorage.getItem('ldm_material_directory') || localStorage.getItem('ctvill_material_directory');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch { }
-    return DEFAULT_MATERIAL_DIRECTORY;
-  });
+  // Material Directory Ledger State & Filters (hydrated from PostgreSQL /api/materials)
+  const [materialLedger, setMaterialLedger] = useState<MaterialLedgerItem[]>([]);
   const [ledgerCategoryFilter, setLedgerCategoryFilter] = useState<string>('ALL');
   const [ledgerWeekFilter, setLedgerWeekFilter] = useState<string>('ALL');
   const [ledgerSearch, setLedgerSearch] = useState<string>('');
   const [selectedProjectFilter, setSelectedProjectFilter] = useState<string>('ALL');
-  const [draftLedgerEdits, setDraftLedgerEdits] = useState<Record<string, { received: string; used: string }>>({});
+  const [editingRowId, setEditingRowId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<{
+    week: string;
+    materialDescription: string;
+    category: MaterialLedgerItem['category'];
+    ordered: string;
+    unit: string;
+    received: string;
+    used: string;
+    supplier: string;
+    unitCostPhp: string;
+  } | null>(null);
+  const [isSavingInlineRow, setIsSavingInlineRow] = useState<boolean>(false);
 
-  // Add Item to Directory Modal State
+  // Add Item to Directory Modal State (strictly for creating new items)
   const [showAddDirectoryModal, setShowAddDirectoryModal] = useState<boolean>(false);
+  const [newMatProjectId, setNewMatProjectId] = useState<string>('');
+  const [isSavingMaterial, setIsSavingMaterial] = useState<boolean>(false);
+  const [isLoadingMaterials, setIsLoadingMaterials] = useState<boolean>(true);
+  const requestIdRef = useRef<number>(0);
   const [newMatDesc, setNewMatDesc] = useState<string>('');
   const [newMatCategory, setNewMatCategory] = useState<MaterialLedgerItem['category']>('Structural');
   const [newMatWeek, setNewMatWeek] = useState<string>('Week 1');
@@ -265,10 +197,95 @@ export default function RfiManager({
   const [newMatUnitCost, setNewMatUnitCost] = useState<number>(270);
   const [newMatNotes, setNewMatNotes] = useState<string>('');
 
+  const normalizeMaterialFromApi = (raw: any): MaterialLedgerItem => ({
+    id: String(raw.id),
+    projectId: raw.projectId || raw.project_id || undefined,
+    projectName: raw.projectName || raw.project_name || '',
+    week: raw.week || 'Week 1',
+    date: raw.date || new Date().toISOString().split('T')[0],
+    materialDescription: raw.materialDescription || raw.material_description || '',
+    category: (MATERIAL_CATEGORIES.includes(raw.category) ? raw.category : 'General') as MaterialLedgerItem['category'],
+    ordered: Number(raw.ordered) || 1,
+    unit: raw.unit || 'pcs',
+    received: Number(raw.received) || 0,
+    used: Number(raw.usedIssued ?? raw.used_issued ?? raw.used) || 0,
+    usedIssued: Number(raw.usedIssued ?? raw.used_issued ?? raw.used) || 0,
+    remainingStock: raw.remainingStock !== undefined ? Number(raw.remainingStock) : undefined,
+    balanceOrder: raw.balanceOrder !== undefined ? Number(raw.balanceOrder) : undefined,
+    stockValue: raw.stockValue !== undefined ? Number(raw.stockValue) : undefined,
+    status: raw.status || undefined,
+    supplier: raw.supplier || 'Approved Builders Supply',
+    unitCostPhp: Number(raw.unitCost ?? raw.unit_cost ?? raw.unitCostPhp) || 0,
+    unitCost: Number(raw.unitCost ?? raw.unit_cost ?? raw.unitCostPhp) || 0,
+    notes: raw.notes || '',
+  });
+
+  const buildMaterialHeaders = () => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const csrf = getCsrfToken();
+    if (csrf) headers['x-csrf-token'] = csrf;
+    return headers;
+  };
+
+  // Resolve selectedProjectId from the toolbar filter (null when "ALL" -> fetch all projects)
+  const selectedProjectId =
+    selectedProjectFilter === 'ALL'
+      ? null
+      : (projects.find(
+        p =>
+          p.id === selectedProjectFilter ||
+          p.name.toLowerCase() === selectedProjectFilter.toLowerCase()
+      )?.id ?? null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const reqId = ++requestIdRef.current;
+    setIsLoadingMaterials(true);
+
+    const url = selectedProjectId
+      ? `/api/materials?projectId=${encodeURIComponent(selectedProjectId)}`
+      : '/api/materials';
+
+    (async () => {
+      try {
+        const res = await fetch(url, {
+          credentials: 'include',
+          cache: 'no-store',
+          signal: controller.signal,
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (controller.signal.aborted || reqId !== requestIdRef.current) return;
+        if (Array.isArray(data)) {
+          const normalized = data.map(normalizeMaterialFromApi);
+          setMaterialLedger(normalized);
+          if (!selectedProjectId) {
+            try {
+              localStorage.setItem('ldm_material_directory', JSON.stringify(normalized));
+              localStorage.setItem('ctvill_material_directory', JSON.stringify(normalized));
+              notifyBomProfitSync();
+            } catch { }
+          }
+        }
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+        // Keep current ledger if network error occurs
+      } finally {
+        if (!controller.signal.aborted && reqId === requestIdRef.current) {
+          setIsLoadingMaterials(false);
+        }
+      }
+    })();
+
+    return () => {
+      controller.abort();
+    };
+  }, [selectedProjectFilter, selectedProjectId, activeSubTab]);
+
   const [requests, setRequests] = useState<MaterialPurchaseRequest[]>([
     {
       id: 'PR-2026-001',
-      projectName: projects[0]?.name || 'LDM Prime Residential Build',
+      projectName: projects[0]?.name || '',
       materialType: 'Portland Cement Type 1 (40kg Bags)',
       quantity: 250,
       unit: 'bags',
@@ -283,7 +300,7 @@ export default function RfiManager({
     },
     {
       id: 'PR-2026-002',
-      projectName: projects[0]?.name || 'LDM Prime Residential Build',
+      projectName: projects[0]?.name || '',
       materialType: 'Deformed Reinforcing Steel Bars (16mm / 12mm / 10mm)',
       quantity: 180,
       unit: 'lengths',
@@ -298,7 +315,7 @@ export default function RfiManager({
     },
     {
       id: 'PR-2026-003',
-      projectName: projects[1]?.name || projects[0]?.name || 'LDM Prime Residential Build',
+      projectName: projects[1]?.name || projects[0]?.name || '',
       materialType: 'Concrete Hollow Blocks (CHB 4" & 6")',
       quantity: 1500,
       unit: 'pcs',
@@ -315,7 +332,7 @@ export default function RfiManager({
     },
     {
       id: 'PR-2026-004',
-      projectName: projects[0]?.name || 'LDM Prime Residential Build',
+      projectName: projects[0]?.name || '',
       materialType: 'Phenolic Board Formworks (1/2" & 3/4")',
       quantity: 65,
       unit: 'sheets',
@@ -468,7 +485,21 @@ export default function RfiManager({
     });
   };
 
-  const handleDeleteLedgerItem = (id: string) => {
+  const handleDeleteLedgerItem = async (id: string) => {
+    try {
+      const res = await fetch(`/api/materials/${encodeURIComponent(id)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+        headers: buildMaterialHeaders(),
+      });
+      if (!res.ok && res.status !== 404) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || 'Failed to delete material item.');
+        return;
+      }
+    } catch {
+      // Allow local removal if offline
+    }
     setMaterialLedger(prev => {
       const next = prev.filter(item => item.id !== id);
       persistMaterialLedger(next);
@@ -477,32 +508,160 @@ export default function RfiManager({
     showToast('Material item deleted from directory.');
   };
 
-  const handleAddDirectLedgerItem = (e: React.FormEvent) => {
+  const openAddDirectoryModal = () => {
+    let defaultProjId = '';
+    if (selectedProjectFilter !== 'ALL') {
+      const matched = projects.find(
+        p =>
+          p.id === selectedProjectFilter ||
+          p.name.toLowerCase() === selectedProjectFilter.toLowerCase()
+      );
+      if (matched) {
+        defaultProjId = matched.id;
+      }
+    } else if (activeProjectId && projects.some(p => p.id === activeProjectId)) {
+      defaultProjId = activeProjectId;
+    }
+    setNewMatProjectId(defaultProjId);
+    setNewMatDesc('');
+    setNewMatCategory('Structural');
+    setNewMatWeek('Week 1');
+    setNewMatOrdered(100);
+    setNewMatUnit('bags');
+    setNewMatReceived(0);
+    setNewMatUsed(0);
+    setNewMatSupplier('Holcim Philippines Industrial');
+    setNewMatUnitCost(270);
+    setNewMatNotes('');
+    setShowAddDirectoryModal(true);
+  };
+
+  const handleCloseDirectoryModal = () => {
+    setShowAddDirectoryModal(false);
+  };
+
+  const handleStartInlineRowEdit = (item: MaterialLedgerItem) => {
+    setEditingRowId(item.id);
+    setEditDraft({
+      week: item.week,
+      materialDescription: item.materialDescription,
+      category: item.category,
+      ordered: String(item.ordered),
+      unit: item.unit,
+      received: String(item.received),
+      used: String(item.used),
+      supplier: item.supplier,
+      unitCostPhp: String(item.unitCostPhp),
+    });
+  };
+
+  const handleCancelInlineRowEdit = () => {
+    setEditingRowId(null);
+    setEditDraft(null);
+  };
+
+  const handleSaveInlineRowEdit = async (item: MaterialLedgerItem) => {
+    if (!editDraft || editingRowId !== item.id) return;
+    const cleanDesc = editDraft.materialDescription.trim() || item.materialDescription;
+    const nextOrdered = Math.max(1, Number(editDraft.ordered) || 1);
+    const nextReceived = Math.max(0, Number(editDraft.received) || 0);
+    const nextUsed = Math.max(0, Number(editDraft.used) || 0);
+    const nextUnitCost = Math.max(0, Number(editDraft.unitCostPhp) || 0);
+    const nextWeek = editDraft.week.trim() || item.week;
+    const nextSupplier = editDraft.supplier.trim() || 'Approved Builders Supply';
+
+    setIsSavingInlineRow(true);
+    try {
+      const res = await fetch(`/api/materials/${encodeURIComponent(item.id)}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: buildMaterialHeaders(),
+        body: JSON.stringify({
+          week: nextWeek,
+          materialDescription: cleanDesc,
+          category: editDraft.category,
+          ordered: nextOrdered,
+          unit: editDraft.unit,
+          received: nextReceived,
+          usedIssued: nextUsed,
+          supplier: nextSupplier,
+          unitCost: nextUnitCost,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || 'Failed to save material changes.');
+        return;
+      }
+      const saved = normalizeMaterialFromApi(await res.json());
+      setMaterialLedger(prev => {
+        const next = prev.map(row => (row.id === item.id ? saved : row));
+        persistMaterialLedger(next);
+        return next;
+      });
+      setEditingRowId(null);
+      setEditDraft(null);
+      showToast(`Saved "${saved.materialDescription}" (Received: ${saved.received}, Used: ${saved.used}).`);
+    } catch {
+      showToast('Network error while saving material changes.');
+    } finally {
+      setIsSavingInlineRow(false);
+    }
+  };
+
+  const handleAddDirectLedgerItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMatDesc.trim()) return;
-    const newItem: MaterialLedgerItem = {
-      id: `MAT-DIR-${Date.now().toString().slice(-4)}`,
-      projectName: selectedProjectName,
-      week: newMatWeek,
-      date: new Date().toISOString().split('T')[0],
+    if (!newMatProjectId) {
+      showToast('Please select a Target Project.');
+      return;
+    }
+
+    const targetProject = projects.find(p => p.id === newMatProjectId);
+    const resolvedProjectName = targetProject?.name || newMatProjectId;
+    const payload = {
+      projectId: newMatProjectId,
+      projectName: resolvedProjectName,
+      week: newMatWeek.trim() || 'Week 1',
       materialDescription: newMatDesc.trim(),
       category: newMatCategory,
       ordered: Math.max(1, Number(newMatOrdered) || 1),
       unit: newMatUnit,
       received: Math.max(0, Number(newMatReceived) || 0),
-      used: Math.max(0, Number(newMatUsed) || 0),
+      usedIssued: Math.max(0, Number(newMatUsed) || 0),
       supplier: newMatSupplier.trim() || 'Approved Builders Supply',
-      unitCostPhp: Math.max(0, Number(newMatUnitCost) || 0),
-      notes: newMatNotes.trim()
+      unitCost: Math.max(0, Number(newMatUnitCost) || 0),
+      notes: newMatNotes.trim(),
+      date: new Date().toISOString().split('T')[0],
     };
-    setMaterialLedger(prev => {
-      const next = [newItem, ...prev];
-      persistMaterialLedger(next);
-      return next;
-    });
-    setShowAddDirectoryModal(false);
-    setNewMatDesc('');
-    showToast(`Added "${newItem.materialDescription}" to Material Directory.`);
+
+    setIsSavingMaterial(true);
+    try {
+      const res = await fetch('/api/materials', {
+        method: 'POST',
+        credentials: 'include',
+        headers: buildMaterialHeaders(),
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.error || 'Failed to add material item.');
+        return;
+      }
+      const created = normalizeMaterialFromApi(await res.json());
+      setMaterialLedger(prev => {
+        const next = [created, ...prev];
+        persistMaterialLedger(next);
+        return next;
+      });
+      handleCloseDirectoryModal();
+      setNewMatDesc('');
+      showToast(`Added "${created.materialDescription}" to ${created.projectName}.`);
+    } catch {
+      showToast('Network error while saving material item.');
+    } finally {
+      setIsSavingMaterial(false);
+    }
   };
 
   const handleExportLedgerCsv = () => {
@@ -708,36 +867,11 @@ export default function RfiManager({
     setReceivingModalItem(null);
   };
 
-  const handleCommitLedgerRowEdit = (id: string) => {
-    const draft = draftLedgerEdits[id];
-    if (!draft) return;
-    const targetItem = materialLedger.find(m => m.id === id);
-    if (!targetItem) return;
-    const nextReceived = Math.max(0, Number(draft.received) || 0);
-    const nextUsed = Math.max(0, Number(draft.used) || 0);
-    setMaterialLedger(prev => {
-      const next = prev.map(item =>
-        item.id === id ? { ...item, received: nextReceived, used: nextUsed } : item
-      );
-      persistMaterialLedger(next);
-      return next;
-    });
-    setDraftLedgerEdits(prev => {
-      const copy = { ...prev };
-      delete copy[id];
-      return copy;
-    });
-    showToast(`Saved "${targetItem.materialDescription}" (Received: ${nextReceived}, Used: ${nextUsed}).`);
-  };
-
   const pendingApprovals = requests.filter(r => r.approvalStatus === 'PENDING');
   const approvedDeliveries = requests.filter(r => r.approvalStatus === 'APPROVED');
+  // Strictly populate dropdown from active projects returned by /api/projects
   const availableProjectNames = Array.from(
-    new Set([
-      ...projects.map(p => p.name),
-      ...requests.map(r => r.projectName),
-      ...materialLedger.map(m => m.projectName),
-    ].filter(Boolean))
+    new Set(projects.map(p => p.name).filter(Boolean))
   );
 
   const filteredRequests = requests.filter(r => {
@@ -755,8 +889,18 @@ export default function RfiManager({
   });
 
   const filteredLedger = materialLedger.filter(item => {
-    if (selectedProjectFilter !== 'ALL' && item.projectName.toLowerCase() !== selectedProjectFilter.toLowerCase()) {
-      return false;
+    if (selectedProjectFilter !== 'ALL') {
+      const filterProject = projects.find(
+        p =>
+          p.id === selectedProjectFilter ||
+          p.name.toLowerCase() === selectedProjectFilter.toLowerCase()
+      );
+      const matchesProjectId = Boolean(filterProject && item.projectId && item.projectId === filterProject.id);
+      const targetName = (filterProject?.name || selectedProjectFilter).toLowerCase();
+      const matchesProjectName = item.projectName.toLowerCase() === targetName;
+      if (!matchesProjectId && !matchesProjectName) {
+        return false;
+      }
     }
     if (ledgerCategoryFilter !== 'ALL' && item.category !== ledgerCategoryFilter) return false;
     if (ledgerWeekFilter !== 'ALL' && item.week !== ledgerWeekFilter) return false;
@@ -949,8 +1093,8 @@ export default function RfiManager({
             type="button"
             onClick={() => setActiveSubTab('requests')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${activeSubTab === 'requests'
-                ? 'bg-amber-500 text-slate-950 font-bold'
-                : 'text-slate-400 hover:text-white'
+              ? 'bg-amber-500 text-slate-950 font-bold'
+              : 'text-slate-400 hover:text-white'
               }`}
           >
             <ShoppingCart className="w-3.5 h-3.5" />
@@ -960,8 +1104,8 @@ export default function RfiManager({
             type="button"
             onClick={() => setActiveSubTab('directory')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${activeSubTab === 'directory'
-                ? 'bg-amber-500 text-slate-950 font-bold'
-                : 'text-slate-400 hover:text-white'
+              ? 'bg-amber-500 text-slate-950 font-bold'
+              : 'text-slate-400 hover:text-white'
               }`}
           >
             <Database className="w-3.5 h-3.5" />
@@ -971,8 +1115,8 @@ export default function RfiManager({
             type="button"
             onClick={() => setActiveSubTab('approvals')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${activeSubTab === 'approvals'
-                ? 'bg-emerald-500 text-slate-950 font-bold'
-                : 'text-slate-400 hover:text-white'
+              ? 'bg-emerald-500 text-slate-950 font-bold'
+              : 'text-slate-400 hover:text-white'
               }`}
           >
             <ClipboardCheck className="w-3.5 h-3.5" />
@@ -982,8 +1126,8 @@ export default function RfiManager({
             type="button"
             onClick={() => setActiveSubTab('deliveries')}
             className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer flex items-center gap-1.5 shrink-0 ${activeSubTab === 'deliveries'
-                ? 'bg-cyan-500 text-slate-950 font-bold'
-                : 'text-slate-400 hover:text-white'
+              ? 'bg-cyan-500 text-slate-950 font-bold'
+              : 'text-slate-400 hover:text-white'
               }`}
           >
             <Truck className="w-3.5 h-3.5" />
@@ -991,67 +1135,28 @@ export default function RfiManager({
           </button>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
-          {activeSubTab === 'directory' ? (
-            <>
-              <div className="relative flex-1 sm:w-60">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={ledgerSearch}
-                  onChange={(e) => setLedgerSearch(e.target.value)}
-                  placeholder="Search directory material, supplier..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:border-amber-500 focus:outline-none"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => setShowAddDirectoryModal(true)}
-                className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 cursor-pointer shrink-0 shadow-xs"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>+ Add Material</span>
-              </button>
-              <button
-                type="button"
-                onClick={handleExportLedgerCsv}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0"
-              >
-                <Download className="w-3.5 h-3.5 text-cyan-400" />
-                <span>CSV</span>
-              </button>
-              <button
-                type="button"
-                onClick={handlePrintLedgerSheet}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0"
-              >
-                <Printer className="w-3.5 h-3.5 text-amber-400" />
-                <span>Print Ledger</span>
-              </button>
-            </>
-          ) : (
-            <>
-              <div className="relative flex-1 sm:w-64">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Filter material, PR#, site..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:border-amber-500 focus:outline-none"
-                />
-              </div>
-              <button
-                type="button"
-                onClick={() => handlePrintPurchaseOrderSheet()}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0"
-              >
-                <Printer className="w-3.5 h-3.5 text-amber-400" />
-                <span>Print PR / PO Form</span>
-              </button>
-            </>
-          )}
-        </div>
+        {activeSubTab !== 'directory' && (
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+            <div className="relative flex-1 sm:w-64">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Filter material, PR#, site..."
+                className="w-full bg-slate-950 border border-slate-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-white focus:border-amber-500 focus:outline-none"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => handlePrintPurchaseOrderSheet()}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 cursor-pointer shrink-0"
+            >
+              <Printer className="w-3.5 h-3.5 text-amber-400" />
+              <span>Print PR / PO Form</span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ===================================================================== */}
@@ -1256,10 +1361,10 @@ export default function RfiManager({
                       </span>
                       <span className="text-xs font-semibold text-slate-300">{req.projectName}</span>
                       <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-bold ${req.urgency === 'CRITICAL'
-                          ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
-                          : req.urgency === 'URGENT'
-                            ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
-                            : 'bg-slate-800 text-slate-400'
+                        ? 'bg-rose-500/15 text-rose-400 border border-rose-500/30'
+                        : req.urgency === 'URGENT'
+                          ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30'
+                          : 'bg-slate-800 text-slate-400'
                         }`}>
                         {req.urgency}
                       </span>
@@ -1287,10 +1392,10 @@ export default function RfiManager({
                         <span>Print PR / PO Form</span>
                       </button>
                       <span className={`px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold border ${req.approvalStatus === 'APPROVED'
-                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                          : req.approvalStatus === 'DENIED'
-                            ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-                            : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
+                        ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                        : req.approvalStatus === 'DENIED'
+                          ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                          : 'bg-amber-500/15 text-amber-400 border-amber-500/30'
                         }`}>
                         {req.approvalStatus}
                       </span>
@@ -1381,8 +1486,8 @@ export default function RfiManager({
                     type="button"
                     onClick={() => setLedgerCategoryFilter(cat)}
                     className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold transition-colors cursor-pointer shrink-0 ${ledgerCategoryFilter === cat
-                        ? 'bg-amber-500 text-slate-950 font-black'
-                        : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
+                      ? 'bg-amber-500 text-slate-950 font-black'
+                      : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
                       }`}
                   >
                     {cat}
@@ -1422,11 +1527,11 @@ export default function RfiManager({
               <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={() => setShowAddDirectoryModal(true)}
+                  onClick={openAddDirectoryModal}
                   className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer flex items-center gap-1.5 shadow-xs transition"
                 >
                   <Plus className="w-3.5 h-3.5" />
-                  <span>+ Add Material Item</span>
+                  <span>Add Material Item</span>
                 </button>
                 <button
                   type="button"
@@ -1469,97 +1574,164 @@ export default function RfiManager({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/70">
-                  {filteredLedger.length === 0 ? (
+                  {isLoadingMaterials && filteredLedger.length === 0 ? (
+                    <tr>
+                      <td colSpan={15} className="py-10 text-center text-slate-400 font-mono">
+                        <div className="inline-flex items-center gap-2">
+                          <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                          <span>Loading site material ledger...</span>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : filteredLedger.length === 0 ? (
                     <tr>
                       <td colSpan={15} className="py-10 text-center text-slate-500 font-mono">
-                        No materials match the selected filters. Click "+ Add Material Item" to record materials.
+                        No materials match the selected filters. Click "Add Material Item" to record materials.
                       </td>
                     </tr>
                   ) : (
                     filteredLedger.map((item) => {
-                      const draft = draftLedgerEdits[item.id];
-                      const displayReceivedStr = draft !== undefined ? draft.received : String(item.received);
-                      const displayUsedStr = draft !== undefined ? draft.used : String(item.used);
-                      const effectiveReceived = draft !== undefined ? (Number(draft.received) || 0) : item.received;
-                      const effectiveUsed = draft !== undefined ? (Number(draft.used) || 0) : item.used;
-                      const hasUnsavedChanges =
-                        draft !== undefined &&
-                        (effectiveReceived !== item.received || effectiveUsed !== item.used);
+                      const isEditingRow = editingRowId === item.id && editDraft !== null;
+                      const effectiveOrdered = isEditingRow ? Math.max(1, Number(editDraft.ordered) || 0) : item.ordered;
+                      const effectiveReceived = isEditingRow ? (Number(editDraft.received) || 0) : item.received;
+                      const effectiveUsed = isEditingRow ? (Number(editDraft.used) || 0) : item.used;
+                      const effectiveUnitCost = isEditingRow ? (Number(editDraft.unitCostPhp) || 0) : item.unitCostPhp;
 
                       const remaining = effectiveReceived - effectiveUsed;
-                      const balance = item.ordered - effectiveReceived;
+                      const balance = effectiveOrdered - effectiveReceived;
                       const isOverDelivered = balance < 0;
                       const isOverUsed = remaining < 0;
                       const isComplete = balance === 0;
-                      const stockVal = Math.max(0, remaining) * item.unitCostPhp;
-                      const overrunCost = isOverDelivered ? Math.abs(balance) * item.unitCostPhp : 0;
+                      const stockVal = Math.max(0, remaining) * effectiveUnitCost;
+                      const overrunCost = isOverDelivered ? Math.abs(balance) * effectiveUnitCost : 0;
 
-                      const sanitizeNumericInput = (raw: string): string => {
+                      const sanitizeIntInput = (raw: string): string => {
                         const digitsOnly = raw.replace(/[^0-9]/g, '');
                         if (digitsOnly === '') return '';
                         return digitsOnly.replace(/^0+(?=\d)/, '');
                       };
 
+                      const sanitizeDecimalInput = (raw: string): string => {
+                        const cleaned = raw.replace(/[^0-9.]/g, '');
+                        const parts = cleaned.split('.');
+                        return parts.length > 2 ? `${parts[0]}.${parts.slice(1).join('')}` : cleaned;
+                      };
+
                       return (
-                        <tr key={item.id} className={`hover:bg-slate-800/40 transition-colors ${hasUnsavedChanges ? 'bg-amber-950/20' : ''}`}>
-                          <td className="py-3 px-3 font-mono font-bold text-amber-400">{item.week}</td>
+                        <tr key={item.id} className={`hover:bg-slate-800/40 transition-colors ${isEditingRow ? 'bg-amber-950/20' : ''}`}>
+                          {/* WEEK */}
+                          <td className="py-3 px-3 font-mono font-bold text-amber-400">
+                            {isEditingRow ? (
+                              <input
+                                type="text"
+                                value={editDraft.week}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, week: e.target.value } : prev)}
+                                className="w-20 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1.5 py-0.5 font-mono text-xs font-bold text-amber-400 focus:outline-none"
+                              />
+                            ) : (
+                              item.week
+                            )}
+                          </td>
+
+                          {/* DATE */}
                           <td className="py-3 px-3 font-mono text-slate-300">{item.date}</td>
+
+                          {/* MATERIAL DESCRIPTION */}
                           <td className="py-3 px-4">
-                            <div className="font-bold text-white">{item.materialDescription}</div>
-                            <div className="text-[10px] text-slate-400">
+                            {isEditingRow ? (
+                              <input
+                                type="text"
+                                value={editDraft.materialDescription}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, materialDescription: e.target.value } : prev)}
+                                className="w-full min-w-[160px] bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-2 py-0.5 text-xs font-bold text-white focus:outline-none"
+                              />
+                            ) : (
+                              <div className="font-bold text-white">{item.materialDescription}</div>
+                            )}
+                            <div className="text-[10px] text-slate-400 mt-0.5">
                               {item.projectName}{item.notes ? ` • ${item.notes}` : ''}
                             </div>
                           </td>
+
+                          {/* CATEGORY */}
                           <td className="py-3 px-3">
-                            <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
-                              {item.category}
-                            </span>
+                            {isEditingRow ? (
+                              <select
+                                value={editDraft.category}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, category: e.target.value as MaterialLedgerItem['category'] } : prev)}
+                                className="bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1.5 py-0.5 text-[11px] font-mono text-slate-200 focus:outline-none cursor-pointer"
+                              >
+                                {MATERIAL_CATEGORIES.map(c => (
+                                  <option key={c} value={c}>{c}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-300 border border-slate-700">
+                                {item.category}
+                              </span>
+                            )}
                           </td>
+
+                          {/* ORDERED */}
                           <td className="py-3 px-3 text-right font-mono font-bold text-slate-200">
-                            {item.ordered.toLocaleString()}
-                          </td>
-                          <td className="py-3 px-2 text-center font-mono text-slate-400">{item.unit}</td>
-
-                          {/* Received Input (leading-zero stripped, explicit Save required) */}
-                          <td className="py-3 px-3 text-right">
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={displayReceivedStr}
-                              onChange={(e) => {
-                                const cleaned = sanitizeNumericInput(e.target.value);
-                                setDraftLedgerEdits(prev => ({
-                                  ...prev,
-                                  [item.id]: {
-                                    received: cleaned,
-                                    used: prev[item.id]?.used ?? String(item.used),
-                                  }
-                                }));
-                              }}
-                              className="w-16 bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded px-1.5 py-0.5 text-right font-mono text-xs font-bold text-emerald-400 focus:outline-none"
-                              title="Edit quantity received, then click Save"
-                            />
+                            {isEditingRow ? (
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={editDraft.ordered}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, ordered: sanitizeIntInput(e.target.value) } : prev)}
+                                className="w-16 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1.5 py-0.5 text-right font-mono text-xs font-bold text-slate-200 focus:outline-none"
+                              />
+                            ) : (
+                              item.ordered.toLocaleString()
+                            )}
                           </td>
 
-                          {/* Used / Issued Input (leading-zero stripped, explicit Save required) */}
-                          <td className="py-3 px-3 text-right">
-                            <input
-                              type="text"
-                              inputMode="numeric"
-                              value={displayUsedStr}
-                              onChange={(e) => {
-                                const cleaned = sanitizeNumericInput(e.target.value);
-                                setDraftLedgerEdits(prev => ({
-                                  ...prev,
-                                  [item.id]: {
-                                    received: prev[item.id]?.received ?? String(item.received),
-                                    used: cleaned,
-                                  }
-                                }));
-                              }}
-                              className="w-16 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1.5 py-0.5 text-right font-mono text-xs font-bold text-amber-400 focus:outline-none"
-                              title="Edit quantity issued, then click Save"
-                            />
+                          {/* UNIT */}
+                          <td className="py-3 px-2 text-center font-mono text-slate-400">
+                            {isEditingRow ? (
+                              <select
+                                value={editDraft.unit}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, unit: e.target.value } : prev)}
+                                className="bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1 py-0.5 text-[11px] font-mono text-slate-200 focus:outline-none cursor-pointer"
+                              >
+                                {STANDARD_UNITS.map(u => (
+                                  <option key={u} value={u}>{u}</option>
+                                ))}
+                              </select>
+                            ) : (
+                              item.unit
+                            )}
+                          </td>
+
+                          {/* RECEIVED (Read-only by default; unlocked only in inline edit mode) */}
+                          <td className="py-3 px-3 text-right font-mono font-bold text-emerald-400">
+                            {isEditingRow ? (
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={editDraft.received}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, received: sanitizeIntInput(e.target.value) } : prev)}
+                                className="w-16 bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded px-1.5 py-0.5 text-right font-mono text-xs font-bold text-emerald-400 focus:outline-none"
+                              />
+                            ) : (
+                              item.received.toLocaleString()
+                            )}
+                          </td>
+
+                          {/* USED / ISSUED (Read-only by default; unlocked only in inline edit mode) */}
+                          <td className="py-3 px-3 text-right font-mono font-bold text-amber-400">
+                            {isEditingRow ? (
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={editDraft.used}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, used: sanitizeIntInput(e.target.value) } : prev)}
+                                className="w-16 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1.5 py-0.5 text-right font-mono text-xs font-bold text-amber-400 focus:outline-none"
+                              />
+                            ) : (
+                              item.used.toLocaleString()
+                            )}
                           </td>
 
                           {/* Remaining Stock = Received - Used (negative allowed in red) */}
@@ -1579,45 +1751,97 @@ export default function RfiManager({
 
                           {/* Status */}
                           <td className="py-3 px-3 text-center">
-                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border ${
-                              isOverDelivered
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border ${isOverDelivered
                                 ? 'bg-rose-500/15 text-rose-400 border-rose-500/40'
                                 : isComplete
-                                ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                                : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
-                            }`}>
+                                  ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                                  : 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+                              }`}>
                               {isOverDelivered ? 'Over-Delivered' : isComplete ? 'Completed' : 'Incomplete'}
                             </span>
                           </td>
 
-                          <td className="py-3 px-3 text-slate-300 truncate max-w-xs">{item.supplier}</td>
-                          <td className="py-3 px-3 text-right font-mono text-slate-400">
-                            ₱{item.unitCostPhp.toLocaleString()}
+                          {/* SUPPLIER */}
+                          <td className="py-3 px-3 text-slate-300">
+                            {isEditingRow ? (
+                              <input
+                                type="text"
+                                value={editDraft.supplier}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, supplier: e.target.value } : prev)}
+                                className="w-36 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1.5 py-0.5 text-xs text-slate-200 focus:outline-none"
+                              />
+                            ) : (
+                              <span className="block truncate max-w-xs">{item.supplier}</span>
+                            )}
                           </td>
+
+                          {/* UNIT COST */}
+                          <td className="py-3 px-3 text-right font-mono text-slate-400">
+                            {isEditingRow ? (
+                              <input
+                                type="text"
+                                inputMode="decimal"
+                                value={editDraft.unitCostPhp}
+                                onChange={(e) => setEditDraft(prev => prev ? { ...prev, unitCostPhp: sanitizeDecimalInput(e.target.value) } : prev)}
+                                className="w-20 bg-slate-950 border border-slate-700 focus:border-amber-500 rounded px-1.5 py-0.5 text-right font-mono text-xs text-slate-200 focus:outline-none"
+                              />
+                            ) : (
+                              `₱${item.unitCostPhp.toLocaleString()}`
+                            )}
+                          </td>
+
+                          {/* STOCK VALUE */}
                           <td className="py-3 px-4 text-right font-mono font-bold text-amber-300">
                             ₱{stockVal.toLocaleString()}
                           </td>
+
+                          {/* ACTIONS */}
                           <td className="py-3 px-3 text-center">
                             <div className="flex items-center justify-center gap-1">
-                              {hasUnsavedChanges && (
-                                <button
-                                  type="button"
-                                  onClick={() => handleCommitLedgerRowEdit(item.id)}
-                                  className="px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] font-mono flex items-center gap-1 cursor-pointer shadow-xs transition"
-                                  title="Save quantity changes"
-                                >
-                                  <Check className="w-3 h-3" />
-                                  <span>Save</span>
-                                </button>
+                              {isEditingRow ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingInlineRow}
+                                    onClick={() => handleSaveInlineRowEdit(item)}
+                                    className="px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 text-white font-bold text-[10px] font-mono flex items-center gap-1 cursor-pointer shadow-xs transition"
+                                    title="Save row changes"
+                                  >
+                                    <Check className="w-3 h-3" />
+                                    <span>{isSavingInlineRow ? 'Saving...' : 'Save'}</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingInlineRow}
+                                    onClick={handleCancelInlineRowEdit}
+                                    className="px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 font-semibold text-[10px] font-mono flex items-center gap-1 cursor-pointer transition"
+                                    title="Cancel inline edit"
+                                  >
+                                    <X className="w-3 h-3" />
+                                    <span>Cancel</span>
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartInlineRowEdit(item)}
+                                    className="px-2 py-1 rounded-md bg-slate-800 hover:bg-amber-500/20 text-slate-200 hover:text-amber-300 border border-slate-700 hover:border-amber-500/40 font-semibold text-[10px] font-mono flex items-center gap-1 cursor-pointer transition-colors"
+                                    title="Edit material row inline"
+                                  >
+                                    <Edit2 className="w-3 h-3" />
+                                    <span>Edit</span>
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteLedgerItem(item.id)}
+                                    className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-slate-800 cursor-pointer transition-colors"
+                                    title="Delete ledger item"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </>
                               )}
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteLedgerItem(item.id)}
-                                className="p-1 rounded text-slate-500 hover:text-rose-400 hover:bg-slate-800 cursor-pointer transition-colors"
-                                title="Delete ledger item"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
                             </div>
                           </td>
                         </tr>
@@ -1769,10 +1993,10 @@ export default function RfiManager({
                     </td>
                     <td className="py-3 px-3">
                       <span className={`px-2.5 py-1 rounded-md text-[11px] font-mono font-bold border ${del.deliveryStatus === 'Accepted'
-                          ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                          : del.deliveryStatus === 'Delayed'
-                            ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
-                            : 'bg-sky-500/15 text-sky-400 border-sky-500/30'
+                        ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                        : del.deliveryStatus === 'Delayed'
+                          ? 'bg-rose-500/15 text-rose-400 border-rose-500/30'
+                          : 'bg-sky-500/15 text-sky-400 border-sky-500/30'
                         }`}>
                         {del.deliveryStatus || 'Scheduled'}
                       </span>
@@ -1809,8 +2033,8 @@ export default function RfiManager({
                       ) : (
                         <div className="inline-flex items-center gap-2 justify-end">
                           <span className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border ${del.deliveryStatus === 'Accepted'
-                              ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
-                              : 'bg-slate-800 text-slate-400 border-slate-700'
+                            ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30'
+                            : 'bg-slate-800 text-slate-400 border-slate-700'
                             }`}>
                             {del.deliveryStatus === 'Accepted' ? `Received (${del.actualReceivedQty || del.quantity} ${del.unit})` : 'In Transit / Scheduled'}
                           </span>
@@ -1848,12 +2072,14 @@ export default function RfiManager({
                   Add Material to Site Directory Ledger
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  Record materials delivered or allocated to {selectedProjectName}
+                  {projects.find(p => p.id === newMatProjectId)?.name
+                    ? `Record materials delivered or allocated to ${projects.find(p => p.id === newMatProjectId)?.name}`
+                    : 'Select a target project to record materials delivered or allocated'}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setShowAddDirectoryModal(false)}
+                onClick={handleCloseDirectoryModal}
                 className="p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
               >
                 <X className="w-5 h-5" />
@@ -1861,6 +2087,23 @@ export default function RfiManager({
             </div>
 
             <form onSubmit={handleAddDirectLedgerItem} className="space-y-3.5">
+              <div>
+                <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                  Target Project *
+                </label>
+                <select
+                  required
+                  value={newMatProjectId}
+                  onChange={(e) => setNewMatProjectId(e.target.value)}
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl px-2.5 py-2 text-xs text-white focus:border-amber-500 focus:outline-none cursor-pointer"
+                >
+                  <option value="">-- Select Target Project --</option>
+                  {projects.map(p => (
+                    <option key={p.id} value={p.id}>{p.name}</option>
+                  ))}
+                </select>
+              </div>
+
               <div>
                 <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
                   Material Description *
@@ -1937,7 +2180,9 @@ export default function RfiManager({
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">Initial Received Qty</label>
+                  <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                    Initial Received Qty
+                  </label>
                   <input
                     type="number"
                     min={0}
@@ -1947,7 +2192,9 @@ export default function RfiManager({
                   />
                 </div>
                 <div>
-                  <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">Initial Used / Issued Qty</label>
+                  <label className="block text-[10px] font-mono uppercase text-slate-400 mb-1">
+                    Initial Used / Issued Qty
+                  </label>
                   <input
                     type="number"
                     min={0}
@@ -1982,16 +2229,17 @@ export default function RfiManager({
               <div className="pt-2 flex items-center justify-end gap-2 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setShowAddDirectoryModal(false)}
+                  onClick={handleCloseDirectoryModal}
                   className="px-4 py-2 rounded-xl text-slate-300 hover:text-white bg-slate-800 text-xs font-medium cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs cursor-pointer shadow-xs transition"
+                  disabled={isSavingMaterial}
+                  className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-slate-950 font-bold text-xs cursor-pointer shadow-xs transition"
                 >
-                  Add to Ledger
+                  {isSavingMaterial ? 'Saving...' : 'Add to Ledger'}
                 </button>
               </div>
             </form>

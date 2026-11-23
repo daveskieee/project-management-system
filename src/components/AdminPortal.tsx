@@ -751,7 +751,7 @@ export default function AdminPortal({
     sessionObj?.title || savedSettings?.profileTitle || ''
   );
   const [profileEmail, setProfileEmail] = useState<string>(() =>
-    String(sessionObj?.email || savedSettings?.profileEmail || '').replace(/@[^@]+$/, '@ldmconstruction.ph')
+    String(sessionObj?.email || savedSettings?.profileEmail || '').trim().toLowerCase()
   );
   const [profilePhone, setProfilePhone] = useState<string>(
     sessionObj?.phone || savedSettings?.profilePhone || ''
@@ -793,7 +793,7 @@ export default function AdminPortal({
   // Sync authenticated session profile into settings state
   useEffect(() => {
     if (session && typeof session === 'object') {
-      if (session.email) setProfileEmail(String(session.email).replace(/@[^@]+$/, '@ldmconstruction.ph'));
+      if (session.email) setProfileEmail(String(session.email).trim().toLowerCase());
       if (session.name) setProfileName(session.name);
       if (session.avatarUrl !== undefined && session.avatarUrl !== null) setAvatarUrl(session.avatarUrl);
       if (session.title) setProfileTitle(session.title);
@@ -830,7 +830,7 @@ export default function AdminPortal({
           if (data?.profile && !isCancelled) {
             const p = data.profile;
             if (p.name) setProfileName(p.name);
-            if (p.email) setProfileEmail(String(p.email).replace(/@[^@]+$/, '@ldmconstruction.ph'));
+            if (p.email) setProfileEmail(String(p.email).trim().toLowerCase());
             if (p.contact) setProfilePhone(p.contact);
             if (p.title) setProfileTitle(p.title);
             if (p.division) setProfileDivision(p.division);

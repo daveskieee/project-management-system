@@ -77,7 +77,7 @@ async function buildSessionPayload(user: {
 
   return {
     id: user.id,
-    email: String(customSettings.profileEmail || user.email || '').replace(/@[^@]+$/, '@ldmconstruction.ph'),
+    email: String(customSettings.profileEmail || user.email || '').trim().toLowerCase(),
     name: customSettings.profileName || user.name,
     role: normalizedRole,
     clientId: user.role === Role.CLIENT ? user.id : undefined,
@@ -371,7 +371,7 @@ authRouter.get('/auth/profile', requireAuth, async (req: Request, res: Response)
     const profile = {
       id: user.id,
       name: customSettings.profileName || user.name || '',
-      email: String(customSettings.profileEmail || user.email || '').replace(/@[^@]+$/, '@ldmconstruction.ph'),
+      email: String(customSettings.profileEmail || user.email || '').trim().toLowerCase(),
       contact: customSettings.profilePhone || user.contact || '',
       title: customSettings.profileTitle || defaultTitle,
       division: customSettings.profileDivision || defaultDivision,
@@ -642,7 +642,7 @@ authRouter.get('/staff', requireAuth, requireRole(['ADMIN']), async (_req: Reque
     });
     res.json(staff.map(u => ({
       id: u.id,
-      email: String(u.email || '').replace(/@[^@]+$/, '@ldmconstruction.ph'),
+      email: String(u.email || '').trim().toLowerCase(),
       name: u.name,
       role: formatStaffRoleResponse(u.role),
       accountStatus: u.accountStatus,
@@ -1265,7 +1265,7 @@ authRouter.post('/auth/recover-passkey', sensitiveActionRateLimiter, async (req:
         actorRole: user.role,
         details: `Security passkey reset successfully for account ${user.email}. Hash updated in PostgreSQL.`,
       }
-    }).catch(() => {});
+    }).catch(() => { });
 
     broadcastChange('auditLogs');
 

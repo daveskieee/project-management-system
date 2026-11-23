@@ -52,8 +52,9 @@ const CURRENT_ENVELOPE_VERSION = 2;
  */
 export function normalizeSessionEmail(session: UserSession): UserSession {
   if (!session || typeof session !== 'object') return session;
-  const rawEmail = String(session.email || '').trim();
-  const normalizedEmail = rawEmail.includes('@')
+  const rawEmail = String(session.email || '').trim().toLowerCase();
+  const isLegacyCtvill = /@ctvill\.(com|ph)$/i.test(rawEmail);
+  const normalizedEmail = isLegacyCtvill
     ? `${rawEmail.split('@')[0].toLowerCase()}@ldmconstruction.ph`
     : rawEmail;
   if (typeof window !== 'undefined' && session.id) {
@@ -62,7 +63,11 @@ export function normalizeSessionEmail(session: UserSession): UserSession {
       const rawSettings = localStorage.getItem(settingsKey);
       if (rawSettings) {
         const parsedSettings = JSON.parse(rawSettings);
-        if (parsedSettings && typeof parsedSettings.profileEmail === 'string' && parsedSettings.profileEmail.includes('@') && !parsedSettings.profileEmail.toLowerCase().endsWith('@ldmconstruction.ph')) {
+        if (
+          parsedSettings &&
+          typeof parsedSettings.profileEmail === 'string' &&
+          /@ctvill\.(com|ph)$/i.test(parsedSettings.profileEmail)
+        ) {
           parsedSettings.profileEmail = `${parsedSettings.profileEmail.split('@')[0].toLowerCase()}@ldmconstruction.ph`;
           localStorage.setItem(settingsKey, JSON.stringify(parsedSettings));
         }

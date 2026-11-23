@@ -1495,6 +1495,8 @@ export default function GanttTimeline({
               text: task.text,
               startDate: task.startDate,
               endDate: task.endDate,
+              baselineStart: task.baselineStart,
+              baselineEnd: task.baselineEnd,
               duration: task.duration,
               progress: task.progress,
               weight: task.weight,
@@ -2734,7 +2736,270 @@ export default function GanttTimeline({
   const [templateStartDate, setTemplateStartDate] = useState<string>(() => formatDateISO(new Date()));
   const [isApplyingTemplate, setIsApplyingTemplate] = useState(false);
   const [isMoreToolsOpen, setIsMoreToolsOpen] = useState(false);
+  const [isLinkTasksModalOpen, setIsLinkTasksModalOpen] = useState(false);
+  const [linkPredecessorId, setLinkPredecessorId] = useState<string>('');
+  const [linkSuccessorId, setLinkSuccessorId] = useState<string>('');
   const moreToolsRef = useRef<HTMLDivElement | null>(null);
+
+  const handleOpenLinkTasksModal = () => {
+    if (scopedProjectTasks.length < 2) {
+      setSyncFeedback({
+        type: 'error',
+        message: 'Add at least 2 tasks in this project before creating a dependency link.'
+      });
+      setTimeout(() => setSyncFeedback(null), 3500);
+      return;
+    }
+    setLinkPredecessorId(scopedProjectTasks[0]?.id || '');
+    setLinkSuccessorId(scopedProjectTasks[1]?.id || '');
+    setIsLinkTasksModalOpen(true);
+  };
+
+  const handleCreateTaskLink = () => {
+    const targetProjectId = selectedProjectId;
+    if (!targetProjectId || !linkPredecessorId || !linkSuccessorId) return;
+    if (linkPredecessorId === linkSuccessorId) {
+      setSyncFeedback({ type: 'error', message: 'Predecessor and successor cannot be the same task.' });
+      setTimeout(() => setSyncFeedback(null), 3000);
+      return;
+    }
+
+    const successorTask = scopedProjectTasks.find(t => t.id === linkSuccessorId);
+    if (!successorTask) return;
+
+    const mergedPreds = Array.from(new Set([...(successorTask.predecessorIds || []), linkPredecessorId]));
+    const updatedSuccessor: GanttTaskItem = { ...successorTask, predecessorIds: mergedPreds };
+
+    const linkExists = links.some(l => l.source === linkPredecessorId && l.target === linkSuccessorId);
+    const updatedLinks: GanttLinkItem[] = linkExists
+      ? links
+      : [...links, { id: `link-${linkPredecessorId}-${linkSuccessorId}`, source: linkPredecessorId, target: linkSuccessorId, type: '0', lag: 0 }];
+
+    const updatedList = scopedProjectTasks.map(t => (t.id === updatedSuccessor.id ? updatedSuccessor : t));
+    const scheduled = cascadeDownstreamSchedule(updatedList, updatedLinks, linkPredecessorId);
+
+    setLinks(updatedLinks);
+    setTasks(scheduled);
+    saveProjectGanttTasks(targetProjectId, scheduled);
+    ganttMemoryCacheRef.current.set(targetProjectId, { tasks: scheduled, links: updatedLinks, ts: Date.now() });
+    setCacheVersion((v) => v + 1);
+
+    // Persist successor link + any cascaded task dates atomically
+    const changedTasks = scheduled.filter(t => {
+      if (t.id === updatedSuccessor.id) return true;
+      const orig = scopedProjectTasks.find(o => o.id === t.id);
+      return orig && (orig.startDate !== t.startDate || orig.endDate !== t.endDate);
+    });
+    if (changedTasks.length > 1) {
+      syncBulkBackend(changedTasks, targetProjectId);
+    } else {
+      syncBackend('update', scheduled.find(t => t.id === updatedSuccessor.id) || updatedSuccessor, targetProjectId);
+    }
+
+    setIsLinkTasksModalOpen(false);
+    setSyncFeedback({ type: 'success', message: 'Dependency link created & schedule cascaded.' });
+    setTimeout(() => setSyncFeedback(null), 3500);
+  };
+
+  // Dedicated Landscape Print-Ready Gantt Report (white background, scaled timeline bars, zero clipped/dark UI)
+  const handlePrintGanttReport = () => {
+    const projectTitle = activeProject?.name || 'Commercial Project Schedule';
+    const projectCode = activeProject?.id || selectedProjectId || 'LDM';
+    const list = scopedProjectTasks;
+
+    const escapeHtml = (val: string) =>
+      String(val || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    const timestamps = list
+      .flatMap(t => [parseDate(t.startDate).getTime(), parseDate(t.endDate).getTime()])
+      .filter(ms => Number.isFinite(ms) && ms > 0);
+    const minMs = timestamps.length > 0 ? Math.min(...timestamps) : Date.now();
+    const maxMs = timestamps.length > 0 ? Math.max(...timestamps) : minMs + 86400000 * 30;
+    const spanMs = Math.max(86400000, maxMs - minMs);
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const todayMs = today.getTime();
+    const todayPct = todayMs >= minMs && todayMs <= maxMs ? ((todayMs - minMs) / spanMs) * 100 : null;
+
+    // Build 5 evenly spaced date tick labels for the timeline header
+    const tickLabels = [0, 0.25, 0.5, 0.75, 1].map(frac => {
+      const d = new Date(minMs + spanMs * frac);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
+    });
+
+    const rowsHtml = list.map(t => {
+      const isParent = !t.parentTaskId && (t.type === 'project' || list.some(c => c.parentTaskId === t.id));
+      const isMilestone = t.type === 'milestone' || t.duration === 0;
+      const pct = Math.round((t.progress || 0) * 100);
+      const sMs = parseDate(t.startDate).getTime();
+      const eMs = parseDate(t.endDate).getTime();
+      const isOverdue = pct < 100 && Number.isFinite(eMs) && eMs < todayMs;
+
+      const leftPct = Math.max(0, Math.min(98, ((sMs - minMs) / spanMs) * 100));
+      const rawWidthPct = ((Math.max(eMs, sMs) - sMs) / spanMs) * 100;
+      const widthPct = isMilestone ? 0 : Math.max(2.5, Math.min(100 - leftPct, rawWidthPct || 2.5));
+
+      const barColor = pct >= 100
+        ? '#059669'
+        : isOverdue
+          ? '#dc2626'
+          : pct > 0
+            ? '#d97706'
+            : '#64748b';
+
+      const trackBg = pct >= 100
+        ? '#d1fae5'
+        : isOverdue
+          ? '#fee2e2'
+          : pct > 0
+            ? '#fef3c7'
+            : '#e2e8f0';
+
+      const barHtml = isMilestone
+        ? `<div style="position:absolute;left:${leftPct.toFixed(2)}%;top:50%;transform:translate(-50%,-50%) rotate(45deg);width:9px;height:9px;background:${pct >= 100 ? '#059669' : '#d97706'};border:1.5px solid #0f172a;"></div>`
+        : `<div style="position:absolute;left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%;top:4px;bottom:4px;background:${trackBg};border:1px solid ${barColor};border-radius:3px;overflow:hidden;">
+             <div style="height:100%;width:${Math.min(100, Math.max(0, pct))}%;background:${barColor};"></div>
+           </div>`;
+
+      const todayLineHtml = todayPct !== null
+        ? `<div style="position:absolute;left:${todayPct.toFixed(2)}%;top:0;bottom:0;width:1px;background:#ef4444;opacity:0.45;"></div>`
+        : '';
+
+      return `
+        <tr style="${isParent ? 'background:#f1f5f9;font-weight:700;' : ''}">
+          <td style="font-family:monospace;color:${isParent ? '#b45309' : '#475569'};white-space:nowrap;">${escapeHtml(t.wbsCode || '')}</td>
+          <td style="padding-left:${isParent ? '8px' : '22px'};color:#0f172a;">${isMilestone ? '◆ ' : ''}${escapeHtml(t.text)}</td>
+          <td style="font-family:monospace;white-space:nowrap;text-align:center;">${escapeHtml(t.startDate)}</td>
+          <td style="font-family:monospace;white-space:nowrap;text-align:center;">${escapeHtml(t.endDate)}</td>
+          <td style="font-family:monospace;text-align:center;">${isMilestone ? '0' : t.duration}</td>
+          <td style="font-family:monospace;text-align:right;font-weight:700;color:${barColor};">${pct}%</td>
+          <td style="position:relative;padding:0;min-width:260px;height:22px;background:#ffffff;">
+            ${todayLineHtml}
+            ${barHtml}
+          </td>
+        </tr>
+      `;
+    }).join('');
+
+    const spanStartStr = new Date(minMs).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const spanEndStr = new Date(maxMs).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const printedAt = new Date().toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' });
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>LDM Construction — ${escapeHtml(projectTitle)} Master Gantt Schedule</title>
+  <style>
+    @page { size: landscape; margin: 11mm; }
+    * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #0f172a; background: #ffffff; font-size: 10.5px; }
+    .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 2px solid #0f172a; padding-bottom: 8px; margin-bottom: 10px; }
+    .brand { font-size: 10px; font-weight: 800; letter-spacing: 0.12em; color: #b45309; text-transform: uppercase; }
+    .title { font-size: 17px; font-weight: 800; color: #0f172a; margin: 2px 0 0; }
+    .meta { text-align: right; font-size: 10px; color: #334155; line-height: 1.5; }
+    .kpi-bar { display: flex; justify-content: space-between; align-items: center; background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 6px; padding: 6px 10px; margin-bottom: 10px; font-size: 10px; }
+    .legend { display: flex; gap: 12px; align-items: center; }
+    .legend-item { display: inline-flex; align-items: center; gap: 4px; color: #334155; font-weight: 600; }
+    .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    thead { display: table-header-group; }
+    tr { page-break-inside: avoid; break-inside: avoid; }
+    th { background: #0f172a; color: #ffffff; font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 6px; text-align: left; border: 1px solid #0f172a; }
+    td { padding: 4.5px 6px; border: 1px solid #e2e8f0; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
+    .ticks { display: flex; justify-content: space-between; font-family: monospace; font-size: 8.5px; color: #cbd5e1; font-weight: 600; }
+    .signoff { display: flex; justify-content: space-between; gap: 40px; margin-top: 22px; page-break-inside: avoid; }
+    .sig-box { flex: 1; border-top: 1px solid #475569; padding-top: 5px; font-size: 10px; color: #334155; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <div class="brand">LDM Construction — Design &amp; Build Project Management System</div>
+      <h1 class="title">${escapeHtml(projectTitle)} (${escapeHtml(projectCode)})</h1>
+    </div>
+    <div class="meta">
+      <div><strong>Schedule Span:</strong> ${escapeHtml(spanStartStr)} – ${escapeHtml(spanEndStr)}</div>
+      <div><strong>Printed:</strong> ${escapeHtml(printedAt)}</div>
+    </div>
+  </div>
+  <div class="kpi-bar">
+    <div>
+      <strong>Overall Weighted Progress:</strong> <span style="color:#059669;font-weight:800;">${currentProjectProgress}%</span>
+      &nbsp;&bull;&nbsp;
+      <strong>Completed Tasks:</strong> ${metrics.completed} / ${metrics.total}
+      &nbsp;&bull;&nbsp;
+      <strong>Milestones:</strong> ${metrics.milestones}
+    </div>
+    <div class="legend">
+      <span class="legend-item"><span class="swatch" style="background:#059669;"></span>Completed (100%)</span>
+      <span class="legend-item"><span class="swatch" style="background:#d97706;"></span>In Progress</span>
+      <span class="legend-item"><span class="swatch" style="background:#dc2626;"></span>Overdue</span>
+      <span class="legend-item"><span class="swatch" style="background:#64748b;"></span>Upcoming (0%)</span>
+    </div>
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th style="width:6%;">WBS</th>
+        <th style="width:27%;">Task / Construction Scope</th>
+        <th style="width:8.5%;text-align:center;">Start</th>
+        <th style="width:8.5%;text-align:center;">End</th>
+        <th style="width:5.5%;text-align:center;">Dur</th>
+        <th style="width:5.5%;text-align:right;">%</th>
+        <th style="width:39%;">
+          <div style="margin-bottom:2px;">Master Gantt Timeline</div>
+          <div class="ticks">${tickLabels.map(l => `<span>${escapeHtml(l)}</span>`).join('')}</div>
+        </th>
+      </tr>
+    </thead>
+    <tbody>
+      ${rowsHtml || '<tr><td colspan="7" style="text-align:center;padding:18px;color:#64748b;">No tasks in project schedule.</td></tr>'}
+    </tbody>
+  </table>
+  <div class="signoff">
+    <div class="sig-box"><strong>Prepared By:</strong> Project Manager / Site Engineer</div>
+    <div class="sig-box"><strong>Reviewed &amp; Approved By:</strong> Operations Manager</div>
+  </div>
+</body>
+</html>`;
+
+    const iframe = document.createElement('iframe');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    document.body.appendChild(iframe);
+
+    const doc = iframe.contentWindow?.document;
+    if (!doc || !iframe.contentWindow) {
+      document.body.removeChild(iframe);
+      window.print();
+      return;
+    }
+
+    doc.open();
+    doc.write(html);
+    doc.close();
+
+    setTimeout(() => {
+      try {
+        iframe.contentWindow?.focus();
+        iframe.contentWindow?.print();
+      } finally {
+        setTimeout(() => {
+          if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+        }, 1000);
+      }
+    }, 150);
+  };
 
   useEffect(() => {
     if (!isMoreToolsOpen) return;
@@ -3123,11 +3388,7 @@ export default function GanttTimeline({
                     type="button"
                     onClick={() => {
                       setIsMoreToolsOpen(false);
-                      setSyncFeedback({
-                        type: 'success',
-                        message: 'Link mode enabled: Drag connectors between tasks to define Finish-to-Start relationships'
-                      });
-                      setTimeout(() => setSyncFeedback(null), 3500);
+                      handleOpenLinkTasksModal();
                     }}
                     className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
                   >
@@ -3138,20 +3399,24 @@ export default function GanttTimeline({
                     type="button"
                     onClick={() => {
                       setIsMoreToolsOpen(false);
-                      const { updatedTasks, shiftedCount } = autoScheduleProject(tasks, links);
+                      if (!selectedProjectId) return;
+                      const { updatedTasks, shiftedCount } = autoScheduleProject(scopedProjectTasks, links);
                       setTasks(updatedTasks);
-                      if (selectedProjectId) {
-                        saveProjectGanttTasks(selectedProjectId, updatedTasks);
-                        updatedTasks.forEach(t => {
-                          const orig = tasks.find(ot => ot.id === t.id);
-                          if (orig && (orig.startDate !== t.startDate || orig.endDate !== t.endDate)) {
-                            syncBackend('update', t);
-                          }
-                        });
+                      saveProjectGanttTasks(selectedProjectId, updatedTasks);
+                      ganttMemoryCacheRef.current.set(selectedProjectId, { tasks: updatedTasks, links, ts: Date.now() });
+                      setCacheVersion((v) => v + 1);
+                      const changedTasks = updatedTasks.filter(t => {
+                        const orig = scopedProjectTasks.find(ot => ot.id === t.id);
+                        return orig && (orig.startDate !== t.startDate || orig.endDate !== t.endDate);
+                      });
+                      if (changedTasks.length > 0) {
+                        syncBulkBackend(changedTasks, selectedProjectId);
                       }
                       setSyncFeedback({
                         type: 'success',
-                        message: `Auto-schedule completed: Cascaded ${shiftedCount} ${shiftedCount === 1 ? 'dependency' : 'dependencies'}`
+                        message: shiftedCount > 0
+                          ? `Auto-schedule completed: Cascaded ${shiftedCount} ${shiftedCount === 1 ? 'dependency' : 'dependencies'}`
+                          : 'Auto-schedule complete: All task dates already satisfy dependencies'
                       });
                       setTimeout(() => setSyncFeedback(null), 3500);
                     }}
@@ -3164,15 +3429,17 @@ export default function GanttTimeline({
                     type="button"
                     onClick={() => {
                       setIsMoreToolsOpen(false);
-                      if (!selectedProjectId) return;
-                      const rebaselined = tasks.map(t => ({
+                      if (!selectedProjectId || scopedProjectTasks.length === 0) return;
+                      const rebaselined = scopedProjectTasks.map(t => ({
                         ...t,
                         baselineStart: t.startDate,
                         baselineEnd: t.endDate
                       }));
                       setTasks(rebaselined);
                       saveProjectGanttTasks(selectedProjectId, rebaselined);
-                      rebaselined.forEach(t => syncBackend('update', t));
+                      ganttMemoryCacheRef.current.set(selectedProjectId, { tasks: rebaselined, links, ts: Date.now() });
+                      setCacheVersion((v) => v + 1);
+                      syncBulkBackend(rebaselined, selectedProjectId);
                       setSyncFeedback({
                         type: 'success',
                         message: 'Re-baseline complete: Contract baseline synchronized to current dates'
@@ -3191,7 +3458,7 @@ export default function GanttTimeline({
                     type="button"
                     onClick={() => {
                       setIsMoreToolsOpen(false);
-                      window.print();
+                      handlePrintGanttReport();
                     }}
                     className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
                   >
@@ -3202,11 +3469,11 @@ export default function GanttTimeline({
                     type="button"
                     onClick={() => {
                       setIsMoreToolsOpen(false);
-                      const headers = ['WBS,Task,Start,End,Duration,Progress,Type\n'];
-                      const rows = tasks.map(t =>
+                      const headers = ['\uFEFFWBS,Task,Start,End,Duration,Progress,Type\n'];
+                      const rows = scopedProjectTasks.map(t =>
                         `"${t.wbsCode}","${t.text.replace(/"/g, '""')}","${t.startDate}","${t.endDate}",${t.duration},${Math.round(t.progress * 100)}%,"${t.type}"`
                       );
-                      const blob = new Blob([...headers, ...rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
+                      const blob = new Blob([...headers, rows.join('\n')], { type: 'text/csv;charset=utf-8;' });
                       const url = URL.createObjectURL(blob);
                       const a = document.createElement('a');
                       a.href = url;
@@ -3248,7 +3515,7 @@ export default function GanttTimeline({
                     type="button"
                     onClick={() => {
                       setIsMoreToolsOpen(false);
-                      loadGanttData(selectedProjectId);
+                      loadGanttData(selectedProjectId, true);
                     }}
                     disabled={isLoading}
                     className={`w-full px-3 py-2 flex items-center gap-2.5 text-left transition cursor-pointer ${isDark ? 'hover:bg-slate-800' : 'hover:bg-slate-50'}`}
@@ -4388,6 +4655,81 @@ export default function GanttTimeline({
                     <span>Apply Template</span>
                   </>
                 )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Link Tasks (Finish-to-Start Dependency) Modal */}
+      {isLinkTasksModalOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className={`w-full max-w-md rounded-2xl border shadow-2xl overflow-hidden ${isDark ? 'bg-slate-900 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-900'}`}>
+            <div className={`px-5 py-3.5 border-b flex items-center justify-between ${isDark ? 'border-slate-800 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
+              <div className="flex items-center gap-2">
+                <Link2 className="w-4 h-4 text-sky-400" />
+                <h3 className="text-sm font-bold">Link Tasks (Finish-to-Start)</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsLinkTasksModalOpen(false)}
+                className={`p-1 rounded-lg cursor-pointer ${isDark ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200'}`}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4 text-xs">
+              <div>
+                <label className={`block font-mono font-bold uppercase tracking-wider text-[10px] mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  Predecessor (Finishes First)
+                </label>
+                <select
+                  value={linkPredecessorId}
+                  onChange={(e) => setLinkPredecessorId(e.target.value)}
+                  className={`w-full rounded-xl px-3 py-2 border text-xs focus:outline-none focus:border-sky-500 ${isDark ? 'bg-slate-950 border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-900'}`}
+                >
+                  {scopedProjectTasks.map(t => (
+                    <option key={t.id} value={t.id}>
+                      {t.wbsCode ? `${t.wbsCode} — ` : ''}{t.text} ({t.endDate})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className={`block font-mono font-bold uppercase tracking-wider text-[10px] mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                  Successor (Starts After Predecessor)
+                </label>
+                <select
+                  value={linkSuccessorId}
+                  onChange={(e) => setLinkSuccessorId(e.target.value)}
+                  className={`w-full rounded-xl px-3 py-2 border text-xs focus:outline-none focus:border-sky-500 ${isDark ? 'bg-slate-950 border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-900'}`}
+                >
+                  {scopedProjectTasks.map(t => (
+                    <option key={t.id} value={t.id}>
+                      {t.wbsCode ? `${t.wbsCode} — ` : ''}{t.text} ({t.startDate})
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Creates a Finish-to-Start dependency arrow, cascades downstream dates if needed, and saves to PostgreSQL.
+              </p>
+            </div>
+            <div className={`px-5 py-3.5 border-t flex items-center justify-end gap-2 ${isDark ? 'border-slate-800 bg-slate-950/60' : 'border-slate-200 bg-slate-50'}`}>
+              <button
+                type="button"
+                onClick={() => setIsLinkTasksModalOpen(false)}
+                className={`px-4 py-2 rounded-xl text-xs font-medium border transition cursor-pointer ${isDark ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-700' : 'bg-white hover:bg-slate-100 text-slate-700 border-slate-300'}`}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={!linkPredecessorId || !linkSuccessorId || linkPredecessorId === linkSuccessorId}
+                onClick={handleCreateTaskLink}
+                className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-bold text-xs transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Link2 className="w-3.5 h-3.5" />
+                <span>Create Dependency</span>
               </button>
             </div>
           </div>

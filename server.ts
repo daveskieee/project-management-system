@@ -32,6 +32,7 @@ import { attendanceRouter } from './server/routes/attendance';
 import { payrollRouter } from './server/routes/payroll';
 import { workersRouter } from './server/routes/workers';
 import { documentsRouter } from './server/routes/documents';
+import { materialsRouter } from './server/routes/materials';
 import { uploadRouter, UPLOADS_DIR } from './server/routes/upload';
 
 dotenv.config();
@@ -123,6 +124,7 @@ app.use('/api', workforceRouter);
 app.use('/api', legacyParcelsRouter);
 app.use('/api/attendance', attendanceRouter);
 app.use('/api/payroll', payrollRouter);
+app.use('/api/materials', materialsRouter);
 app.use('/api', uploadRouter);
 
 // Serve persistent user-uploaded static files from disk
